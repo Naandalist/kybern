@@ -13,11 +13,16 @@ pub struct Paths {
     pub settings: PathBuf,
 }
 
+/// `~/.kybern`, the data folder when none is given.
+pub fn default_data_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".kybern"))
+}
+
 impl Paths {
     pub fn resolve(override_root: Option<PathBuf>) -> Result<Self> {
         let root = match override_root {
             Some(r) => r,
-            None => directories::BaseDirs::new().context("no home directory")?.home_dir().join(".kybern"),
+            None => default_data_dir().context("no home directory")?,
         };
         std::fs::create_dir_all(&root)?;
         Ok(Self {

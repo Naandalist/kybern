@@ -172,10 +172,16 @@ Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
 TimeoutStopSec=30
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target
 UNIT
+  fi
+  # Units written before OOMPolicy=continue stop the daemon and every agent when one agent runs out of memory.
+  if ! grep -Eq '^OOMPolicy=' "$unit" && ! grep -Eqs '^OOMPolicy=' "$unit.d"/*.conf; then
+    mkdir -p "$unit.d"
+    printf '[Service]\nOOMPolicy=continue\n' > "$unit.d/oom.conf"
   fi
   systemctl --user daemon-reload
   systemctl --user enable --now kybernd >/dev/null 2>&1 || systemctl --user restart kybernd

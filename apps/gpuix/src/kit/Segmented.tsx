@@ -6,8 +6,12 @@
 // input. While `busy` the control keeps focus but ignores input. Replaces the Settings, Usage, PR-list and Tasks segmented
 // controls. `tone="neutral"` is the quiet Tasks style (spec §3.3): an ink thumb and the plain text colour. An icon-only segment
 // shows its label in a tooltip. Slide: `.t-tabs-pill` (250 ms smooth-out; the first placement lands without motion; Reduce Motion jumps).
+// A `fill` control follows its track's width (ADE-112): the native bounds observer reports it (after paint, then changes only,
+// at most once a frame, nothing while idle), the equal segments are computed from it, and a resize moves the thumb without a slide.
 import { motion, useGpuixRequired, type PublicInstance, type StyleDesc } from '@gpuix/react'
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { observeElementBounds } from '../native/layout.ts'
+import { fillBoxes } from './segmentedGeometry.ts'
 import { Tip } from '../nav/overlay.tsx'
 import { DURATION, EASE } from '../motion/kit.tsx'
 import { PATCHED_NATIVE } from '../native/local-build.ts'
@@ -64,6 +68,20 @@ export function Segmented({ options, value, onChange, busy = false, 'aria-label'
   const [hover, setHover] = useState<string | null>(null)
   const focus = useFocusRing()
   const layoutKey = options.map((o) => `${o.value}:${o.label}:${o.count ?? ''}`).join(',') + `|${textSize}|${padX}|${fill}`
+  // `fill`: the track's width from the native observer. Null until it reports, or without the patched build (measured then).
+  const [trackWidth, setTrackWidth] = useState<number | null>(null)
+  useEffect(() => {
+    const node = track.current
+    if (!fill || !node) return
+    try {
+      return observeElementBounds(renderer, node.id, (event) => {
+        const width = event.rect?.width
+        if (width != null && width > 0) setTrackWidth((last) => (last != null && Math.abs(last - width) < 0.5 ? last : width))
+      })
+    } catch {
+      return undefined
+    }
+  }, [fill, renderer])
 
   // Measure each segment after layout (offsets from the track's padding box), retrying until GPUI has laid it out. A changed
   // label or count still reports the previous frame's bounds here, so keep reading until two frames agree.
@@ -91,10 +109,14 @@ export function Segmented({ options, value, onChange, busy = false, 'aria-label'
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey])
 
+  const shown = fill && trackWidth != null ? fillBoxes(options.map((o) => o.value), trackWidth) : boxes
   const placed = useRef(false)
-  const pill = boxes?.[value]
-  // The first measured placement does not slide (`data-ready="false"`).
-  const slide = placed.current && !REDUCED_MOTION
+  const pill = shown?.[value]
+  // The first measured placement does not slide (`data-ready="false"`), and neither does a resize: the thumb stays on its segment.
+  const lastWidth = useRef(trackWidth)
+  const resized = lastWidth.current !== trackWidth
+  lastWidth.current = trackWidth
+  const slide = placed.current && !resized && !REDUCED_MOTION
   if (pill) placed.current = true
 
   const choose = (next: string) => {
@@ -137,14 +159,15 @@ export function Segmented({ options, value, onChange, busy = false, 'aria-label'
         const style = { position: 'absolute', top: 2, height: segmentHeight, borderRadius: size === 'sm' ? RADIUS.sm : RADIUS.segThumb, backgroundColor: thumb, pointerEvents: 'none',
           ...(neutral ? { boxShadow: { offsetX: 0, offsetY: 1, blurRadius: 2, spreadRadius: 0, color: t.variant === 'light' ? 'rgba(0, 0, 0, 0.08)' : 'rgba(0, 0, 0, 0.25)' } } : {}) } as const
         const ease = [...EASE.smoothOut] as [number, number, number, number]
+        const thumbId = testId ? `${testId}-thumb` : undefined
         // Equal-width segments (`fill`, or labels that happen to match): the pill only moves, so it slides as a paint-only translation
         // from the first segment's slot (no layout or render per frame). Different widths also change the pill's width, which needs the
         // layout tween.
-        const first = boxes?.[options[0]!.value]
-        if (first && PATCHED_NATIVE && options.every((o) => Math.abs((boxes?.[o.value]?.w ?? -1) - pill.w) < 0.5)) {
-          return <div paintTransform={{ initial: false, animate: { translateX: pill.x - first.x }, transition: { duration: slide ? DURATION.fast : 0, ease } }} style={{ ...style, left: first.x, width: pill.w }} />
+        const first = shown?.[options[0]!.value]
+        if (first && PATCHED_NATIVE && options.every((o) => Math.abs((shown?.[o.value]?.w ?? -1) - pill.w) < 0.5)) {
+          return <div testId={thumbId} paintTransform={{ initial: false, animate: { translateX: pill.x - first.x }, transition: { duration: slide ? DURATION.fast : 0, ease } }} style={{ ...style, left: first.x, width: pill.w }} />
         }
-        return <motion.div initial={false} animate={{ left: pill.x, width: pill.w }} transition={{ duration: slide ? DURATION.fast : 0, ease }} style={style} />
+        return <motion.div {...(thumbId ? { testId: thumbId } : {})} initial={false} animate={{ left: pill.x, width: pill.w }} transition={{ duration: slide ? DURATION.fast : 0, ease }} style={style} />
       })()}
       {options.map((option) => {
         const selected = option.value === value

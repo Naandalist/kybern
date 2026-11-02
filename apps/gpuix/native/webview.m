@@ -1,6 +1,8 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <Security/Security.h>
+#include <CommonCrypto/CommonDigest.h>
 
 // This library never creates NSApplication. All AppKit/WebKit operations run on
 // GPUI's main queue; Bun receives queued events through a threadsafe wakeup.
@@ -81,8 +83,48 @@ static BOOL releaseFocus(NSWindow *window) {
 @property NSString *wrapperHTML;
 @property BOOL lastVisible;
 @property BOOL hasVisibility;
+/// SHA-256 fingerprints (lowercase hex of the DER) of the certificates this document accepts for its `https://localhost`
+/// origin: the per-install certificate of a port forward's Fast (HTTP/2) listener. Nothing else is trusted this way.
+@property NSArray<NSString *> *trustedCertificates;
 @end
+static BOOL isLoopbackHost(NSString *host) {
+  host = host.lowercaseString;
+  return [host isEqual:@"localhost"] || [host isEqual:@"127.0.0.1"] || [host isEqual:@"::1"] || [host isEqual:@"[::1]"];
+}
+static NSString *leafFingerprint(SecTrustRef trust) {
+  CFArrayRef chain = SecTrustCopyCertificateChain(trust);
+  if (!chain) return nil;
+  NSString *hex = nil;
+  if (CFArrayGetCount(chain) > 0) {
+    SecCertificateRef leaf = (SecCertificateRef)CFArrayGetValueAtIndex(chain, 0);
+    CFDataRef der = SecCertificateCopyData(leaf);
+    if (der) {
+      unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+      CC_SHA256(CFDataGetBytePtr(der), (CC_LONG)CFDataGetLength(der), digest);
+      NSMutableString *text = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+      for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [text appendFormat:@"%02x", digest[i]];
+      hex = text; CFRelease(der);
+    }
+  }
+  CFRelease(chain);
+  return hex;
+}
 @implementation KybernWebHost
+// A Fast preview's `https://localhost` listener presents Kybern's own certificate, which no trust store knows: accept it
+// only for a loopback host of an allowed origin and only when the leaf is exactly the pinned certificate.
+- (void)webView:(WKWebView *)web didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))done {
+  NSURLProtectionSpace *space = challenge.protectionSpace;
+  SecTrustRef trust = space.serverTrust;
+  if ([space.authenticationMethod isEqual:NSURLAuthenticationMethodServerTrust] && trust && self.trustedCertificates.count && isLoopbackHost(space.host)) {
+    NSURLComponents *origin = [NSURLComponents new]; origin.scheme = @"https"; origin.host = space.host; origin.port = @(space.port); origin.path = @"/";
+    NSString *fingerprint = leafFingerprint(trust);
+    if (fingerprint && [self.trustedCertificates containsObject:fingerprint] && origin.URL && [self allowsURL:origin.URL]) {
+      done(NSURLSessionAuthChallengeUseCredential, [NSURLCredential credentialForTrust:trust]);
+      return;
+    }
+  }
+  done(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
 - (void)webView:(WKWebView *)web startURLSchemeTask:(id<WKURLSchemeTask>)task {
   if (![task.request.URL isEqual:self.wrapperURL]) { [task didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorResourceUnavailable userInfo:nil]]; return; }
   NSData *html = [self.wrapperHTML dataUsingEncoding:NSUTF8StringEncoding];
@@ -251,6 +293,7 @@ void kybern_web_command(const char *json) {
       if (!window) { emit(@{@"id":identifier,@"type":@"failed",@"message":@"The preview window is unavailable."}); return; }
       host = [KybernWebHost new]; host.identifier = identifier; host.category = cmd[@"category"]; host.generation = cmd[@"generation"];
       host.allowedOrigins = cmd[@"allowedOrigins"];
+      host.trustedCertificates = [cmd[@"trustedCertificates"] isKindOfClass:NSArray.class] ? cmd[@"trustedCertificates"] : @[];
       host.wrapperHTML = cmd[@"html"]; host.wrapperURL = [NSURL URLWithString:[@"tauri://localhost/embedded/" stringByAppendingString:[identifier stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet]]];
       WKWebViewConfiguration *config = [WKWebViewConfiguration new]; config.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
       [config setURLSchemeHandler:host forURLScheme:@"tauri"];

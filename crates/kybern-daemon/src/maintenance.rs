@@ -81,6 +81,13 @@ pub fn next_idle_since(
     Some(latest_event.map_or(started, |event| event.max(started)))
 }
 
+/// Whether the idle exit may stop this daemon. A daemon that keeps this machine reachable for its
+/// network (`settings.network.keep_reachable`, ADE-119) stays up: the other members need it while
+/// no client is connected.
+pub fn idle_exit_allowed(allow_idle_exit: bool, keeps_reachable: bool) -> bool {
+    allow_idle_exit && !keeps_reachable
+}
+
 /// Whether another daemon has taken over this data directory: the port file
 /// names a different port than ours. Clients follow the port file, so nobody
 /// new can reach a superseded daemon; it should finish its work and exit
@@ -132,7 +139,8 @@ pub async fn sweep(state: &AppState, policy: &BackgroundSettings, allow_idle_exi
         *idle_since = next_idle_since(*idle_since, is_busy(&activity, updating), latest_event, now);
         *idle_since
     };
-    if allow_idle_exit && idle_exit_due(idle_since, policy.daemon_idle_exit(), now) {
+    let may_exit = idle_exit_allowed(allow_idle_exit, crate::login_service::wanted(state));
+    if may_exit && idle_exit_due(idle_since, policy.daemon_idle_exit(), now) {
         tracing::info!(idle_since = ?idle_since, "nothing has used the daemon; exiting until a client starts it again");
         state.shutdown.cancel();
     } else if idle_since.is_some()
@@ -202,6 +210,13 @@ mod tests {
         assert_eq!(superseded_by(Some("garbage"), 4199), None);
         assert_eq!(superseded_by(Some("0"), 4199), None);
         assert_eq!(superseded_by(Some("4200"), 0), None, "not listening yet");
+    }
+
+    #[test]
+    fn a_daemon_that_keeps_its_machine_reachable_is_never_idle_exited() {
+        assert!(idle_exit_allowed(true, false));
+        assert!(!idle_exit_allowed(true, true), "the network needs it");
+        assert!(!idle_exit_allowed(false, false), "a --pair daemon waits for its device");
     }
 
     #[test]

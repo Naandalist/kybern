@@ -1,5 +1,5 @@
 use super::*;
-use kybern_protocol::{EventPayload, ThreadId, ThreadStatus, methods::SessionsResumeParams};
+use kybern_protocol::{EventPayload, PermissionMode, ThreadId, ThreadStatus, methods::SessionsResumeParams};
 
 /// A scratch HOME with Claude and pi history, a few repositories, and a daemon state
 /// whose harness settings point at them. No real harness is started: scans name
@@ -29,6 +29,12 @@ fn fixture() -> Fixture {
     let pi = settings.providers.entry(ProviderKind::Pi).or_default();
     pi.env.insert("HOME".into(), home);
     pi.env.insert("PI_CODING_AGENT_DIR".into(), root.join("pi").to_string_lossy().into_owned());
+    settings
+        .providers
+        .entry(ProviderKind::Antigravity)
+        .or_default()
+        .env
+        .insert("HOME".into(), root.join("home").to_string_lossy().into_owned());
     state.settings.set(settings).unwrap();
     Fixture { state, root }
 }
@@ -78,6 +84,40 @@ impl Fixture {
         std::fs::write(&path, lines.iter().map(|line| line.to_string() + "\n").collect::<String>()).unwrap();
         set_age(&path, age);
         path
+    }
+
+    /// An Antigravity conversation under `home/.gemini/antigravity-cli`. `workspace` is the folder
+    /// agy recorded; without one, the first command's `Cwd` is the only trace of the folder.
+    fn agy(&self, id: &str, workspace: Option<&Path>, cwd: &Path, parent: Option<&str>, age: chrono::Duration) {
+        let store = self.root.join("home/.gemini/antigravity-cli");
+        let logs = store.join("brain").join(id).join(".system_generated/logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let db = rusqlite::Connection::open(store.join("conversation_summaries.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT, step_count INTEGER,
+                last_modified_time INTEGER, workspace_uris TEXT, parent_conversation_id TEXT);",
+        )
+        .unwrap();
+        // `file:///C:/x` on Windows, `file:///x` elsewhere, as an editor sends it.
+        let uris = workspace.map(|path| {
+            let text = path.to_string_lossy().replace('\\', "/");
+            let uri = if text.starts_with('/') { format!("file://{text}") } else { format!("file:///{text}") };
+            serde_json::json!([uri]).to_string()
+        });
+        db.execute(
+            "INSERT INTO conversation_summaries VALUES (?1, ?2, '', 3, ?3, ?4, ?5)",
+            rusqlite::params![id, format!("Agy {id}"), (Utc::now() - age).timestamp_millis(), uris, parent],
+        )
+        .unwrap();
+        let at = (Utc::now() - age).to_rfc3339();
+        let steps = [
+            serde_json::json!({"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":at,"content":format!("Agy question {id}")}),
+            serde_json::json!({"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":at,"content":"Checking",
+                "tool_calls":[{"name":"run_command","args":{"CommandLine":"\"ls\"","Cwd":serde_json::to_string(&cwd.to_string_lossy()).unwrap()}}]}),
+            serde_json::json!({"step_index":2,"source":"MODEL","type":"RUN_COMMAND","status":"DONE","created_at":at,"content":"Cargo.toml"}),
+            serde_json::json!({"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":at,"content":"Agy answer"}),
+        ];
+        std::fs::write(logs.join("transcript.jsonl"), steps.iter().map(|step| step.to_string() + "\n").collect::<String>()).unwrap();
     }
 
     async fn scan(&self) -> SessionsScan {
@@ -541,4 +581,78 @@ async fn resuming_one_session_still_makes_its_own_project_and_stamps_now() {
         .await
         .unwrap();
     assert_eq!(again.id, thread.id);
+}
+
+#[tokio::test]
+async fn antigravity_conversations_group_by_repository_and_import_with_their_cards() {
+    let f = fixture();
+    let repo = f.dir("app", true);
+    let sub = f.dir("app/packages/web", false);
+    let other = f.dir("other", true);
+    f.agy("g1", Some(&repo), &repo, None, days(10));
+    f.agy("g2", Some(&sub), &sub, None, days(3));
+    f.agy("g3", None, &sub, None, days(2));
+    f.agy("g4", Some(&other), &other, None, days(1));
+    f.agy("child", Some(&repo), &repo, Some("g1"), days(1));
+    f.agy("live", Some(&repo), &repo, None, chrono::Duration::seconds(5));
+    f.claude("c1", &repo, days(4));
+    let kinds = vec![ProviderKind::Antigravity, ProviderKind::ClaudeCode];
+
+    let scan = f.state.session_imports.start_scan(&f.state, SessionsScanProjectsParams { providers: Some(kinds.clone()) });
+    let scan = loop {
+        let current = f.state.session_imports.scan_get(&scan.scan_id).unwrap();
+        if current.state != SessionsJobState::Running {
+            break current;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(scan.sessions_found, 6, "four conversations, the one being written, and the Claude session; the sub-agent is not listed");
+    assert_eq!(scan.sessions_without_folder, 0, "the Cwd of a command stands in for a missing workspace");
+    assert!(scan.providers.iter().all(|status| status.state == ScanProviderState::Done && status.error.is_none()));
+    let app = scan.projects.iter().find(|project| project.root == root_of(&repo)).unwrap();
+    assert_eq!(app.session_count, 5);
+    let count = |kind| app.providers.iter().find(|count| count.provider == kind).map(|count| count.sessions);
+    assert_eq!((count(ProviderKind::Antigravity), count(ProviderKind::ClaudeCode)), (Some(4), Some(1)));
+
+    let root = SessionsImportRoot { root: root_of(&repo), project_id: None, providers: Some(kinds.clone()), limit: None };
+    let job = f.import(vec![root], Some(scan.scan_id.clone())).await;
+    assert_eq!(job.state, SessionsJobState::Done);
+    let project = &job.projects[0];
+    assert_eq!((project.total, project.imported, project.skipped_count), (5, 4, 1));
+    assert_eq!(project.skipped[0].session_id, "live");
+    assert_eq!(project.skipped[0].reason, SessionSkipReason::InUse);
+
+    let threads = f.state.store.threads_list(None, true).unwrap();
+    let agy_thread = |id: &str| threads.iter().find(|thread| thread.provider_session_id.as_deref() == Some(id)).unwrap();
+    assert!(threads.iter().all(|thread| thread.project_id == project.project_id.unwrap()), "the other repository was not imported");
+    assert!(
+        threads
+            .iter()
+            .all(|thread| thread.provider_session_id.as_deref() != Some("g4") && thread.provider_session_id.as_deref() != Some("child"))
+    );
+    let g2 = agy_thread("g2");
+    assert_eq!(g2.provider.kind, ProviderKind::Antigravity);
+    assert_eq!(g2.provider_session_id.as_deref(), Some("g2"), "resuming passes this id as --conversation");
+    assert_eq!(g2.title, "Agy g2");
+    assert_eq!(Path::new(&g2.cwd), sub, "compared as paths: Windows spells the separators one way");
+    assert_eq!(Path::new(&agy_thread("g3").cwd), sub);
+    assert_eq!(g2.permission_mode, PermissionMode::FullAccess, "Antigravity only runs in Full access");
+    let age = Utc::now().signed_duration_since(g2.updated_at).num_hours() as f64 / 24.0;
+    assert!((age - 3.0).abs() < 0.1, "keeps its own last activity, got {age} days");
+    let events = f.state.store.events_for_thread(g2.id).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.payload, EventPayload::TurnStarted { message, .. } if message.plain_text() == "Agy question g2"))
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(&event.payload, EventPayload::ToolCallStarted { call, .. } if call.id == "agy:g2:2" && call.name == "Bash")
+        )
+    );
+
+    // Running it again changes nothing, and the source folder is still just what the test wrote.
+    let again =
+        f.import(vec![SessionsImportRoot { root: root_of(&repo), project_id: None, providers: Some(kinds), limit: None }], None).await;
+    assert_eq!((again.imported, again.already_imported), (0, 4));
 }

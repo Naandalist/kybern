@@ -12,6 +12,8 @@ import { PopupLayer } from '../src/composer/Menu.tsx'
 import { ThemeProvider } from '../src/ui.tsx'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { X509Certificate } from 'node:crypto'
 
 const light = process.env.KYBERN_APPEARANCE === 'light'
 const log: WebEvent[] = []
@@ -37,13 +39,28 @@ const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Resp
 const url = `http://127.0.0.1:${server.port}/visual`
 const ID = 'lab'
 
+// A Fast preview (ADE-116): an HTTPS loopback page whose self-signed certificate the preview pins. A second server on another
+// port presents a different certificate: a preview pinning the first one must still refuse it.
+function tlsServer() {
+  const dir = mkdtempSync(path.join(tmpdir(), 'kybern-lab-tls-')), key = path.join(dir, 'key.pem'), cert = path.join(dir, 'cert.pem')
+  const made = Bun.spawnSync(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1',
+    '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'])
+  if (made.exitCode !== 0) return null
+  const pem = readFileSync(cert, 'utf8')
+  const fast = `<!doctype html><script>parent.postMessage({kind:'tls-ok'},'*')</script>`
+  const tls = Bun.serve({ hostname: '127.0.0.1', port: 0, tls: { cert: pem, key: readFileSync(key, 'utf8') }, fetch: () => new Response(fast, { headers: { 'content-type': 'text/html' } }) })
+  return { tls, url: `https://127.0.0.1:${tls.port}/`, trust: { sha256: new X509Certificate(pem).fingerprint256.replaceAll(':', ''), pem } }
+}
+let pinned: ReturnType<typeof tlsServer> | undefined
+const others: { stop(): void }[] = []
+
 function Lab() {
   const renderer = useGpuixRequired(), slot = useRef<PublicInstance | null>(null)
   const [popup, setPopup] = useState(false), [result, setResult] = useState('')
   useEffect(() => {
     const stop = webHost.subscribe(event => { log.push(event); if (event.type === 'loaded') webHost.theme(ID, { appearance: light ? 'light' : 'dark', variables: {} }) })
     webHost.create(ID, url, 'visual')
-    return () => { stop(); webHost.destroy(ID); server.stop() }
+    return () => { stop(); webHost.destroy(ID); webHost.destroy('fast'); webHost.destroy('plain'); server.stop(); pinned?.tls.stop(); for (const tls of others) tls.stop() }
   }, [])
   useEffect(() => {
     if (!slot.current) return
@@ -61,11 +78,23 @@ function Lab() {
     if (key === 's') webHost.snapshot(ID, path.join(tmpdir(), 'kybern-wp10-lab-snapshot.png'), 1)
     if (key === 'e') webHost.present(ID, { opacity: 1, scale: 1 }, { from: { opacity: 0, scale: 0.96 }, duration: 0.3, ease: [0.23, 1, 0.32, 1], origin: [0.5, 0.5] })
     if (key === 'h') webHost.hide(ID)
+    if (key === 't' && pinned === undefined) {
+      pinned = tlsServer()
+      if (!pinned) log.push({ id: 'fast', type: 'failed', message: 'openssl is missing' } as unknown as WebEvent)
+      else {
+        webHost.create('fast', pinned.url, 'server', pinned.trust)
+        const other = tlsServer()
+        if (other) {
+          others.push(other.tls)
+          setTimeout(() => pinned && webHost.create('plain', other.url, 'server', pinned.trust), 3000)
+        }
+      }
+    }
   }
   const bg = light ? '#f2f2f2' : '#242424', fg = light ? '#111' : '#eee'
   return <div testId="app-ready" style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', backgroundColor: bg }}>
     <text style={{ color: fg, height: 40, padding: 12 }}>WP10 Linux web view lab (WPE → GPUIX texture)</text>
-    <div style={{ display: 'flex', gap: 10, paddingLeft: 16, height: 34 }}>{[['p', 'Menu'], ['i', 'Inspect'], ['s', 'Snapshot'], ['e', 'Present'], ['h', 'Hide']].map(([key, label]) =>
+    <div style={{ display: 'flex', gap: 10, paddingLeft: 16, height: 34 }}>{[['p', 'Menu'], ['i', 'Inspect'], ['s', 'Snapshot'], ['e', 'Present'], ['h', 'Hide'], ['t', 'TLS']].map(([key, label]) =>
       <div key={key} testId={`action-${key}`} onClick={() => act(key!)} style={{ width: 96, height: 28, backgroundColor: light ? '#ddd' : '#444', borderRadius: 6 }}><text style={{ color: fg, pointerEvents: 'none' }}>{label}</text></div>)}</div>
     <div testId="web-clip" style={{ position: 'absolute', left: 20, top: 100, width: 560, height: 300, borderRadius: 28, overflow: 'hidden', backgroundColor: light ? '#e2e6f5' : '#2c3350' }}>
       <div ref={slot} testId="web-slot" style={{ width: '100%', height: '100%', position: 'relative' }}><WebSurface id={ID} /></div>

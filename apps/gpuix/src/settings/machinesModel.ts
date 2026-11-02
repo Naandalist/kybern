@@ -2,7 +2,7 @@
 // reported and the machine's own `machines.info`. Pure, so the words are tested without a window.
 import { looksGeneratedName, shortMachineName } from '../../../../packages/kybern-client/src/forkMachine.ts'
 import { harnessChips, machineSpecs, osKind, type HarnessChip, type MachineSpecs, type OsKind } from '../../../../packages/kybern-client/src/machineSpecs.ts'
-import type { MachineCard, MachineId, MachineInfo } from '../../../../packages/kybern-client/src/types.ts'
+import type { KeepReachableStatus, MachineCard, MachineId, MachineInfo } from '../../../../packages/kybern-client/src/types.ts'
 import type { MachineRow } from '../machines/index.ts'
 import { statusText, statusTone, type Tone } from '../machines/format.ts'
 
@@ -90,4 +90,17 @@ export type { DoctorRow, OutboxRowModel, UpdateResultRow } from '../../../../pac
 /** Members whose name looks made up by a host or an installer (`srv1544252`, `VM-3-60-ubuntu`): the ones worth renaming. */
 export function unnamedMachines(cards: readonly Pick<MachineCardModel, 'name' | 'member' | 'canRename'>[]): typeof cards {
   return cards.filter((card) => card.member && card.canRename && looksGeneratedName(card.name))
+}
+
+/**
+ * "Keep this machine reachable when Kybern is closed": what the switch's row says, or null where this machine cannot
+ * register a login item (an older daemon, an unsupported system). A problem replaces the explanation.
+ */
+export function reachableRow(status: KeepReachableStatus | null | undefined): { description: string; problem: boolean; locked: boolean } | null {
+  if (!status?.kind) return null
+  if (status.external) return { description: 'Another service on this computer already starts Kybern when you sign in.', problem: false, locked: true }
+  const problem = status.error ?? status.warnings?.[0]
+  if (problem) return { description: problem, problem: true, locked: false }
+  if (!status.enabled) return { description: 'Your other machines reach this one only while Kybern is open.', problem: false, locked: false }
+  return { description: 'Kybern starts in the background when you sign in, so your other machines reach this one with the app closed.', problem: false, locked: false }
 }

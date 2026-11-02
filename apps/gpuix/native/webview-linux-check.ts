@@ -73,6 +73,14 @@ for (const appearance of ['dark', 'light']) {
       const hidden = pngPixels(await capture(f, path.join(output, `${appearance}-hidden.png`))), scale = hidden.width / 780
       check(tag('a hidden page leaves the placeholder'), near(hidden.at(Math.round(at(170, 70).x * scale), Math.round(at(170, 70).y * scale)), hex(appearance === 'light' ? '#e2e6f5' : '#2c3350'), 12))
     }
+    // ADE-116 Fast preview: the pinned certificate loads only in the preview that pins it.
+    await a.getByTestId('action-t').click()
+    const tlsOk = (l: any[], id: string) => l.some(e => e.id === id && e.data?.kind === 'tls-ok')
+    log = await until(l => tlsOk(l, 'fast'), 15000)
+    check(tag('a Fast preview loads its pinned certificate'), tlsOk(log, 'fast'), JSON.stringify(log.filter(e => e.id === 'fast')))
+    await Bun.sleep(8000)
+    log = await inspect()
+    check(tag('a pinned preview still refuses a different certificate on loopback'), !tlsOk(log, 'plain') && log.some(e => e.id === 'plain'), JSON.stringify(log.filter(e => e.id === 'plain')))
     writeFileSync(path.join(output, `${appearance}-events.json`), JSON.stringify(await inspect(), null, 1))
   } catch (error) {
     check(tag('run'), false, String(error))

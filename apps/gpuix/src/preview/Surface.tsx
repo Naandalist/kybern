@@ -97,7 +97,7 @@ export function PreviewSurface({ threadId }: { threadId: string }) {
         }
       }
     })
-    try { generation = webHost.create(id, entry.frameUrl ?? entry.url, entry.kind) }
+    try { generation = webHost.create(id, entry.frameUrl ?? entry.url, entry.kind, entry.trust) }
     catch (error) { setPreview(threadId, { error: String(error) }) }
     return () => { alive = false; ready.current = false; clearTimeout(hiddenTimer.current); hiddenTimer.current = undefined; stop(); webHost.destroy(id); releasePreviewEntry(entry) }
   }, [id, threadId, entry])

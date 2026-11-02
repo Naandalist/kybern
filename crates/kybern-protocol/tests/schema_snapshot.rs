@@ -472,12 +472,12 @@ fn an_older_daemon_info_and_project_still_parse_and_the_network_defaults_to_off(
     .unwrap();
     assert_eq!((old.machine_id.as_str(), old.network_protocol, old.features.len()), ("", 0, 0));
     let settings: Settings = serde_json::from_value(serde_json::json!({})).unwrap();
-    assert_eq!(settings.network, NetworkSettings { configured: false, enabled: false, port: DEFAULT_PORT });
+    assert_eq!(settings.network, NetworkSettings { configured: false, enabled: false, port: DEFAULT_PORT, keep_reachable: true });
     // A settings file from before the default changed, saved with the network on, keeps it on.
     let saved: Settings = serde_json::from_value(serde_json::json!({ "network": { "enabled": true } })).unwrap();
-    assert_eq!(saved.network, NetworkSettings { configured: true, enabled: true, port: DEFAULT_PORT });
+    assert_eq!(saved.network, NetworkSettings { configured: true, enabled: true, port: DEFAULT_PORT, keep_reachable: true });
     assert_eq!(NETWORK_PROTOCOL, 1);
-    assert_eq!(features::ALL.len(), 21);
+    assert_eq!(features::ALL.len(), 23);
 }
 
 #[test]

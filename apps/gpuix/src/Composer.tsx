@@ -10,6 +10,7 @@ import { coordinatorOpenParams, openingMessageText } from '../../../packages/kyb
 import { createdThreadId, optimisticThread, uuidv7, type NewChatCreate } from '../../../packages/kybern-client/src/newChat.ts'
 import { newChats, optimisticCreates, useNewChat } from './composer/newChats.ts'
 import { machineName } from './composer/outbox.ts'
+import { countComposerSend } from './shell/starPromptApp.ts'
 import { getNav } from './nav/store.ts'
 import { removePending } from './composer/pending.ts'
 import { goPage, openThread } from './nav/history.ts'
@@ -831,6 +832,8 @@ export function ComposerView(input: ComposerViewProps) {
     focusEditor()
     try {
       await props.onSend({ parts }, running ? (delivery === 'steer' && props.canSteer ? 'steer' : 'queue') : 'send', snapshot)
+      // A message the person sent, steered or queued: the star prompt's count (`shell/starPrompt.ts`).
+      countComposerSend()
       completion.reset()
       if (hold) {
         // The page has usually switched already; clear what this composer saved so the next new chat starts empty.

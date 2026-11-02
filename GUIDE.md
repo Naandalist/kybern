@@ -405,6 +405,28 @@ every value is in minutes and `0` turns that limit off.
 agent processes (live and idle), terminals, queued follow-ups, and when it
 would exit if idle exit is on.
 
+### Keep this machine reachable when Kybern is closed
+
+While a machine is in a machine network with Connect to your other machines
+on, its daemon registers a per-user login item so it starts when you sign in
+and your other machines reach it with no app window open: a Task Scheduler
+task on Windows (`\Kybern\kybernd`, run headless), a LaunchAgent on macOS
+(`~/Library/LaunchAgents/dev.kybern.kybernd.login.plist`), and a
+`systemd --user` service on Linux (`kybern-login.service`, or an XDG
+autostart entry without a user systemd). Nothing needs administrator rights.
+The item is removed when the machine leaves or is removed from the network,
+the network is turned off, or you turn the setting off in Settings → Machines
+or with `kybern machines reachable off`. Such a daemon is never stopped by
+the idle exit. The setting is `network.keep_reachable` (default on) and is
+per machine, like the rest of the `network` section.
+
+After the computer wakes from sleep, or when Tailscale shows a machine coming
+back, the daemon retries its machines at once instead of waiting out its
+reconnect backoff. `kybern machines doctor` reports whether the login item is
+registered, and on Linux a Kybern service unit that lacks `OOMPolicy=continue`
+(without it, one agent running out of memory stops the daemon and every other
+agent; the daemon adds a drop-in for older units when it starts).
+
 ## Accounts and continuing conversations
 
 Add accounts in Settings → Agent providers → Accounts. Each named account uses

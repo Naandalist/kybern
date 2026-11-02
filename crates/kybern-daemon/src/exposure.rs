@@ -179,6 +179,11 @@ fn serve_on(listener: tokio::net::TcpListener, addr: SocketAddr, router: Router,
     let cancelled = stop.clone();
     tokio::spawn(async move {
         let shutdown = async move { cancelled.cancelled().await };
+        use axum::serve::ListenerExt as _;
+        // TCP_NODELAY: the machine network's session frames and relayed pages are small, latency-bound writes.
+        let listener = listener.tap_io(|socket| {
+            let _ = socket.set_nodelay(true);
+        });
         if let Err(error) =
             axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown).await
         {

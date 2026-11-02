@@ -28,6 +28,40 @@ fn pass(id: &str, title: impl Into<String>, machine_id: Option<&str>) -> DoctorC
     check(id, DoctorStatus::Pass, title, None, machine_id)
 }
 
+/// Whether this machine stays reachable when the app is closed (ADE-119), and what is wrong with the
+/// services that start it.
+fn keep_reachable_checks(state: &AppState) -> Vec<DoctorCheck> {
+    let mut checks: Vec<DoctorCheck> = state
+        .login_service
+        .warnings(state)
+        .into_iter()
+        .map(|(id, title, next)| check(&id, DoctorStatus::Warn, title, Some(&next), None))
+        .collect();
+    let status = state.login_service.status(state);
+    let member = state.network.membership().is_some_and(|membership| membership.self_is_member() && !membership.self_removed());
+    if status.kind.is_none() || !member || !state.network.is_enabled() {
+        return checks;
+    }
+    let next = "Turn on Keep this machine reachable in Settings → Machines, or run `kybern machines reachable on`.";
+    checks.push(match (&status.external, status.enabled, status.registered, &status.error) {
+        (Some(external), _, _, _) => pass("service.login", external.clone(), None),
+        (None, false, _, _) => {
+            check("service.login", DoctorStatus::Warn, "Other machines lose this one when Kybern is closed", Some(next), None)
+        }
+        (None, true, true, None) => {
+            pass("service.login", "Kybern starts at login, so other machines reach this one when the app is closed", None)
+        }
+        (None, true, _, error) => check(
+            "service.login",
+            DoctorStatus::Warn,
+            error.clone().unwrap_or_else(|| "Kybern is not registered to start at login yet".into()),
+            Some("Turn Keep this machine reachable off and on again in Settings → Machines, or run `kybern machines reachable on`."),
+            None,
+        ),
+    });
+    checks
+}
+
 /// Run the checks. `only` limits the per-peer checks to one machine and skips the machine-wide ones.
 pub async fn report(state: &AppState, only: Option<&str>) -> DoctorReport {
     let network = &state.network;
@@ -106,6 +140,7 @@ pub async fn report(state: &AppState, only: Option<&str>) -> DoctorReport {
             )),
             _ => {}
         }
+        checks.extend(keep_reachable_checks(state));
         if !membership.has_network() {
             checks.push(check(
                 "membership.self_member",

@@ -44,6 +44,8 @@ describe('verified persistent remote installer', () => {
       const unit = await readFile(path.join(f.home, '.config/systemd/user/kybernd.service'), 'utf8')
       expect(unit).toContain(`--data-dir ${f.home}/.kybern`)
       expect(unit).toContain('Restart=on-failure')
+      // One agent running out of memory must not stop the daemon and every other agent.
+      expect(unit).toContain('\nOOMPolicy=continue\n')
       const calls = await f.calls()
       expect(calls).toContain('/releases/download/v9.8.7/kybern-x86_64-unknown-linux-musl.tar.xz')
       expect(calls).toContain('.tar.xz.sha256')
@@ -70,6 +72,18 @@ describe('verified persistent remote installer', () => {
       expect(plist).toContain('<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>')
       expect(plist).toContain(`<string>${f.home}/.kybern</string>`)
       expect(await f.calls()).toContain('launchctl bootstrap gui/')
+    } finally { await f.close() }
+  })
+  test('an existing Kybern unit without an OOM policy gets the drop-in and is not rewritten', async () => {
+    const f = await fixture()
+    try {
+      const unit = path.join(f.home, '.config/systemd/user/kybernd.service')
+      const old = `[Unit]\nDescription=Kybern agent daemon\n[Service]\nExecStart=${f.home}/.cargo/bin/kybernd --bind 127.0.0.1 --port 4173 --data-dir ${f.home}/.kybern\nRestart=on-failure\n`
+      await mkdir(path.dirname(unit), { recursive: true }); await writeFile(unit, old)
+      expect((await f.run(['--service'])).code).toBe(0)
+      expect(await readFile(unit, 'utf8')).toBe(old)
+      expect(await readFile(`${unit}.d/oom.conf`, 'utf8')).toBe('[Service]\nOOMPolicy=continue\n')
+      expect(await f.calls()).toContain('systemctl --user daemon-reload')
     } finally { await f.close() }
   })
   test('does not claim persistence without lingering and does not overwrite a different service', async () => {

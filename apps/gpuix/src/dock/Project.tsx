@@ -79,9 +79,9 @@ export function ProjectPane({ thread }: { thread: Thread }) {
       {space.memory.length ? space.memory.map((note) => <NoteRow key={note.id} note={note} onClick={() => setSelected(note)} />) : <Hint key="memory-empty">{PROJECT_SPACE_COPY.memoryEmpty}</Hint>}
       <div key="coordinator-heading" style={{ paddingTop: 8 }}><Section label={COPY.section}><Button variant="ghost" size="sm" onClick={() => setConfirm('redo')}>{COPY.redo}</Button></Section></div>
       <div key="coordinator" style={{ display: 'flex', flexDirection: 'column', gap: 14, marginLeft: 6, marginRight: 6, padding: 10, paddingBottom: 6, borderRadius: 8, borderWidth: 1, borderColor: t.borderLight }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><Choice label={COPY.autonomy} value={effective.lead_autonomy} options={AUTONOMY_OPTIONS} disabled={busy} onChange={value => void write(withOverrideField(current(), 'lead_autonomy', value as typeof effective.lead_autonomy))} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><Choice testId="dock-project-autonomy" label={COPY.autonomy} value={effective.lead_autonomy} options={AUTONOMY_OPTIONS} disabled={busy} onChange={value => void write(withOverrideField(current(), 'lead_autonomy', value as typeof effective.lead_autonomy))} />
         <Label color={t.textTertiary} size={13} lineHeight={18.2}>{AUTONOMY_OPTIONS.find(o => o.value === effective.lead_autonomy)!.hint}</Label></div>
-        <Choice label={COPY.workspace} value={effective.lead_workspace} options={WORKSPACE_OPTIONS} disabled={busy} onChange={value => void write(withOverrideField(current(), 'lead_workspace', value as typeof effective.lead_workspace))} />
+        <Choice testId="dock-project-workspace" label={COPY.workspace} value={effective.lead_workspace} options={WORKSPACE_OPTIONS} disabled={busy} onChange={value => void write(withOverrideField(current(), 'lead_workspace', value as typeof effective.lead_workspace))} />
         <RotationBudget value={project?.coordinator?.rotation_budget_tokens} disabled={busy} onChange={value => void write(withOverrideField(current(), 'rotation_budget_tokens', value))} />
         <SwitchRow title={COPY.push} detail={COPY.pushDetail} checked={effective.lead_push_without_asking} disabled={busy} onChange={() => void write(withOverrideField(current(), 'lead_push_without_asking', !effective.lead_push_without_asking))} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><Label color={t.textSecondary} size={13} lineHeight={16}>{COPY.models}</Label><div style={{ display: 'flex', flexDirection: 'column', borderRadius: 8, borderWidth: 1, borderColor: t.borderLight, backgroundColor: t.v('--color-background-elevated-primary-opaque'), overflow: 'hidden' }}>
@@ -142,11 +142,11 @@ function RotationBudget({ value, disabled, onChange }: { value: number | null | 
   </div>
 }
 
-function Choice({ label, value, options, disabled, onChange }: { label: string; value: string; options: readonly { value: string; label: string }[]; disabled: boolean; onChange: (value: string) => void }) {
+function Choice({ testId, label, value, options, disabled, onChange }: { testId: string; label: string; value: string; options: readonly { value: string; label: string }[]; disabled: boolean; onChange: (value: string) => void }) {
   const t = useTheme()
   return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
     <Label color={t.textSecondary} size={13} lineHeight={16}>{label}</Label>
-    <Segmented fill aria-label={label} busy={disabled} value={value} onChange={onChange} options={options.map((o) => ({ value: o.value, label: o.label }))} />
+    <Segmented fill testId={testId} aria-label={label} busy={disabled} value={value} onChange={onChange} options={options.map((o) => ({ value: o.value, label: o.label }))} />
   </div>
 }
 

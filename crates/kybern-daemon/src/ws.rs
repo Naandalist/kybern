@@ -725,13 +725,37 @@ async fn run(state: AppState, socket: WebSocket, principal: Principal) {
     tracing::info!("client disconnected");
 }
 
-/// A frame sink over a connection's outbox: what a [`PeerLink`] writes to on the accepting side.
-struct OutboxSink(Outbox);
+/// A frame sink over a connection's outbox and a data lane: what a [`PeerLink`] writes to on the accepting side. Control
+/// frames keep the outbox's 30 s limit (a socket that takes nothing for that long is broken); stream data waits in the
+/// lane for as long as the route needs.
+struct OutboxSink {
+    out: Outbox,
+    bulk: peers::BulkLane,
+}
 
 #[async_trait::async_trait]
 impl FrameSink for OutboxSink {
     async fn send(&self, frame: Value) -> bool {
-        self.0.send(frame).await.is_ok()
+        self.out.send(frame).await.is_ok()
+    }
+
+    async fn send_bulk(&self, frame: peers::Outgoing) -> bool {
+        self.bulk.send(frame).await
+    }
+}
+
+/// The message for a member's socket of a frame [`peers::next_frame`] picked, and the budget to release once it is sent.
+fn machine_message(frame: Result<QueuedFrame, peers::BulkFrame>) -> (Message, Option<tokio::sync::OwnedSemaphorePermit>) {
+    match frame {
+        Ok(QueuedFrame { text, _permit }) => (Message::Text(text.into()), Some(_permit)),
+        Err(data) => {
+            let (message, held) = data.into_parts();
+            let message = match message {
+                peers::Outgoing::Text(text) => Message::Text(text.into()),
+                peers::Outgoing::Binary(bytes) => Message::Binary(bytes.into()),
+            };
+            (message, Some(held))
+        }
     }
 }
 
@@ -745,26 +769,38 @@ async fn run_machine(state: AppState, socket: WebSocket, principal: Principal) {
     let (ping_tx, mut ping_rx) = mpsc::channel::<()>(1);
     let closed = tokio_util::sync::CancellationToken::new();
     let out = Outbox { sender: out_tx, budget: Arc::new(tokio::sync::Semaphore::new(OUTBOX_BYTES)), closed: closed.clone() };
-    let link =
-        PeerLink::new(machine_id, Direction::Accepted, Some(principal.token_id), principal.scopes.clone(), Arc::new(OutboxSink(out)));
+    let (bulk, mut bulk_rx) = peers::BulkLane::new(closed.clone());
+    let link = PeerLink::new(
+        machine_id,
+        Direction::Accepted,
+        Some(principal.token_id),
+        principal.scopes.clone(),
+        Arc::new(OutboxSink { out, bulk }),
+    );
     let writer_link = link.clone();
     let writer_closed = closed.clone();
     let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
+                biased;
                 _ = writer_link.closed() => break,
                 _ = writer_closed.cancelled() => break,
-                frame = out_rx.recv() => match frame {
-                    Some(frame) => if sink.send(Message::Text(frame.text.into())).await.is_err() { break },
-                    None => break,
-                },
                 ping = ping_rx.recv() => match ping {
                     Some(()) => if sink.send(Message::Ping(Vec::new().into())).await.is_err() { break },
+                    None => break,
+                },
+                // Control frames first, then stream data.
+                frame = peers::next_frame(&mut out_rx, &mut bulk_rx) => match frame {
+                    Some(frame) => {
+                        let (message, _held) = machine_message(frame);
+                        if sink.send(message).await.is_err() { break }
+                    }
                     None => break,
                 },
             }
         }
         writer_link.close();
+        writer_closed.cancel();
         let _ = sink.close().await;
     });
     let timing = state.network.timing.clone();
@@ -781,6 +817,13 @@ async fn run_machine(state: AppState, socket: WebSocket, principal: Principal) {
                 if matches!(notice, Ok(id) if id == principal.token_id) { break; }
             }
             _ = beat.tick() => {
+                // A machine that was removed is told so on this socket, which then closes by itself: the removal's own
+                // push may not have reached it, and no member opens another session with it.
+                let removed = !state.network.membership().is_some_and(|membership| membership.is_member(&link.machine_id));
+                if removed || link.saying_farewell() {
+                    state.network.say_farewell(link.clone());
+                    continue;
+                }
                 // Three missed pings, or a grant, membership or policy that no longer allows the session.
                 if link.idle_for() > timing.dead_after || !principal_is_active(&state, &principal) {
                     tracing::info!(target: "kybern::network::session", machine = %link.machine_id, "closing a session that went quiet or lost its grant");
@@ -790,6 +833,7 @@ async fn run_machine(state: AppState, socket: WebSocket, principal: Principal) {
             }
             frame = stream.next() => match frame {
                 Some(Ok(Message::Text(text))) => peers::inbound(&state, &link, text.as_str()).await,
+                Some(Ok(Message::Binary(frame))) => peers::inbound_binary(&state, &link, &frame),
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(_)) => link.touch(),
                 Some(Err(error)) => { tracing::debug!(%error, "peer socket read error"); break; }
@@ -890,6 +934,69 @@ mod memory_tests {
         };
         out.closed.cancel();
         assert!(waiting.await.unwrap().is_err());
+    }
+
+    /// A member's session over a slow route (256 KiB/s) while twelve streams each push 4 MiB in 1 MiB messages: 48 MiB,
+    /// about three minutes of sending. With data in the outbox, the 30 s send limit ended the session; now the streams
+    /// wait for room, the session stays up, every byte arrives, and an answer queued meanwhile goes out on the next write.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_route_backs_stream_data_up_without_ending_the_session_and_answers_go_first() {
+        use peers::Outgoing;
+        use std::time::Duration;
+        const RATE: f64 = 256.0 * 1024.0;
+        const STREAMS: usize = 12;
+        const MESSAGES: usize = 4;
+        const MESSAGE: usize = 1024 * 1024;
+        let closed = tokio_util::sync::CancellationToken::new();
+        let (sender, mut out_rx) = mpsc::channel(64);
+        let out = Outbox { sender, budget: Arc::new(tokio::sync::Semaphore::new(OUTBOX_BYTES)), closed: closed.clone() };
+        let (bulk, mut bulk_rx) = peers::BulkLane::new(closed.clone());
+        let sink = Arc::new(OutboxSink { out, bulk });
+        let (seen_tx, mut seen_rx) = mpsc::unbounded_channel::<(String, tokio::time::Instant)>();
+        let writer = tokio::spawn(async move {
+            let mut data = 0usize;
+            while let Some(frame) = peers::next_frame(&mut out_rx, &mut bulk_rx).await {
+                let (message, _held) = machine_message(frame);
+                match message {
+                    Message::Binary(bytes) => {
+                        tokio::time::sleep(Duration::from_secs_f64(bytes.len() as f64 / RATE)).await;
+                        data += bytes.len();
+                        if data == STREAMS * MESSAGES * MESSAGE {
+                            return data;
+                        }
+                    }
+                    Message::Text(text) => {
+                        let _ = seen_tx.send((text.to_string(), tokio::time::Instant::now()));
+                    }
+                    _ => {}
+                }
+            }
+            data
+        });
+        let streams: Vec<_> = (0..STREAMS)
+            .map(|stream| {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    for _ in 0..MESSAGES {
+                        if !sink.send_bulk(Outgoing::Binary(vec![stream as u8; MESSAGE])).await {
+                            return false;
+                        }
+                    }
+                    true
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        let asked = tokio::time::Instant::now();
+        assert!(sink.send(serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {}})).await, "an answer is queued at once");
+        let (answer, sent) = seen_rx.recv().await.unwrap();
+        assert!(answer.contains("\"id\":1"));
+        assert!(sent - asked <= Duration::from_secs_f64(MESSAGE as f64 / RATE + 0.5), "the answer waited behind data: {:?}", sent - asked);
+        for stream in streams {
+            assert!(stream.await.unwrap(), "every stream completes");
+        }
+        assert_eq!(writer.await.unwrap(), STREAMS * MESSAGES * MESSAGE);
+        assert!(!closed.is_cancelled(), "the session survives the slow route");
     }
 }
 

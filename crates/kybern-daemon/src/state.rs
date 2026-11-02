@@ -55,6 +55,8 @@ pub struct Inner {
     pub process_owned: std::sync::atomic::AtomicBool,
     /// A newer binary is in place; hand over to it after the graceful shutdown.
     pub restart_pending: std::sync::atomic::AtomicBool,
+    /// "Keep this machine reachable when Kybern is closed": the login item that starts this daemon.
+    pub login_service: crate::login_service::LoginService,
     pub pairing: Pairing,
     pub tickets: crate::access::Tickets,
     pub revoked_tokens: broadcast::Sender<uuid::Uuid>,
@@ -205,6 +207,7 @@ impl AppState {
                 desktop_managed: std::sync::atomic::AtomicBool::new(false),
                 process_owned: std::sync::atomic::AtomicBool::new(false),
                 restart_pending: std::sync::atomic::AtomicBool::new(false),
+                login_service: Default::default(),
                 pairing: Pairing::default(),
                 tickets: crate::access::Tickets::default(),
                 revoked_tokens,

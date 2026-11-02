@@ -79,6 +79,17 @@ expression: schema_for!(NetworkStatus)
     "follow_updates": {
       "description": "\"Keep all machines on the same version\": the `follow_updates` register. A member that sees a\nnewer version on another member updates itself when it is idle.",
       "type": "boolean"
+    },
+    "keep_reachable": {
+      "description": "\"Keep this machine reachable when Kybern is closed\" and the login item behind it. Absent on\ndaemons that cannot keep themselves running at login.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KeepReachableStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -495,6 +506,91 @@ expression: schema_for!(NetworkStatus)
       "required": [
         "installed",
         "running"
+      ]
+    },
+    "KeepReachableStatus": {
+      "description": "`NetworkStatus::keep_reachable`.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "The setting, `settings.network.keep_reachable`.",
+          "type": "boolean"
+        },
+        "wanted": {
+          "description": "The login item should exist now: the setting is on, the network is on and this machine is a member.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "The login item this platform uses. Absent where Kybern cannot register one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoginServiceKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "registered": {
+          "description": "The login item is registered for this data folder and starts this daemon's binary.",
+          "type": "boolean"
+        },
+        "running": {
+          "description": "This daemon was started by the login item.",
+          "type": "boolean"
+        },
+        "external": {
+          "description": "Another service already starts a daemon for this data folder (a remote install's `kybernd`\nservice). Kybern leaves it as it is and registers nothing of its own.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "Why the last registration or removal failed, and what to do next.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "description": "Problems with a service that starts this daemon, each with what to do next (a systemd unit that\nstops everything when one agent runs out of memory).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "enabled",
+        "wanted",
+        "registered",
+        "running"
+      ]
+    },
+    "LoginServiceKind": {
+      "description": "What starts this machine's daemon at login while it is in a network (ADE-119).",
+      "oneOf": [
+        {
+          "description": "Windows: a per-user Task Scheduler task that runs at logon.",
+          "type": "string",
+          "const": "task_scheduler"
+        },
+        {
+          "description": "macOS: a LaunchAgent in `~/Library/LaunchAgents`.",
+          "type": "string",
+          "const": "launch_agent"
+        },
+        {
+          "description": "Linux: a `systemd --user` service.",
+          "type": "string",
+          "const": "systemd_user"
+        },
+        {
+          "description": "Linux without a user systemd: an XDG autostart entry, started by the desktop session.",
+          "type": "string",
+          "const": "xdg_autostart"
+        }
       ]
     }
   }

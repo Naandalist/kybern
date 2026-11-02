@@ -91,3 +91,66 @@ server/browser versions, cache boundary, sample counts, first-load and HMR media
 The raw loopback benchmark does not establish latency or throughput across a real tailnet.
 
 Clean scratch apps, installs, daemon data and task build output after preserving results.
+
+## Fast forwards (ADE-116)
+
+What makes a forwarded preview slow is round trips, not bytes, until the page is large: a browser
+opens at most six HTTP/1.1 connections to an origin and sends one request at a time on each, so a
+Vite page of a few hundred modules waits one round trip to the serving machine for every six.
+Measured on a 361-module Vite app (Chrome, 2026-11-03): 16.3 s cold over a 213 ms DERP route and
+2.1 s over 26 ms, against 0.28 s locally.
+
+- **Ready sockets** (`ports.direct.v2`, `ports/direct.rs`): the target answers the token as soon as
+  the caller is authorized and the socket waits for a mode byte, so the caller keeps four
+  authorized sockets per forward (`Route::keep_warm`, refreshed every 45 s while the forward was
+  used in the last 10 minutes). A browser connection starts without the two-round-trip handshake.
+  A forward prepares itself again when the session it was prepared on ends (the target restarted):
+  the target's per-forward listener lives with that session.
+- **Fast mode** (`ports/fast.rs`, `PortsForwardParams::https`): the forward also listens on
+  `https://localhost:<https_port>` with HTTP/2 and Kybern's per-install certificate
+  (`<data dir>/network/preview-tls/`, `ports/tls.rs`). Every request of the page travels over one
+  HTTP/2 connection to the target (mode `H`), which sends them on to the dev server over pooled
+  HTTP/1.1 with the browser's `Host`, and gzips uncompressed text when the browser accepts it
+  (whole `200` bodies only: never a `206`, a `Content-Range` or `Cache-Control: no-transform`; a
+  strong `ETag` becomes weak). Compressing responses that mix secrets with reflected input is what
+  BREACH exploits; the risk is low here, since only the user's own dev server is served this way,
+  inside WireGuard, to a web view on the user's machine. WebSocket upgrades (hot reload) use HTTP/1.1 on the same origin, each on a raw ready socket.
+  Kybern's web views accept exactly that certificate and no other. Which origins and documents
+  accept it depends on the platform:
+  - macOS: WKWebView checks the leaf's SHA-256 in each server-trust challenge against the
+    preview's own origin (scheme, host and port) (`native/webview.m`).
+  - Windows: WebView2 checks the PEM and the exact origin in `ServerCertificateErrorDetected`
+    (`webview-win/src/policy.rs`). `ALWAYS_ALLOW` is the only way to accept it, and WebView2 then
+    remembers host and certificate, not the port. That memory lives in the document's own InPrivate
+    profile, so it can't reach other documents.
+  - Linux: WPE accepts a certificate for a host name, not a port
+    (`webkit_network_session_allow_tls_certificate_for_host`, `webview-linux.c`). Only a pinned
+    Fast preview adds it, for its own origin's host only (`localhost` or `127.0.0.1`). After that,
+    every web view of the app accepts that certificate on that host, on any port, until the app
+    restarts. That includes other previews, visuals and the renderer. A separate ephemeral network
+    session per preview does not change this, because the exception lives in the shared WPE
+    network process (the `webview` on-screen check showed it). Making it exact would need a WPE
+    patch.
+
+  On Windows the preview's own page, and on Linux any document, could also reach another loopback
+  port that presents the same certificate. Only Kybern's own Fast forwards hold its private key,
+  which is kept in the data folder, so what that exposes is other Kybern forwards on the same
+  machine. The certificate is never added to a system trust store, so any other browser refuses it.
+- The desktop turns Fast mode on when the forward's measured round trip (`rtt_ms`) is above 40 ms,
+  and remembers a choice made with the **Fast** chip in the address bar or **Fast loading
+  (HTTP/2)** in the page menu (`apps/gpuix/src/preview/fast.ts`).
+- **Known risk:** the page's origin becomes `https://localhost:<port>`. A page that hard-codes
+  `http://localhost:3000` for its API, an OAuth redirect URI or a cookie scoped to the HTTP origin
+  sees mixed content or a mismatch. One click on the chip goes back to plain HTTP.
+- Between two current machines, relay and port streams over the session send binary frames and
+  use a window of up to 4 MiB (`relay.frames.v2`); limits queue for up to 10 s before refusing, and
+  the listeners and session sockets set `TCP_NODELAY`. The windows of one session share 16 MiB
+  (`LINK_WINDOW_BUDGET`): a few streams get 4 MiB each, more get less, never under 256 KiB. Stream
+  data and closes wait in the session's own 4 MiB data lane (`peers::BulkLane`) for as long as a
+  slow route needs, and the socket writer sends control frames (requests, answers, credit) first,
+  so a backlog of data never trips the 30 s send limit that ends a session or delays an RPC.
+
+Measure with real browsers: the fixtures kept with the ADE-116 report (`.kybern-artifacts/ade-116/`)
+drive headless Chrome over CDP (`--ignore-certificate-errors-spki-list` pins the same leaf) and
+read WKWebView timings from a beacon the test app posts. A dev server's own speed matters: a
+2-core VPS serves the 365 requests of that page in 0.8 s on its own loopback.

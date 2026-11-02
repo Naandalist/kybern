@@ -21,7 +21,7 @@ export function rewriteRelayHead(head: string, authority: string, prefix: string
   if (document && (path !== '/' || upgrade)) throw Error('404 Not Found')
   const target = document ? `${prefix}${request[1].slice(1)}` : `${prefix}${request[1]}`
   const kept = headers.filter(([name]) => !['host', 'connection', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'x-kybern-relay-auth'].includes(name))
-  return `${request[0]} ${target} ${request[2]}\r\nHost: ${authority}\r\nConnection: ${upgrade ? 'Upgrade' : 'close'}\r\n${kept.map(([name, value]) => `${name}: ${value}\r\n`).join('')}${extra.map(([name, value]) => `${name}: ${value}\r\n`).join('')}\r\n`
+  return `${request[0]} ${target} ${request[2]}\r\nHost: ${authority}\r\nConnection: ${upgrade ? 'Upgrade' : 'keep-alive'}\r\n${kept.map(([name, value]) => `${name}: ${value}\r\n`).join('')}${extra.map(([name, value]) => `${name}: ${value}\r\n`).join('')}\r\n`
 }
 
 /** A ticket on the daemon itself, or on another machine of the network through the daemon you are paired with
@@ -30,49 +30,113 @@ export function rewriteRelayHead(head: string, authority: string, prefix: string
 export const RELAY_TICKET_PATH = /^(?:\/relay\/[A-Za-z0-9_-]+\/http)?\/(?:preview-proxy\/[A-Za-z0-9_-]+\/?|(?:artifact-preview|visual-frame)\/[A-Za-z0-9_-]+)$/
 const DOCUMENT_TICKET = /\/(?:artifact-preview|visual-frame)\/[A-Za-z0-9_-]+$/
 
+/** How much of a request body is still to come, from its head: `Content-Length`, `chunked`, or nothing. Each request of a
+ * kept-alive connection is rewritten on its own, so the relay has to know where one ends and the next head begins. */
+export function bodyFraming(head: string): { feed(data: Buffer): number; readonly done: boolean } {
+  const lines = head.split('\r\n').slice(1).map(line => line.toLowerCase())
+  const chunked = lines.some(line => line.startsWith('transfer-encoding:') && line.includes('chunked'))
+  if (chunked) {
+    // size line, data, the CRLF after it; a zero size ends the chunks, then trailers until an empty line.
+    let state: 'size' | 'data' | 'crlf' | 'trailer' | 'done' = 'size', left = 0, line = ''
+    return {
+      get done() { return state === 'done' },
+      feed(data) {
+        let i = 0
+        while (i < data.length && state !== 'done') {
+          if (state === 'data') { const take = Math.min(left, data.length - i); i += take; left -= take; if (!left) state = 'crlf'; continue }
+          const byte = data[i++]
+          if (state === 'crlf') { if (byte === 0x0a) state = 'size'; continue }
+          if (byte === 0x0a) {
+            const text = line.replace(/\r$/, ''); line = ''
+            if (state === 'size') { left = parseInt(text.split(';')[0].trim() || '0', 16) || 0; state = left ? 'data' : 'trailer' }
+            else if (!text) state = 'done'
+            continue
+          }
+          if (line.length < 8192) line += String.fromCharCode(byte)
+        }
+        return i
+      },
+    }
+  }
+  const length = Number(lines.find(line => line.startsWith('content-length:'))?.slice(15).trim() ?? 0)
+  let left = Number.isFinite(length) && length > 0 ? length : 0
+  return { get done() { return left === 0 }, feed(data) { const take = Math.min(left, data.length); left -= take; return take } }
+}
+
 export async function openRelay(upstream: string, daemon: string, options?: { ca?: string | Buffer; relayAuth?: string; onWebSocketFailure?: () => void }): Promise<{ url: string; close(): void }> {
   const target = new URL(upstream), endpoint = new URL(daemon)
   if (target.origin !== endpoint.origin || endpoint.username || endpoint.password || !['http:', 'https:'].includes(target.protocol) || target.username || target.password || target.search || target.hash || !RELAY_TICKET_PATH.test(target.pathname)) throw Error('The preview relay must target the configured daemon ticket.')
   const extra: [string, string][] = options?.relayAuth && target.pathname.startsWith('/relay/') ? [['x-kybern-relay-auth', `Bearer ${options.relayAuth}`]] : []
   const prefix = target.pathname.replace(/\/$/, ''), document = DOCUMENT_TICKET.test(target.pathname), sockets = new Set<Socket>()
   const hostname = target.hostname.replace(/^\[|\]$/g, ''), secure = target.protocol === 'https:'
+  // One upstream connection per page connection, kept alive: the page's requests reuse it (and its TLS) instead of paying a
+  // new connection, and a new handshake to the other machine, for each one. Responses come back in request order.
   const server = createServer(client => {
     sockets.add(client); client.on('close', () => sockets.delete(client)); client.on('error', () => {})
     client.setTimeout(15000, () => client.destroy())
-    let pending = Buffer.alloc(0)
-    const read = (chunk: Buffer) => {
-      pending = Buffer.concat([pending, chunk]); const end = pending.indexOf('\r\n\r\n')
-      if (end < 0) { if (pending.length > 65536) client.destroy(); return }
-      client.pause(); client.removeListener('data', read)
-      let head: string
-      try { head = rewriteRelayHead(pending.subarray(0, end + 4).toString('latin1'), target.host, prefix, (server.address() as { port: number }).port, extra, document) }
-      catch (error) { client.end(`HTTP/1.1 ${error instanceof Error ? error.message : '400 Bad Request'}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`); return }
+    let pending: Buffer = Buffer.alloc(0), socket: Socket | undefined, connected = false, raw = false, used = false
+    let body: ReturnType<typeof bodyFraming> | null = null
+    const queued: Buffer[] = []
+    const up = (chunk: Buffer) => { if (!chunk.length || !socket) return; if (connected) socket.write(chunk); else queued.push(chunk) }
+    // Once an upstream response is streaming to the page, an error response would interleave with its bytes: close instead.
+    const refuse = (status: string) => { if (connected) client.destroy(); else client.end(`HTTP/1.1 ${status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`) }
+    const open = (upgrade: boolean) => {
       const connection = { host: hostname, port: Number(target.port) || (secure ? 443 : 80) }
       // Wait for certificate + hostname validation before any page bytes leave.
       // Explicit validation remains on even if the process environment disables TLS checks.
-      const socket = secure ? connectTLS({ ...connection, rejectUnauthorized: true,
+      const next = secure ? connectTLS({ ...connection, rejectUnauthorized: true,
         servername: isIP(hostname) ? undefined : hostname, ALPNProtocols: ['http/1.1'],
         checkServerIdentity: (_name, certificate) => checkServerIdentity(hostname, certificate),
         ...(options?.ca ? { ca: options.ca } : {}),
       }) : createConnection(connection)
-      socket.setTimeout(15000, () => socket.destroy(Error('Preview connection timed out')))
-      sockets.add(socket); socket.on('close', () => { sockets.delete(socket); client.destroy() }); client.on('close', () => socket.destroy())
-      const upgrade = /\r\nupgrade:\s*websocket\r\n/i.test(head)
+      socket = next
+      next.setNoDelay(true)
+      next.setTimeout(15000, () => next.destroy(Error('Preview connection timed out')))
+      sockets.add(next); next.on('close', () => { sockets.delete(next); client.destroy() }); client.on('close', () => next.destroy())
       if (upgrade) {
         let status = ''
         const inspect = (chunk: Buffer) => {
           status += chunk.subarray(0, Math.max(0, 256 - status.length)).toString('latin1')
-          if (status.includes('\r\n') || status.length >= 256) { socket.removeListener('data', inspect); if (!/^HTTP\/1\.[01] 101(?: |\r\n)/.test(status)) options?.onWebSocketFailure?.() }
+          if (status.includes('\r\n') || status.length >= 256) { next.removeListener('data', inspect); if (!/^HTTP\/1\.[01] 101(?: |\r\n)/.test(status)) options?.onWebSocketFailure?.() }
         }
-        socket.on('data', inspect)
+        next.on('data', inspect)
       }
-      socket.once('error', () => { if (upgrade) options?.onWebSocketFailure?.(); client.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n') })
-      socket.once(secure ? 'secureConnect' : 'connect', () => {
-        socket.setTimeout(0); client.setTimeout(0); socket.write(head, 'latin1'); socket.write(pending.subarray(end + 4)); pending = Buffer.alloc(0)
-        client.pipe(socket); socket.pipe(client); client.resume()
+      next.once('error', () => { if (upgrade) options?.onWebSocketFailure?.(); refuse('502 Bad Gateway') })
+      next.once(secure ? 'secureConnect' : 'connect', () => {
+        connected = true
+        // Idle kept-alive connections end after a while on both sides.
+        next.setTimeout(raw ? 0 : 300000, () => next.destroy()); client.setTimeout(raw ? 0 : 300000, () => client.destroy())
+        for (const chunk of queued.splice(0)) next.write(chunk)
+        next.pipe(client)
       })
     }
-    client.on('data', read)
+    const pump = () => {
+      while (!raw) {
+        if (body) {
+          const taken = body.feed(pending)
+          up(pending.subarray(0, taken)); pending = pending.subarray(taken)
+          if (!body.done) return
+          body = null; continue
+        }
+        const end = pending.indexOf('\r\n\r\n')
+        if (end < 0) { if (pending.length > 65536) client.destroy(); return }
+        let head: string
+        try { head = rewriteRelayHead(pending.subarray(0, end + 4).toString('latin1'), target.host, prefix, (server.address() as { port: number }).port, extra, document) }
+        catch (error) {
+          // A refused request after an earlier one on this connection: that response may still be in flight, so close.
+          if (used) client.destroy(); else refuse(error instanceof Error ? error.message : '400 Bad Request')
+          pending = Buffer.alloc(0); return
+        }
+        pending = pending.subarray(end + 4)
+        const upgrade = /\r\nupgrade:\s*websocket\r\n/i.test(head)
+        if (!socket) open(upgrade && !used)
+        used = true
+        up(Buffer.from(head, 'latin1'))
+        if (upgrade) { raw = true; up(pending); pending = Buffer.alloc(0); if (connected) { socket!.setTimeout(0); client.setTimeout(0) } return }
+        body = bodyFraming(head)
+      }
+    }
+    client.on('data', (chunk: Buffer) => { if (raw) { up(chunk); return } pending = pending.length ? Buffer.concat([pending, chunk]) : chunk; pump() })
   })
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => { server.removeListener('error', reject); resolve() }) })
   server.unref()

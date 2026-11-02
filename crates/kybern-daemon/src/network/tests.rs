@@ -486,6 +486,24 @@ async fn a_removed_machine_loses_its_session_and_cannot_open_another() {
     assert!(a.state.network.peers.link(&b.id()).is_none() && c.state.network.peers.link(&b.id()).is_none());
 }
 
+/// A session that was opening when `remove` pushed the operation is closed by `drop_machine` (through
+/// `removed_while_opening`) before the push reaches the removed machine. The members refuse it every
+/// session after that, so the closing session is the last place it can learn it was removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removed_machine_learns_it_was_removed_from_the_session_being_closed() {
+    let Some(cluster) = Cluster::new(&[NodeSpec::owner("a"), NodeSpec::owner("b")]) else { return };
+    let (a, b) = (cluster.start("a", true).await, cluster.start("b", true).await);
+    cluster.form(&a, &[&b], JoinVia::Auto).await;
+    eventually("linked", WAIT, || linked(&a, &b)).await;
+
+    // The removal is written on a and never pushed: only the closing session can carry it.
+    a.membership().remove(&b.id(), RemoveReason::User).unwrap();
+    a.state.network.drop_machine(&b.id());
+    assert!(a.state.network.peers.link(&b.id()).is_none(), "the link leaves the table at once");
+    eventually("b learns it was removed", WAIT, || b.membership().self_removed()).await;
+    eventually("the session with b ends", WAIT, || b.state.network.peers.link(&a.id()).is_none()).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_live_session_is_refused_at_use_time_after_removal_or_pause() {
     let Some(cluster) = Cluster::new(&[NodeSpec::owner("a"), NodeSpec::owner("b")]) else { return };

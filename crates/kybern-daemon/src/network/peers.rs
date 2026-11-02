@@ -10,7 +10,9 @@
 //! * **One link per pair, used both ways.** [`PeerLink`] sends and answers requests on one
 //!   socket. The listening side wraps its connection's outbox; the dialing side owns the socket.
 //! * **Heartbeat and backoff.** A WebSocket ping every 30 s; a link silent for three missed pings
-//!   is dead. Reconnects back off 2, 4, 8 … 300 s and start over when the tailnet's status changes.
+//!   is dead. Reconnects back off 2, 4, 8 … 300 s and start over when the tailnet's status changes,
+//!   when this machine wakes from sleep, or when a member that was away says it is back
+//!   ([`super::wake_watch`]).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -44,7 +46,11 @@ const DISCOVERY_TARGET: &str = "kybern::network::discovery";
 /// The ports a peer's network listener may hold (§3.1): the default and the next six.
 pub const PORT_RANGE: std::ops::RangeInclusive<u16> = DEFAULT_PORT..=DEFAULT_PORT + 6;
 const MAX_CONCURRENT_PROBES: usize = 8;
+/// How long the session with a removed machine stays open for it to take the operations that removed it.
+const FAREWELL_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_INBOUND_REQUESTS: usize = 16;
+/// Requests that wait for one of the [`MAX_INBOUND_REQUESTS`] places instead of being refused.
+const MAX_QUEUED_REQUESTS: usize = 256;
 
 // ---- the link ----
 
@@ -53,17 +59,110 @@ const MAX_INBOUND_REQUESTS: usize = 16;
 pub trait FrameSink: Send + Sync {
     /// Queue one JSON frame; `false` once the socket is gone.
     async fn send(&self, frame: Value) -> bool;
+
+    /// Queue one frame of stream data (relay and port bytes; binary between machines that list `relay.frames.v2`). It
+    /// waits for room in the session's [`BulkLane`] as long as the route needs and never ends the session for being
+    /// slow; `false` once the socket is gone. A sink without a lane sends JSON through [`FrameSink::send`] and refuses
+    /// binary frames.
+    async fn send_bulk(&self, frame: Outgoing) -> bool {
+        match frame {
+            Outgoing::Text(text) => match serde_json::from_str(&text) {
+                Ok(value) => self.send(value).await,
+                Err(_) => false,
+            },
+            Outgoing::Binary(_) => false,
+        }
+    }
 }
 
-struct ChannelSink(mpsc::Sender<String>);
+/// A frame for a session socket.
+pub enum Outgoing {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+impl Outgoing {
+    fn size(&self) -> usize {
+        match self {
+            Outgoing::Text(text) => text.len(),
+            Outgoing::Binary(bytes) => bytes.len(),
+        }
+    }
+}
+
+/// Stream data one session socket queues at most, in bytes, apart from its control frames. A stream waits here for room
+/// (the route is slow, not broken), so no timeout applies, and the writer sends control frames first ([`next_frame`]):
+/// requests, answers and credit grants never queue behind data.
+pub const BULK_BYTES: usize = 4 * 1024 * 1024;
+const BULK_FRAMES: usize = 1024;
+
+/// The data lane of one session socket.
+pub struct BulkLane {
+    sender: mpsc::Sender<BulkFrame>,
+    budget: Arc<tokio::sync::Semaphore>,
+    closed: CancellationToken,
+}
+
+/// A queued data frame. Its share of the lane's budget is held until the writer has sent it.
+pub struct BulkFrame {
+    message: Outgoing,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl BulkFrame {
+    /// The message, and the budget it holds: drop that once the message is on the socket.
+    pub fn into_parts(self) -> (Outgoing, tokio::sync::OwnedSemaphorePermit) {
+        (self.message, self.permit)
+    }
+}
+
+impl BulkLane {
+    /// A lane whose waits end once `closed` fires, and the receiver its writer drains.
+    pub fn new(closed: CancellationToken) -> (Self, mpsc::Receiver<BulkFrame>) {
+        let (sender, receiver) = mpsc::channel(BULK_FRAMES);
+        (Self { sender, budget: Arc::new(tokio::sync::Semaphore::new(BULK_BYTES)), closed }, receiver)
+    }
+
+    /// Queue a frame, waiting for room. `false` once the socket is gone.
+    pub async fn send(&self, message: Outgoing) -> bool {
+        let size = message.size().clamp(1, BULK_BYTES) as u32;
+        let queue = async {
+            let permit = self.budget.clone().acquire_many_owned(size).await.ok()?;
+            self.sender.send(BulkFrame { message, permit }).await.ok()
+        };
+        tokio::select! {
+            _ = self.closed.cancelled() => false,
+            queued = queue => queued.is_some(),
+        }
+    }
+}
+
+/// The next frame for a session socket: a control frame when one waits, else stream data, so a backlog of data on a slow
+/// route never delays a request, an answer or a credit grant. `None` once the control channel is closed.
+pub async fn next_frame<C>(control: &mut mpsc::Receiver<C>, bulk: &mut mpsc::Receiver<BulkFrame>) -> Option<Result<C, BulkFrame>> {
+    tokio::select! {
+        biased;
+        frame = control.recv() => frame.map(Ok),
+        Some(frame) = bulk.recv() => Some(Err(frame)),
+    }
+}
+
+struct ChannelSink {
+    control: mpsc::Sender<Outgoing>,
+    bulk: BulkLane,
+}
 
 #[async_trait]
 impl FrameSink for ChannelSink {
     async fn send(&self, frame: Value) -> bool {
         match serde_json::to_string(&frame) {
-            Ok(text) => self.0.send(text).await.is_ok(),
+            Ok(text) => self.control.send(Outgoing::Text(text)).await.is_ok(),
             Err(_) => false,
         }
+    }
+
+    async fn send_bulk(&self, frame: Outgoing) -> bool {
+        self.bulk.send(frame).await
     }
 }
 
@@ -90,6 +189,12 @@ pub struct PeerLink {
     closed: CancellationToken,
     last_frame: Mutex<Instant>,
     inbound: Arc<tokio::sync::Semaphore>,
+    /// Requests waiting for an `inbound` place.
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+    /// The other machine reads binary relay frames (it listed `relay.frames.v2`).
+    binary: std::sync::atomic::AtomicBool,
+    /// The machine is no longer a member and is being told so before the link closes ([`Network::say_farewell`]).
+    farewell: std::sync::atomic::AtomicBool,
     pub relays: LinkRelays,
 }
 
@@ -113,6 +218,9 @@ impl PeerLink {
             closed: CancellationToken::new(),
             last_frame: Mutex::new(Instant::now()),
             inbound: Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND_REQUESTS)),
+            queued: Arc::default(),
+            binary: std::sync::atomic::AtomicBool::new(false),
+            farewell: std::sync::atomic::AtomicBool::new(false),
             relays: LinkRelays::new(direction),
         })
     }
@@ -146,6 +254,31 @@ impl PeerLink {
     pub async fn call<M: Method>(&self, params: M::Params) -> Result<M::Result, RpcError> {
         let value = self.call_raw(M::NAME, serde_json::to_value(params).map_err(RpcError::internal)?).await?;
         serde_json::from_value(value).map_err(RpcError::internal)
+    }
+
+    /// What the other machine listed in its presence: binary frames and the larger stream window.
+    pub fn set_peer_features(&self, features: &[String]) {
+        let v2 = features.iter().any(|feature| feature == features::RELAY_FRAMES_V2);
+        self.binary.store(v2, Ordering::Relaxed);
+        self.relays.set_large_window(v2);
+    }
+
+    pub fn binary_frames(&self) -> bool {
+        self.binary.load(Ordering::Relaxed)
+    }
+
+    /// Send a binary data frame on the session's data lane. `false` when the session is gone.
+    pub async fn send_binary(&self, frame: Vec<u8>) -> bool {
+        self.sink.send_bulk(Outgoing::Binary(frame)).await
+    }
+
+    /// Send a data notification (`peer.relay.data` / `peer.ports.data` with base64 data, for a machine that reads no
+    /// binary frames) on the session's data lane. `false` when the session is gone.
+    pub async fn notify_bulk(&self, method: &str, params: Value) -> bool {
+        match serde_json::to_string(&RpcNotification::new(method, params)) {
+            Ok(text) => self.sink.send_bulk(Outgoing::Text(text)).await,
+            Err(_) => false,
+        }
     }
 
     /// Send a notification (no answer expected). `false` when the session is gone.
@@ -183,6 +316,11 @@ impl PeerLink {
 
     pub fn is_closed(&self) -> bool {
         self.closed.is_cancelled()
+    }
+
+    /// Whether the link is telling a removed machine of its removal; it closes itself once done.
+    pub fn saying_farewell(&self) -> bool {
+        self.farewell.load(Ordering::SeqCst)
     }
 
     /// Resolves when the link is closed.
@@ -324,10 +462,14 @@ impl Peers {
 
     /// Close the link to a member, if any (removal, a tampered operation, the network turned off).
     pub fn close(&self, machine_id: &str) {
-        let link = self.lock().links.remove(machine_id);
-        if let Some(link) = link {
+        if let Some(link) = self.take(machine_id) {
             link.close();
         }
+    }
+
+    /// Remove a machine's link from the table without closing it.
+    fn take(&self, machine_id: &str) -> Option<Arc<PeerLink>> {
+        self.lock().links.remove(machine_id)
     }
 
     pub fn close_all(&self) {
@@ -495,6 +637,28 @@ impl Peers {
             status.failures = 0;
         }
     }
+
+    /// This machine woke from sleep: every wait its failed attempts earned while it slept is over,
+    /// the members that dial it are told it is back at once, and the tailnet is looked at afresh.
+    pub(super) fn after_resume(&self) {
+        self.reset_backoff();
+        let mut inner = self.lock();
+        inner.nudged_out.clear();
+        inner.probed.clear();
+        inner.awaited.clear();
+    }
+
+    /// Whether `signature` (of a fresh Tailscale status) differs from the one the last pass saw.
+    pub(super) fn signature_changed(&self, signature: &str) -> bool {
+        let inner = self.lock();
+        !inner.signature.is_empty() && inner.signature != signature
+    }
+
+    /// Whether some member other than `me` that is not paused has no open link.
+    pub(super) fn any_unlinked(&self, members: &[String]) -> bool {
+        let inner = self.lock();
+        members.iter().any(|id| inner.links.get(id).is_none_or(|link| link.is_closed()))
+    }
 }
 
 /// `backoff_min * 2^(failures - 1)`, capped: 2, 4, 8 … 300 s with the defaults.
@@ -554,13 +718,47 @@ impl Network {
 
     /// Close every session with a machine and revoke every grant it holds (§2.5).
     pub fn drop_machine(&self, machine_id: &str) {
-        self.peers.close(machine_id);
+        if let Some(link) = self.peers.take(machine_id) {
+            self.say_farewell(link);
+        }
         let revoked = self.grants.revoke_machine(machine_id);
         if !revoked.is_empty() {
             tracing::info!(target: SESSION_TARGET, machine = machine_id, grants = revoked.len(), "revoked the grants of a removed machine");
         }
         // The client tokens it asked this machine to mint die with it (§2.5).
         self.revoke_tokens_issued_via(machine_id);
+    }
+
+    /// End the session with a machine that is no longer a member, telling it first. The removed machine learns of its
+    /// removal only from a member: once its sessions close, every member refuses it a new one. `remove` pushes the
+    /// operation, but a session that was opening at that moment closes here before the push can arrive, so the
+    /// operations go once more on the link being closed, and the accepting side's membership check hands a removed
+    /// machine's socket here instead of closing it. Its streams end now and its requests are refused (a removed machine
+    /// has no scopes); it closes once the machine answers, or after [`FAREWELL_TIMEOUT`]. Saying it again on the same
+    /// link does nothing.
+    pub fn say_farewell(&self, link: Arc<PeerLink>) {
+        if link.farewell.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let ops = self
+            .membership()
+            .filter(|membership| !membership.is_member(&link.machine_id))
+            .map(|membership| membership.all_ops())
+            .unwrap_or_default();
+        let runtime = tokio::runtime::Handle::try_current();
+        let (Ok(runtime), false, false) = (runtime, ops.is_empty(), link.is_closed()) else {
+            link.close();
+            return;
+        };
+        link.relays.close_all();
+        runtime.spawn(async move {
+            let told = tokio::time::timeout(FAREWELL_TIMEOUT, link.call::<PeerOpsPush>(PeerOpsPushParams { ops })).await;
+            if !matches!(told, Ok(Ok(_))) {
+                // It closes its own sessions on applying the removal, often before it answers.
+                tracing::debug!(target: SESSION_TARGET, machine = %link.machine_id, "no answer to the removal on the closing session");
+            }
+            link.close();
+        });
     }
 
     /// The presence this machine pushes (§4.1): version and features now; harnesses, load and
@@ -608,6 +806,7 @@ pub async fn dispatch(state: &AppState, link: &Arc<PeerLink>, method: &str, para
         }
         PeerPresenceMethod::NAME => {
             let presence: PeerPresence = parse(params)?;
+            link.set_peer_features(&presence.features);
             network.peers.set_presence(&link.machine_id, presence);
             network.notify_changed();
             ok(Empty {})
@@ -744,6 +943,12 @@ pub fn effective_scopes(network: &Network, link: &PeerLink) -> Vec<Scope> {
     }
 }
 
+/// How long a request may wait for one of a session's [`MAX_INBOUND_REQUESTS`] places: no longer than its caller waits
+/// for the answer. A stream open is given up after 15 s ([`super::relay`], [`super::ports`]); any other call after 60 s.
+fn queue_deadline(method: &str) -> Duration {
+    if [PeerRelayOpen::NAME, PeerPortsOpen::NAME].contains(&method) { Duration::from_secs(15) } else { Duration::from_secs(60) }
+}
+
 /// Handle one text frame from a peer: an answer to our request, a request, or a notification.
 pub async fn inbound(state: &AppState, link: &Arc<PeerLink>, text: &str) {
     link.touch();
@@ -764,6 +969,7 @@ pub async fn inbound(state: &AppState, link: &Arc<PeerLink>, text: &str) {
     let link = link.clone();
     let busy_link = link.clone();
     let busy_id = id.clone();
+    let method_name = method.clone();
     let inbound = link.inbound.clone();
     let work = async move {
         let result = match scope_for(&method) {
@@ -786,13 +992,50 @@ pub async fn inbound(state: &AppState, link: &Arc<PeerLink>, text: &str) {
     };
     if ordered {
         work.await;
-    } else if let Ok(permit) = inbound.try_acquire_owned() {
+    } else if let Ok(permit) = inbound.clone().try_acquire_owned() {
         tokio::spawn(async move {
             let _permit = permit;
             work.await;
         });
-    } else if let Some(id) = busy_id {
-        busy_link.respond(RpcResponse::err(id, RpcError::internal("too many concurrent requests on this session"))).await;
+    } else if busy_link.queued.fetch_add(1, Ordering::SeqCst) < MAX_QUEUED_REQUESTS {
+        // A burst (a page opening many relayed requests at once) waits its turn instead of failing, but only while its
+        // caller still waits for the answer: a stream opened after that would have no reader.
+        let queued = busy_link.queued.clone();
+        let deadline = tokio::time::Instant::now() + queue_deadline(&method_name);
+        tokio::spawn(async move {
+            let permit = tokio::time::timeout_at(deadline, inbound.acquire_owned()).await;
+            queued.fetch_sub(1, Ordering::SeqCst);
+            match permit {
+                Ok(Ok(_permit)) => work.await,
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    tracing::debug!(target: SESSION_TARGET, machine = %busy_link.machine_id, method = %method_name, "dropped a request that waited longer than its caller");
+                    if let Some(id) = busy_id {
+                        busy_link.respond(RpcResponse::err(id, RpcError::internal("too many concurrent requests on this session"))).await;
+                    }
+                }
+            }
+        });
+    } else {
+        busy_link.queued.fetch_sub(1, Ordering::SeqCst);
+        if let Some(id) = busy_id {
+            busy_link.respond(RpcResponse::err(id, RpcError::internal("too many concurrent requests on this session"))).await;
+        }
+    }
+}
+
+/// Handle one binary frame from a peer: relay or port data (`relay.frames.v2`), under the same capability as its JSON
+/// notification.
+pub fn inbound_binary(state: &AppState, link: &Arc<PeerLink>, frame: &[u8]) {
+    link.touch();
+    let Some((kind, stream_id, text, bytes)) = super::relay::decode_frame(frame) else { return };
+    let method = match kind {
+        StreamKind::Relay => PeerRelayData::NAME,
+        StreamKind::Ports => PeerPortsData::NAME,
+    };
+    let Some(Some(scope)) = scope_for(method) else { return };
+    if effective_scopes(&state.network, link).contains(&scope) {
+        super::relay::handle_binary(link, kind, stream_id, text, bytes);
     }
 }
 
@@ -824,13 +1067,13 @@ async fn after_open(state: &AppState, link: &Arc<PeerLink>, dialer: bool) {
 
 /// A removal can land while a session is being opened, after `drop_machine` closed the links that
 /// existed. Looked at once the link is registered, so either the removal finds the link or the
-/// link finds the removal: a removed machine never keeps a session.
+/// link finds the removal: a removed machine never keeps a session. The link was just registered, so
+/// `drop_machine` ends it (or the link that replaced it already did) after telling the machine.
 fn removed_while_opening(state: &AppState, link: &Arc<PeerLink>) -> bool {
     if !state.network.membership().is_some_and(|membership| !membership.is_member(&link.machine_id)) {
         return false;
     }
     state.network.drop_machine(&link.machine_id);
-    link.close();
     true
 }
 
@@ -872,7 +1115,10 @@ pub(super) async fn tcp_connect(network: &Network, addr: SocketAddr) -> std::io:
     {
         socket.bind(SocketAddr::new(source, 0))?;
     }
-    tokio::time::timeout(Duration::from_secs(10), socket.connect(addr)).await.map_err(|_| std::io::ErrorKind::TimedOut)?
+    let stream = tokio::time::timeout(Duration::from_secs(10), socket.connect(addr)).await.map_err(|_| std::io::ErrorKind::TimedOut)??;
+    // Session frames are small and latency-bound (requests, credit grants): Nagle would hold them for an ACK.
+    let _ = stream.set_nodelay(true);
+    Ok(stream)
 }
 
 /// Open the WebSocket of an established session.
@@ -962,33 +1208,48 @@ pub(super) fn run_dialed<S>(
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let (mut sink, mut stream) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<Outgoing>(256);
+    let lane_closed = CancellationToken::new();
+    let (bulk, mut bulk_rx) = BulkLane::new(lane_closed.clone());
     let link = PeerLink::new(
         target.machine_id.clone(),
         Direction::Dialed,
         None,
         established.scopes.clone(),
-        Arc::new(ChannelSink(out_tx.clone())),
+        Arc::new(ChannelSink { control: out_tx, bulk }),
     );
     let timing = state.network.timing.clone();
     let (ping_tx, mut ping_rx) = mpsc::channel::<()>(1);
 
-    // Writer: text frames and pings.
+    // Writer: pings, control frames, then stream data.
     let writer_link = link.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
+                biased;
                 _ = writer_link.closed() => break,
-                text = out_rx.recv() => match text {
-                    Some(text) => if sink.send(Message::Text(text.into())).await.is_err() { break },
-                    None => break,
-                },
                 ping = ping_rx.recv() => match ping {
                     Some(()) => if sink.send(Message::Ping(Vec::new().into())).await.is_err() { break },
                     None => break,
                 },
+                frame = next_frame(&mut out_rx, &mut bulk_rx) => {
+                    let (message, _held) = match frame {
+                        Some(Ok(message)) => (message, None),
+                        Some(Err(data)) => {
+                            let (message, held) = data.into_parts();
+                            (message, Some(held))
+                        }
+                        None => break,
+                    };
+                    let message = match message {
+                        Outgoing::Text(text) => Message::Text(text.into()),
+                        Outgoing::Binary(bytes) => Message::Binary(bytes.into()),
+                    };
+                    if sink.send(message).await.is_err() { break }
+                }
             }
         }
+        lane_closed.cancel();
         let _ = sink.close().await;
         writer_link.close();
     });
@@ -1027,6 +1288,7 @@ pub(super) fn run_dialed<S>(
                 _ = reader_link.closed() => break,
                 frame = stream.next() => match frame {
                     Some(Ok(Message::Text(text))) => inbound(&reader_state, &reader_link, text.as_str()).await,
+                    Some(Ok(Message::Binary(frame))) => inbound_binary(&reader_state, &reader_link, &frame),
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => reader_link.touch(),
                     Some(Err(failure)) => { error = Some(failure.to_string()); break }
@@ -1052,7 +1314,7 @@ pub(super) fn run_dialed<S>(
 // ---- the worker ----
 
 /// A fingerprint of who is online, to notice that the tailnet changed.
-fn signature(status: &TsStatus) -> String {
+pub(super) fn signature(status: &TsStatus) -> String {
     let mut online: Vec<&str> = status.peers.iter().filter(|peer| peer.online).map(|peer| peer.node_id.as_str()).collect();
     online.sort_unstable();
     format!("{}|{}", status.running, online.join(","))
@@ -1065,6 +1327,8 @@ const LISTEN_RETRY: Duration = Duration::from_secs(10);
 /// wake-up. It ends with the daemon.
 pub async fn run(state: AppState) {
     let network = state.network.clone();
+    // Sleep and tailnet changes cut the backoff short; it ends with the daemon too.
+    tokio::spawn(super::wake_watch::run(state.clone()));
     loop {
         let retry = pass(&state).await;
         super::spaces::reconcile(&state).await;
@@ -1426,6 +1690,41 @@ mod tests {
         assert!(!peers.due("m") && peers.status("m").failures == 2);
         peers.reset_pair("m");
         assert!(peers.due("m") && peers.status("m").failures == 0);
+    }
+
+    #[test]
+    fn waking_up_ends_every_wait_and_lets_this_machine_nudge_its_dialers_again() {
+        let peers = Peers::default();
+        let timing = crate::network::Timing::default();
+        for _ in 0..8 {
+            peers.fail("m", &timing, "refused".into());
+        }
+        peers.fail_slow("n", &timing, "asleep".into());
+        assert!(!peers.due("m") && !peers.due("n"), "long waits were earned while it slept");
+        assert!(peers.soonest_retry().unwrap() > Duration::from_secs(25));
+        assert!(peers.nudge_out_due("d", Duration::from_secs(30)));
+        assert!(!peers.nudge_out_due("d", Duration::from_secs(30)));
+        peers.after_resume();
+        assert!(peers.due("m") && peers.due("n") && peers.status("m").failures == 0);
+        assert!(peers.nudge_out_due("d", Duration::from_secs(30)), "the member that dials this one hears at once");
+    }
+
+    #[test]
+    fn a_queued_request_waits_no_longer_than_its_caller() {
+        assert_eq!(queue_deadline(PeerPortsOpen::NAME), Duration::from_secs(15));
+        assert_eq!(queue_deadline(PeerRelayOpen::NAME), Duration::from_secs(15));
+        assert_eq!(queue_deadline(PeerPresenceMethod::NAME), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_signature_change_is_news_only_after_a_pass_saw_one() {
+        let peers = Peers::default();
+        assert!(!peers.signature_changed("true|a,b"), "no pass yet: the pass itself looks");
+        peers.lock().signature = "true|a".into();
+        assert!(!peers.signature_changed("true|a"));
+        assert!(peers.signature_changed("true|a,b"));
+        assert!(peers.any_unlinked(&["m".into()]));
+        assert!(!peers.any_unlinked(&[]));
     }
 
     #[test]

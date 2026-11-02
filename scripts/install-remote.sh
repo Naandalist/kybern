@@ -92,6 +92,11 @@ if [ "$SERVICE" = 1 ]; then
     mkdir -p "$(dirname "$UNIT")"
     if [ -f "$UNIT" ]; then
       grep -Fq -- "--data-dir $DATA" "$UNIT" || fail 'An existing kybernd service uses another configuration. Update that service on this machine, then retry.'
+      # Units written before OOMPolicy=continue stop the daemon and every agent when one agent runs out of memory.
+      if ! grep -Eq '^OOMPolicy=' "$UNIT" && ! grep -Eqs '^OOMPolicy=' "$UNIT.d"/*.conf; then
+        mkdir -p "$UNIT.d"
+        printf '[Service]\nOOMPolicy=continue\n' > "$UNIT.d/oom.conf"
+      fi
     else
       (set -C; cat > "$UNIT" <<UNIT
 [Unit]
@@ -104,6 +109,7 @@ Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
 TimeoutStopSec=30
+OOMPolicy=continue
 [Install]
 WantedBy=default.target
 UNIT

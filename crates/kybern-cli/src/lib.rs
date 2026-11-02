@@ -593,6 +593,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ActionsCmd,
     },
+    /// Kybern's own GitHub repository, as the daemon's GitHub CLI account sees it.
+    Github {
+        #[command(subcommand)]
+        cmd: GithubCmd,
+    },
     /// Terminals owned by the daemon.
     Terminal {
         #[command(subcommand)]
@@ -1150,6 +1155,14 @@ enum ActionsCmd {
         #[arg(long)]
         repo: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum GithubCmd {
+    /// Whether the signed-in GitHub account starred Tresnanda/kybern.
+    Starred,
+    /// Star Tresnanda/kybern as the signed-in GitHub account.
+    Star,
 }
 
 #[derive(Subcommand)]
@@ -2768,6 +2781,16 @@ pub async fn run() -> Result<()> {
                     inputs.insert(name.to_owned(), value.to_owned());
                 }
                 client.call::<ActionsDispatch>(ActionsDispatchParams { project_id, repo, workflow, git_ref, inputs }).await?;
+            }
+        },
+        Cmd::Github { cmd } => match cmd {
+            GithubCmd::Starred => {
+                let result = client.call::<GithubStarred>(GithubStarredParams {}).await?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            GithubCmd::Star => {
+                client.call::<GithubStar>(GithubStarParams {}).await?;
+                println!("Starred Tresnanda/kybern");
             }
         },
         Cmd::Pr { cmd } => match cmd {

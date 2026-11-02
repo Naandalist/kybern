@@ -173,5 +173,6 @@ pub async fn network_status(state: &AppState) -> Option<NetworkStatus> {
         digest: membership.has_network().then(|| membership.digest()),
         removed: membership.self_removed(),
         follow_updates: projection.follow_updates(),
+        keep_reachable: Some(state.login_service.status(state)),
     })
 }

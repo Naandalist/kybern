@@ -1,10 +1,11 @@
 // PreviewChromeRow.tsx: segmented rest address, edit focus, adaptive actions.
 import { useEffect, useRef, useState } from 'react'
 import { useGpuix, motion, type PublicInstance } from '@gpuix/react'
-import { Alert02Icon, LinkSquare02Icon, SmartPhone01Icon, PictureInPictureIcon } from '@hugeicons/core-free-icons'
+import { Alert02Icon, FlashIcon, LinkSquare02Icon, SmartPhone01Icon, PictureInPictureIcon } from '@hugeicons/core-free-icons'
 import { glyph, Icon, ICONS } from '../icons.tsx'
 import { N } from '../nav/glyphs.ts'
-import { Menu, MenuItem, MenuLabel, MenuSeparator } from '../nav/overlay.tsx'
+import { Menu, MenuItem, MenuLabel, MenuSeparator, Tip } from '../nav/overlay.tsx'
+import { Badge } from '../kit/Badge.tsx'
 import { portLabel } from '../../../../packages/kybern-client/src/machineUtilities.ts'
 import { usePorts } from './ports.ts'
 import { toast } from '../shell/toasts.tsx'
@@ -25,9 +26,9 @@ import { activeEnvironment } from '../shell/environment.ts'
 import { copyText } from '../transcript/store.ts'
 import { canShowFileInExplorer, showFileInExplorer } from '../dock/explorerSelection.ts'
 import { currentAddress } from './address.ts'
-import { closePreview, launchPreview, navigatePreview, openPreview, setPreview, setPreviewProxy, usePreview } from './store.ts'
+import { closePreview, launchPreview, navigatePreview, openPreview, setPreview, setPreviewFast, setPreviewProxy, usePreview } from './store.ts'
 import { previewCommand } from './Surface.tsx'
-const deviceIcon = glyph(SmartPhone01Icon), floatIcon = glyph(PictureInPictureIcon), externalIcon = glyph(LinkSquare02Icon), warningIcon = glyph(Alert02Icon)
+const deviceIcon = glyph(SmartPhone01Icon), floatIcon = glyph(PictureInPictureIcon), externalIcon = glyph(LinkSquare02Icon), warningIcon = glyph(Alert02Icon), fastIcon = glyph(FlashIcon)
 
 export function PreviewChrome({ threadId }: { threadId: string }) {
   const t = useTheme(), s = usePreview(threadId), entry = s.entries[s.index], environment = activeEnvironment()
@@ -82,6 +83,8 @@ export function PreviewChrome({ threadId }: { threadId: string }) {
       <Icon source={s.load.phase === 'blocked' ? ICONS.shield : s.load.phase === 'waiting' || s.load.phase === 'error' ? warningIcon : entry?.kind === 'file' ? ICONS.file : N.globe} size={14} color={t.textSecondary} />
       {!editing && entry?.kind === 'server' && !environment.local && <Label color={t.textSecondary} size={10}>{environment.name}</Label>}
       {!editing && entry?.machine && <Label color={t.textSecondary} size={10}>{`on ${entry.machine.name}`}</Label>}
+      {/* Fast mode (HTTP/2 over Kybern's own certificate): on, it says so here and one click goes back to plain HTTP. */}
+      {!editing && entry?.fast?.on && <Tip label={`Loading over HTTP/2${entry.fast.rttMs !== undefined ? ` · ${entry.fast.rttMs} ms to ${entry.machine?.name ?? 'the machine'}` : ''}. Click to use plain HTTP.`}><div><Badge testId="preview-fast" variant="info" size="sm" icon={fastIcon} onClick={() => setPreviewFast(threadId, false)}>Fast</Badge></div></Tip>}
       {editing ? <input ref={input} testId="preview-address" aria-label="Address" value={draft} placeholder="Enter a URL or file path" onChange={e => setDraft(e.value ?? '')} onSubmit={() => void submit()} onBlur={() => { if (!s.busy) cancel() }} onKeyDown={e => { if (e.key === 'escape') cancel() }} style={{ flexGrow: 1, minWidth: 0, height: 26, fontSize: 12, fontFamily: 'JetBrains Mono', color: t.text, backgroundColor: 'transparent' }} />
       : <div testId="preview-address-rest" role="button" aria-label="Address" tabIndex={0} onClick={start} onKeyDown={e => { if (e.key === 'enter' || e.key === 'space') start() }} style={{ display: 'flex', flexGrow: 1, minWidth: 0, overflow: 'hidden', alignItems: 'center', cursor: 'text' }}>
         {address?.segments.length ? address.segments.map((part, i) => <Label key={i} color={part.emphasis && !s.navigatedAway ? t.text : t.textSecondary} size={12} truncate style={{ flexShrink: part.emphasis ? 0 : 1, pointerEvents: 'none' }}>{part.text}</Label>) : <Label color={t.textSecondary} size={12} truncate>Enter a URL or file path</Label>}
@@ -98,7 +101,8 @@ export function PreviewChrome({ threadId }: { threadId: string }) {
         <MenuItem id="browser" label="Open in browser" icon={externalIcon} disabled={fileRemote} onSelect={() => void launchPreview(threadId)} />
         {entry.target?.kind === 'file' && entry.target.in_project && <MenuItem id="explorer" testId="preview-explorer" label="Show file in Explorer" icon={N.folder} disabled={!thread?.project_id || !canShowFileInExplorer(threadId, thread.project_id, explorerPath)} onSelect={showExplorer} />}
         <MenuSeparator />
-        {entry.kind === 'server' && environment.local && <MenuItem id="proxy" testId="preview-proxy" checked={!!entry.proxy} label="Preview through Kybern" onSelect={() => setPreviewProxy(threadId, !entry.proxy)} />}
+        {entry.kind === 'server' && environment.local && !entry.fast && <MenuItem id="proxy" testId="preview-proxy" checked={!!entry.proxy} label="Preview through Kybern" onSelect={() => setPreviewProxy(threadId, !entry.proxy)} />}
+        {entry.fast && <MenuItem id="fast" testId="preview-fast-toggle" checked={entry.fast.on} label="Fast loading (HTTP/2)" icon={fastIcon} onSelect={() => setPreviewFast(threadId, !entry.fast!.on)} />}
         {environment.local && forwardFrom.length > 0 && <MenuItem id="forward" testId="preview-forward-open" label="Forward a port from…" icon={N.globe} onSelect={() => setPreview(threadId, { forwardOpen: true, forwardMachine: entry.machine?.id })} />}
         {ports.forwards.length > 0 && <>
           <MenuLabel>Forwarded ports</MenuLabel>

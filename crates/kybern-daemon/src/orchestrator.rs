@@ -584,6 +584,9 @@ struct Inner {
     /// Woken whenever a queued follow-up may have become dispatchable, so the
     /// queue worker sleeps instead of polling the store.
     queue_wakeup: Notify,
+    /// The daemon is stopping ([`Orchestrator::begin_shutdown`]): a turn whose agent fails now was
+    /// interrupted by the stop, not by its own error.
+    shutting_down: std::sync::atomic::AtomicBool,
     /// Note changes, forwarded to clients as `notes.changed`.
     notes_changed: tokio::sync::broadcast::Sender<methods::NotesChangedNotification>,
     /// Task changes, forwarded to clients as `tasks.items.changed`.
@@ -992,6 +995,7 @@ impl Orchestrator {
                 harness_gates: ProviderKind::ALL.into_iter().map(|kind| (kind, Arc::new(tokio::sync::RwLock::new(())))).collect(),
                 pending_rewinds: Mutex::new(HashMap::new()),
                 queue_wakeup: Notify::new(),
+                shutting_down: std::sync::atomic::AtomicBool::new(false),
                 notes_changed: tokio::sync::broadcast::channel(1024).0,
                 tasks_changed: tokio::sync::broadcast::channel(1024).0,
                 projects_changed: tokio::sync::broadcast::channel(64).0,
@@ -1345,6 +1349,17 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// The daemon is stopping. A signal that stops the daemon reaches its agents too (a terminal's
+    /// Ctrl+C, systemd stopping the unit), and an agent stopped that way reports a raw failure.
+    /// From here on such a turn ends as interrupted, with a notice that says why.
+    pub fn begin_shutdown(&self) {
+        self.inner.shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub async fn shutdown(&self) {
         let mut sessions: Vec<_> = self.inner.sessions.lock().await.drain().collect();
         sessions.extend(self.inner.retained_sessions.lock().await.drain().map(|((thread_id, _), (_, live))| (thread_id, live)));
@@ -1673,7 +1688,10 @@ impl Orchestrator {
             model: session.model,
             effort: None,
             provider: ProviderInstance { kind: session.provider, instance: instance.clone() },
-            permission_mode: if session.id.starts_with("cursor-sdk:") {
+            permission_mode: if session.provider == ProviderKind::Antigravity {
+                // Antigravity only runs in Full access; resuming in another mode is refused.
+                PermissionMode::FullAccess
+            } else if session.id.starts_with("cursor-sdk:") {
                 default_provider_permission(session.provider, settings.default_permission_mode)
             } else {
                 settings.default_permission_mode
@@ -4918,6 +4936,40 @@ impl Orchestrator {
                     live.deferred_checkpoints.lock().await.insert(turn_id);
                 } else {
                     self.checkpoint_after_turn(&t, turn_id).await;
+                }
+                if self.shutting_down() {
+                    tracing::info!(%thread_id, %error, "the daemon is stopping; the turn ends as interrupted");
+                    self.emit(
+                        thread_id,
+                        Some(turn_id),
+                        EventPayload::TurnCompleted {
+                            stop_reason: StopReason::Interrupted,
+                            usage: Usage::default(),
+                            cost_usd: None,
+                            duration_ms: 0,
+                            terminal_message_id: None,
+                        },
+                    )?;
+                    self.emit(
+                        thread_id,
+                        Some(turn_id),
+                        EventPayload::ProviderNotice {
+                            level: NoticeLevel::Warning,
+                            text: format!(
+                                "Kybern's daemon on {} stopped, so this turn was interrupted. Send a message to continue.",
+                                crate::rpc::hostname()
+                            ),
+                            data: None,
+                        },
+                    )?;
+                    t.status = ThreadStatus::Idle;
+                    self.update_thread(t)?;
+                    self.delegation_turn_finished(
+                        thread_id,
+                        turn_id,
+                        delegation::TurnOutcome::Completed { stop_reason: StopReason::Interrupted, terminal_message_id: None },
+                    );
+                    return Ok(());
                 }
                 self.emit(thread_id, Some(turn_id), EventPayload::TurnFailed { error: error.clone() })?;
                 // A failed turn may have hit a plan limit.
@@ -8232,6 +8284,25 @@ mod tests {
         assert!(sweep.await.unwrap().is_empty());
         assert_eq!(closes.load(Ordering::SeqCst), 0);
         assert!(fixture.has_session(&thread).await);
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_fails_because_the_daemon_is_stopping_ends_its_turn_as_interrupted() {
+        let fixture = Fixture::new();
+        let thread = fixture.thread(ThreadStatus::Idle);
+        let (live, _) = fixture.park(&thread, Instant::now()).await;
+        fixture.orchestrator.send(thread.id, UserMessage::text("long work")).await.unwrap();
+        live.turn_ready.notified().await;
+        fixture.orchestrator.begin_shutdown();
+        let raw = "[ede_diagnostic] result_type=user stop_reason=tool_use".to_string();
+        fixture.orchestrator.handle_driver_event(thread.id, &live, DriverEvent::TurnFailed { error: raw }).await.unwrap();
+        let events = fixture.store.events_for_thread(thread.id).unwrap();
+        assert!(!events.iter().any(|event| matches!(event.payload, EventPayload::TurnFailed { .. })), "no raw failure");
+        assert!(
+            events.iter().any(|event| matches!(event.payload, EventPayload::TurnCompleted { stop_reason: StopReason::Interrupted, .. }))
+        );
+        assert!(events.iter().any(|event| matches!(&event.payload, EventPayload::ProviderNotice { text, .. } if text.contains("stopped, so this turn was interrupted"))));
+        assert_eq!(fixture.store.thread_get(thread.id).unwrap().unwrap().status, ThreadStatus::Idle);
     }
 
     #[tokio::test]

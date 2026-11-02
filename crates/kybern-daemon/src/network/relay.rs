@@ -3,6 +3,8 @@
 //!
 //! * `GET /relay/{machine_id}/ws` upgrades to a WebSocket and `ANY /relay/{machine_id}/http/{*path}`
 //!   carries one HTTP request (previews, assets, uploads, the well-known check).
+//! * Between two machines that list `relay.frames.v2`, data frames are binary WebSocket messages (see
+//!   [`encode_frame`]) and a stream's window is [`RELAY_WINDOW_V2`]; credit grants and closes stay JSON.
 //! * M authenticates the caller with a device token that has `orchestration:read`, sent in
 //!   `X-Kybern-Relay-Auth: Bearer …` (the `Authorization` header belongs to B, see below). It then
 //!   opens a **stream** on its session with B: `peer.relay.open`, then `peer.relay.data` frames in
@@ -56,10 +58,15 @@ pub(super) const fn frame_cost(len: usize) -> usize {
     if len < MIN_FRAME_COST { MIN_FRAME_COST } else { len }
 }
 pub const MAX_STREAMS_PER_CLIENT: usize = 32;
+/// Streams one member machine may hold open on this one (`inbound:<machine>`): it relays for several devices and
+/// pages at once, each under its own limit there, so its total here is larger than any one of theirs.
+pub const MAX_INBOUND_PER_MEMBER: usize = 128;
 pub const MAX_STREAMS_PER_DAEMON: usize = 256;
 /// Request bodies and response bodies are cut into pieces of this size.
 const CHUNK: usize = 16 * 1024;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a request waits for a place under the stream limits before it is refused with 429.
+const QUEUE_WAIT: Duration = Duration::from_secs(10);
 pub const RELAY_AUTH_HEADER: &str = "x-kybern-relay-auth";
 
 // ---- streams ----
@@ -81,8 +88,8 @@ pub(super) struct Credit {
 }
 
 impl Credit {
-    fn new() -> Self {
-        Self { balance: AtomicI64::new(WINDOW), changed: Notify::new() }
+    fn new(window: i64) -> Self {
+        Self { balance: AtomicI64::new(window), changed: Notify::new() }
     }
 
     pub(super) fn add(&self, bytes: i64) {
@@ -144,11 +151,40 @@ impl Stream {
 pub struct LinkRelays {
     streams: Mutex<HashMap<u64, Arc<Stream>>>,
     next: AtomicU64,
+    /// The window a new stream may send into: what the other machine's queue holds ([`WINDOW`], or
+    /// [`RELAY_WINDOW_V2`] once it listed `relay.frames.v2`).
+    window: AtomicI64,
+}
+
+/// Frames a stream's receiving queue holds: enough for the larger window at the smallest frame cost, twice over.
+const QUEUE_FRAMES: usize = (RELAY_WINDOW_V2 as usize / MIN_FRAME_COST) * 2;
+
+/// What all the large windows of one session's streams add up to before they shrink: a few streams each get the full
+/// [`RELAY_WINDOW_V2`] (a fast route needs it), and many share this, so what a session may have in flight, and the other
+/// machine may have to queue, grows slowly with the stream count instead of by 4 MiB a stream.
+pub(super) const LINK_WINDOW_BUDGET: i64 = 16 * 1024 * 1024;
+
+/// The window of a new stream when `open` streams already run on its session: `largest` (what the other machine reads)
+/// shared out of [`LINK_WINDOW_BUDGET`], never below the original [`WINDOW`].
+pub(super) fn stream_window(largest: i64, open: usize) -> i64 {
+    if largest <= WINDOW {
+        return largest;
+    }
+    (LINK_WINDOW_BUDGET / (open as i64 + 1)).clamp(WINDOW, largest)
 }
 
 impl LinkRelays {
     pub fn new(direction: Direction) -> Self {
-        Self { streams: Mutex::new(HashMap::new()), next: AtomicU64::new(if direction == Direction::Dialed { 1 } else { 2 }) }
+        Self {
+            streams: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(if direction == Direction::Dialed { 1 } else { 2 }),
+            window: AtomicI64::new(WINDOW),
+        }
+    }
+
+    /// The other machine takes the larger window (it listed `relay.frames.v2`).
+    pub fn set_large_window(&self, large: bool) {
+        self.window.store(if large { RELAY_WINDOW_V2 } else { WINDOW }, Ordering::Relaxed);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Arc<Stream>>> {
@@ -159,20 +195,20 @@ impl LinkRelays {
     /// capability the other side needs for a stream this machine serves; `None` for one it opened.
     pub(super) fn create(&self, id: Option<u64>, kind: StreamKind, serves: Option<Scope>) -> Option<(Arc<Stream>, mpsc::Receiver<Chunk>)> {
         let id = id.unwrap_or_else(|| self.next.fetch_add(2, Ordering::Relaxed));
-        let (tx, rx) = mpsc::channel(256);
+        let mut streams = self.lock();
+        if streams.contains_key(&id) {
+            return None;
+        }
+        let (tx, rx) = mpsc::channel(QUEUE_FRAMES);
         let stream = Arc::new(Stream {
             id,
             kind,
             serves,
             incoming: tx,
-            credit: Credit::new(),
+            credit: Credit::new(stream_window(self.window.load(Ordering::Relaxed), streams.len())),
             cancel: CancellationToken::new(),
             activity: Mutex::new(Instant::now()),
         });
-        let mut streams = self.lock();
-        if streams.contains_key(&id) {
-            return None;
-        }
         streams.insert(id, stream.clone());
         Some((stream, rx))
     }
@@ -231,25 +267,31 @@ impl Default for LinkRelays {
 pub struct RelayHub {
     total: Arc<AtomicUsize>,
     per_client: Arc<Mutex<HashMap<String, usize>>>,
+    /// Woken whenever a place frees up, for [`RelayHub::acquire_wait`].
+    freed: Arc<Notify>,
 }
 
 /// Holds one stream's place under the limits until dropped.
 pub struct Slot {
     total: Arc<AtomicUsize>,
     per_client: Arc<Mutex<HashMap<String, usize>>>,
+    freed: Arc<Notify>,
     client: String,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
         self.total.fetch_sub(1, Ordering::SeqCst);
-        let mut clients = self.per_client.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(count) = clients.get_mut(&self.client) {
-            *count -= 1;
-            if *count == 0 {
-                clients.remove(&self.client);
+        {
+            let mut clients = self.per_client.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(count) = clients.get_mut(&self.client) {
+                *count -= 1;
+                if *count == 0 {
+                    clients.remove(&self.client);
+                }
             }
         }
+        self.freed.notify_waiters();
     }
 }
 
@@ -267,7 +309,26 @@ impl RelayHub {
         }
         self.total.fetch_add(1, Ordering::SeqCst);
         *clients.entry(client.to_string()).or_default() += 1;
-        Some(Slot { total: self.total.clone(), per_client: self.per_client.clone(), client: client.to_string() })
+        Some(Slot { total: self.total.clone(), per_client: self.per_client.clone(), freed: self.freed.clone(), client: client.to_string() })
+    }
+
+    /// [`RelayHub::acquire_within`], waiting up to `wait` for a place to free up instead of refusing at once: a browser
+    /// that opens a burst of connections sees them queue, not fail. `None` after the wait or once `cancel` fires.
+    pub async fn acquire_wait(&self, client: &str, limit: usize, wait: Duration, cancel: &CancellationToken) -> Option<Slot> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let freed = self.freed.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            if let Some(slot) = self.acquire_within(client, limit) {
+                return Some(slot);
+            }
+            tokio::select! {
+                _ = freed => {}
+                _ = cancel.cancelled() => return None,
+                _ = tokio::time::sleep_until(deadline) => return self.acquire_within(client, limit),
+            }
+        }
     }
 
     pub fn open_streams(&self) -> usize {
@@ -279,12 +340,65 @@ impl RelayHub {
 
 /// Send `bytes` on a stream, waiting for credit. `false` when the stream or the session ended.
 async fn send_data(link: &PeerLink, stream: &Stream, bytes: &[u8], text: bool) -> bool {
+    send_frame(link, stream, bytes, text).await
+}
+
+/// A data frame of either kind of stream, after its credit: a binary message when the other machine reads them, else a
+/// `peer.relay.data` / `peer.ports.data` notification with base64 data. Both go on the session's data lane, which waits
+/// for room on a slow route instead of failing ([`super::peers::BulkLane`]); the wait ends with the stream.
+pub(super) async fn send_frame(link: &PeerLink, stream: &Stream, bytes: &[u8], text: bool) -> bool {
     if !stream.credit.take(frame_cost(bytes.len()), &stream.cancel).await {
         return false;
     }
     stream.touch();
-    let params = PeerRelayDataParams { stream_id: stream.id, data: B64.encode(bytes), credit: None, text };
-    link.notify(PeerRelayData::NAME, serde_json::to_value(params).unwrap_or(Value::Null)).await
+    let send = async {
+        if link.binary_frames() {
+            return link.send_binary(encode_frame(stream.kind, stream.id, text, bytes)).await;
+        }
+        let params = PeerRelayDataParams { stream_id: stream.id, data: B64.encode(bytes), credit: None, text };
+        let method = match stream.kind {
+            StreamKind::Relay => PeerRelayData::NAME,
+            StreamKind::Ports => kybern_protocol::methods::PeerPortsData::NAME,
+        };
+        link.notify_bulk(method, serde_json::to_value(params).unwrap_or(Value::Null)).await
+    };
+    tokio::select! {
+        sent = send => sent,
+        _ = stream.cancel.cancelled() => false,
+    }
+}
+
+const FRAME_RELAY: u8 = 0;
+const FRAME_PORTS: u8 = 1;
+const FRAME_TEXT: u8 = 1;
+const FRAME_HEADER: usize = 10;
+
+/// A binary data frame: the stream kind (0 relay, 1 ports), flags (bit 0: a text frame), the stream id (u64, big
+/// endian), then the bytes.
+pub(super) fn encode_frame(kind: StreamKind, stream_id: u64, text: bool, bytes: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(FRAME_HEADER + bytes.len());
+    frame.push(match kind {
+        StreamKind::Relay => FRAME_RELAY,
+        StreamKind::Ports => FRAME_PORTS,
+    });
+    frame.push(if text { FRAME_TEXT } else { 0 });
+    frame.extend_from_slice(&stream_id.to_be_bytes());
+    frame.extend_from_slice(bytes);
+    frame
+}
+
+/// The parts of a binary data frame, or `None` for one this machine cannot read.
+pub(super) fn decode_frame(frame: &[u8]) -> Option<(StreamKind, u64, bool, &[u8])> {
+    if frame.len() < FRAME_HEADER {
+        return None;
+    }
+    let kind = match frame[0] {
+        FRAME_RELAY => StreamKind::Relay,
+        FRAME_PORTS => StreamKind::Ports,
+        _ => return None,
+    };
+    let stream_id = u64::from_be_bytes(frame[2..FRAME_HEADER].try_into().ok()?);
+    Some((kind, stream_id, frame[1] & FRAME_TEXT != 0, &frame[FRAME_HEADER..]))
 }
 
 /// Send `bytes` cut into pieces (HTTP bodies); WebSocket messages go whole through [`send_data`].
@@ -305,9 +419,10 @@ async fn grant(link: &PeerLink, stream: &Stream, bytes: usize) {
     let _ = link.notify(PeerRelayData::NAME, serde_json::to_value(params).unwrap_or(Value::Null)).await;
 }
 
+/// After the stream's data, on the same lane: a close must not overtake bytes still queued.
 async fn send_close(link: &PeerLink, stream_id: u64, reason: Option<&str>) {
     let params = PeerRelayCloseParams { stream_id, reason: reason.map(str::to_string) };
-    let _ = link.notify(PeerRelayClose::NAME, serde_json::to_value(params).unwrap_or(Value::Null)).await;
+    let _ = link.notify_bulk(PeerRelayClose::NAME, serde_json::to_value(params).unwrap_or(Value::Null)).await;
 }
 
 /// `peer.relay.data` and `peer.ports.data`: a frame for a stream of that kind, or credit, or both.
@@ -319,9 +434,21 @@ pub async fn handle_data(link: &Arc<PeerLink>, params: PeerRelayDataParams, kind
     if params.data.is_empty() && !params.text {
         return Ok(json!({}));
     }
-    stream.touch();
     let bytes = B64.decode(params.data.as_bytes()).map_err(|_| RpcError::invalid_params("data is not base64"))?;
-    let chunk = if params.text { Chunk::Text(bytes) } else { Chunk::Binary(bytes) };
+    deliver(link, &stream, bytes, params.text);
+    Ok(json!({}))
+}
+
+/// A binary data frame for a stream of `kind` (the caller checked the kind's scope).
+pub fn handle_binary(link: &Arc<PeerLink>, kind: StreamKind, stream_id: u64, text: bool, bytes: &[u8]) {
+    if let Some(stream) = link.relays.get(stream_id, kind) {
+        deliver(link, &stream, bytes.to_vec(), text);
+    }
+}
+
+fn deliver(link: &Arc<PeerLink>, stream: &Arc<Stream>, bytes: Vec<u8>, text: bool) {
+    stream.touch();
+    let chunk = if text { Chunk::Text(bytes) } else { Chunk::Binary(bytes) };
     match stream.incoming.try_send(chunk) {
         Ok(()) => {}
         // The local consumer is gone (a GET has no request body to receive): nothing to deliver.
@@ -332,7 +459,6 @@ pub async fn handle_data(link: &Arc<PeerLink>, params: PeerRelayDataParams, kind
             link.relays.remove(stream.id);
         }
     }
-    Ok(json!({}))
 }
 
 /// `peer.relay.close` and `peer.ports.close`: the other side ended a stream of that kind.
@@ -597,7 +723,8 @@ async fn open_ws(
     path: String,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(slot) = state.network.relays.acquire_within(limits.client, limits.limit) else {
+    // A burst waits for a place (a page opens many connections at once); only a long wait is refused.
+    let Some(slot) = state.network.relays.acquire_wait(limits.client, limits.limit, QUEUE_WAIT, &CancellationToken::new()).await else {
         return refuse(StatusCode::TOO_MANY_REQUESTS, "too many relayed connections");
     };
     let Some((stream, incoming)) = link.relays.create(None, StreamKind::Relay, None) else {
@@ -723,7 +850,8 @@ async fn forward_http(
     target_path: String,
     body: Body,
 ) -> Response {
-    let Some(slot) = state.network.relays.acquire_within(limits.client, limits.limit) else {
+    // A burst waits for a place (a page opens many connections at once); only a long wait is refused.
+    let Some(slot) = state.network.relays.acquire_wait(limits.client, limits.limit, QUEUE_WAIT, &CancellationToken::new()).await else {
         return refuse(StatusCode::TOO_MANY_REQUESTS, "too many relayed connections");
     };
     let Some((stream, mut incoming)) = link.relays.create(None, StreamKind::Relay, None) else {
@@ -1000,7 +1128,7 @@ pub async fn handle_open(state: &AppState, link: &Arc<PeerLink>, params: PeerRel
     let slot = state
         .network
         .relays
-        .acquire(&format!("inbound:{}", link.machine_id))
+        .acquire_within(&format!("inbound:{}", link.machine_id), MAX_INBOUND_PER_MEMBER)
         .ok_or_else(|| RpcError::new(codes::CONFLICT, "too many relayed connections on this machine"))?;
     let (stream, incoming) = link
         .relays
@@ -1189,6 +1317,45 @@ async fn open_local_http(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn binary_frames_round_trip_and_unknown_kinds_are_ignored() {
+        let frame = encode_frame(StreamKind::Ports, 0x0102_0304_0506_0708, true, b"hello");
+        assert_eq!(frame.len(), FRAME_HEADER + 5);
+        let (kind, id, text, bytes) = decode_frame(&frame).unwrap();
+        assert_eq!((kind, id, text, bytes), (StreamKind::Ports, 0x0102_0304_0506_0708, true, &b"hello"[..]));
+        let empty = encode_frame(StreamKind::Relay, 3, false, b"");
+        assert_eq!(decode_frame(&empty).unwrap(), (StreamKind::Relay, 3, false, &b""[..]));
+        let mut unknown = frame.clone();
+        unknown[0] = 9;
+        assert!(decode_frame(&unknown).is_none());
+        assert!(decode_frame(&frame[..4]).is_none());
+        // A stream created after the other machine listed the larger window may send that much.
+        let relays = LinkRelays::new(Direction::Dialed);
+        let (small, _rx) = relays.create(None, StreamKind::Ports, None).unwrap();
+        relays.set_large_window(true);
+        let (large, _rx2) = relays.create(None, StreamKind::Ports, None).unwrap();
+        assert_eq!(small.credit.balance.load(Ordering::SeqCst), WINDOW);
+        assert_eq!(large.credit.balance.load(Ordering::SeqCst), RELAY_WINDOW_V2);
+        assert!(QUEUE_FRAMES as i64 * MIN_FRAME_COST as i64 >= RELAY_WINDOW_V2, "the queue holds a full window of small frames");
+    }
+
+    #[test]
+    fn many_streams_on_one_session_share_the_large_window_instead_of_each_taking_it() {
+        assert_eq!(stream_window(WINDOW, 100), WINDOW, "an older machine keeps the original window");
+        assert_eq!(stream_window(RELAY_WINDOW_V2, 0), RELAY_WINDOW_V2);
+        assert_eq!(stream_window(RELAY_WINDOW_V2, 3), RELAY_WINDOW_V2, "a few streams each get the whole window");
+        assert_eq!(stream_window(RELAY_WINDOW_V2, 7), LINK_WINDOW_BUDGET / 8);
+        assert_eq!(stream_window(RELAY_WINDOW_V2, 127), WINDOW, "never below the original window");
+        let relays = LinkRelays::new(Direction::Accepted);
+        relays.set_large_window(true);
+        let held: Vec<_> = (0..MAX_INBOUND_PER_MEMBER).map(|_| relays.create(None, StreamKind::Ports, None).unwrap()).collect();
+        let in_flight: i64 = held.iter().map(|(stream, _)| stream.credit.balance.load(Ordering::SeqCst)).sum();
+        // 128 streams at 4 MiB each would be 512 MiB the other machine may have to queue.
+        assert!(in_flight < 96 * 1024 * 1024, "{in_flight} bytes in flight on one session");
+        assert!(held.iter().all(|(stream, _)| stream.credit.balance.load(Ordering::SeqCst) >= WINDOW));
+    }
+
     use super::*;
 
     #[test]
@@ -1348,7 +1515,7 @@ mod tests {
 
     #[tokio::test]
     async fn credit_blocks_a_sender_until_the_receiver_grants_more_and_stops_on_cancel() {
-        let credit = Arc::new(Credit::new());
+        let credit = Arc::new(Credit::new(WINDOW));
         let cancel = CancellationToken::new();
         // A message larger than the window goes through once and leaves a debt.
         assert!(credit.take(WINDOW as usize + 1000, &cancel).await);

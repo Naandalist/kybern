@@ -25,7 +25,7 @@ use crate::previews::tickets::{HARD_CAP, MAX_TICKETS, SLIDING_EXPIRY};
 use crate::state::AppState;
 
 /// Streams one page ticket may hold open at once (requests and hot-reload sockets together).
-pub const MAX_STREAMS_PER_PAGE: usize = 8;
+pub const MAX_STREAMS_PER_PAGE: usize = 32;
 
 /// The header B reads a page's outside prefix from (`/relay/<machine>/page/<ticket>`), so a sandboxed page's
 /// policy points at the address the web view loaded. B trusts it only beside [`LOCAL_MARK_HEADER`].

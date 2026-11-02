@@ -409,6 +409,68 @@ pub async fn pr_list_with(gh: &str, cwd: &Path, state: &str, limit: u32) -> Resu
     Ok(v.as_array().map(|a| a.iter().filter_map(parse_pr_extended).collect()).unwrap_or_default())
 }
 
+/// The repository the desktop's star prompt asks about (ADE-117). Fixed: neither RPC takes a repository.
+pub const KYBERN_REPOSITORY: &str = "Tresnanda/kybern";
+/// How long one `gh api` call for the star prompt may take before it counts as a failure.
+const STAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// What one `gh api` call for the star prompt came back with.
+enum GhAnswer {
+    /// Exit 0: GitHub answered 2xx (204 for both routes).
+    Ok,
+    /// GitHub answered 404.
+    NotFound,
+    /// `gh` is not installed, or not signed in (its exit code 4, or its sign-in hint).
+    Unavailable,
+    /// Anything else: GitHub refused, the network failed, the call timed out.
+    Failed(String),
+}
+
+async fn gh_api(gh: &str, args: &[&str]) -> GhAnswer {
+    let output = Command::new(gh).no_window().current_dir(std::env::temp_dir()).args(args).stdin(std::process::Stdio::null()).output();
+    let out = match tokio::time::timeout(STAR_TIMEOUT, output).await {
+        Err(_) => return GhAnswer::Failed("gh api timed out".into()),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => return GhAnswer::Unavailable,
+        Ok(Err(error)) => return GhAnswer::Failed(format!("run gh: {error}")),
+        Ok(Ok(out)) => out,
+    };
+    if out.status.success() {
+        return GhAnswer::Ok;
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.code() == Some(4) || stderr.contains("gh auth login") {
+        GhAnswer::Unavailable
+    } else if stderr.contains("HTTP 404") {
+        GhAnswer::NotFound
+    } else {
+        GhAnswer::Failed(format!("gh {}: {}", args.join(" "), stderr.trim()))
+    }
+}
+
+/// `github.starred`: `gh api user/starred/<repo>` answers 204 when starred and 404 when not. A missing or
+/// signed-out `gh` reads as "not starred" (the prompt still shows, and Star opens the page); any other
+/// failure is an error, which the client takes as "skip the prompt this session".
+pub async fn starred_with(gh: &str) -> Result<GithubStarredResult> {
+    let route = format!("user/starred/{KYBERN_REPOSITORY}");
+    match gh_api(gh, &["api", &route]).await {
+        GhAnswer::Ok => Ok(GithubStarredResult { starred: true, can_star: true }),
+        GhAnswer::NotFound => Ok(GithubStarredResult { starred: false, can_star: true }),
+        GhAnswer::Unavailable => Ok(GithubStarredResult { starred: false, can_star: false }),
+        GhAnswer::Failed(message) => Err(anyhow!(message)),
+    }
+}
+
+/// `github.star`: `gh api -X PUT user/starred/<repo>`.
+pub async fn star_with(gh: &str) -> Result<()> {
+    let route = format!("user/starred/{KYBERN_REPOSITORY}");
+    match gh_api(gh, &["api", "-X", "PUT", &route]).await {
+        GhAnswer::Ok => Ok(()),
+        GhAnswer::Unavailable => Err(anyhow!("GitHub CLI is not installed or not signed in")),
+        GhAnswer::NotFound => Err(anyhow!("GitHub could not find {KYBERN_REPOSITORY}")),
+        GhAnswer::Failed(message) => Err(anyhow!(message)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +555,62 @@ mod group_link_tests {
             cross_link_block("Add SSO to the admin console", &["acme/api#128".into(), "acme/web#77".into()]),
             "---\nPart of a change across 2 repositories (Kybern chat “Add SSO to the admin console”):\n- acme/api#128\n- acme/web#77\n"
         );
+    }
+}
+
+// The fake `gh` is a shell script; nothing here reaches GitHub.
+#[cfg(all(test, unix))]
+mod star_tests {
+    use super::*;
+
+    /// A fake `gh` that logs its arguments, then exits with `code` and prints `stderr`.
+    fn fake(code: u8, stderr: &str) -> (Cleanup, String, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kybern-star-{}", uuid::Uuid::now_v7()));
+        let log = dir.join("gh.log");
+        let body = format!("#!/bin/sh\necho \"$@\" >> \"{}\"\necho '{stderr}' >&2\nexit {code}\n", log.display());
+        let gh = crate::test_support::script(&dir, "gh", &body, "");
+        (Cleanup(dir), gh.to_string_lossy().into_owned(), log)
+    }
+
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn starred_reads_204_and_404_and_treats_a_missing_or_signed_out_gh_as_not_starred() {
+        let (_dir, gh, log) = fake(0, "");
+        let yes = starred_with(&gh).await.unwrap();
+        assert_eq!((yes.starred, yes.can_star), (true, true));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "api user/starred/Tresnanda/kybern");
+
+        let (_dir, gh, _) = fake(1, "gh: Not Found (HTTP 404)");
+        let no = starred_with(&gh).await.unwrap();
+        assert_eq!((no.starred, no.can_star), (false, true));
+
+        let (_dir, gh, _) = fake(4, "To get started with GitHub CLI, please run:  gh auth login");
+        let signed_out = starred_with(&gh).await.unwrap();
+        assert_eq!((signed_out.starred, signed_out.can_star), (false, false));
+
+        let missing = starred_with("/nonexistent/kybern-test/gh").await.unwrap();
+        assert_eq!((missing.starred, missing.can_star), (false, false));
+
+        let (_dir, gh, _) = fake(1, "gh: Server Error (HTTP 502)");
+        assert!(starred_with(&gh).await.is_err(), "another failure is an error: the client skips this session");
+    }
+
+    #[tokio::test]
+    async fn star_puts_only_kyberns_repository_and_reports_failures() {
+        let (_dir, gh, log) = fake(0, "");
+        star_with(&gh).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "api -X PUT user/starred/Tresnanda/kybern");
+
+        let (_dir, gh, _) = fake(4, "gh auth login");
+        assert!(star_with(&gh).await.unwrap_err().to_string().contains("not signed in"));
+        assert!(star_with("/nonexistent/kybern-test/gh").await.is_err());
+        let (_dir, gh, _) = fake(1, "gh: Forbidden (HTTP 403)");
+        assert!(star_with(&gh).await.unwrap_err().to_string().contains("403"));
     }
 }

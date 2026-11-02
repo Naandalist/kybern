@@ -19,6 +19,6 @@ if (process.platform === 'linux') {
   execFileSync('cargo', ['build', '--release', '--locked', '--manifest-path', path.join(root, 'webview-win/Cargo.toml')], { stdio: 'inherit', env: { ...process.env, CARGO_TARGET_DIR: target, CARGO_INCREMENTAL: '0', RUSTC_WRAPPER: '' } })
   copyFileSync(path.join(target, 'release/kybern_webview.dll'), path.join(root, 'build/kybern-webview.dll'))
 } else {
-  execFileSync('clang', ['-dynamiclib', ...COMPANION_CFLAGS, '-framework', 'Cocoa', '-framework', 'WebKit', '-framework', 'QuartzCore', path.join(root, 'webview.m'), '-o', path.join(root, 'build/kybern-webview.dylib')], { stdio: 'inherit' })
+  execFileSync('clang', ['-dynamiclib', ...COMPANION_CFLAGS, '-framework', 'Cocoa', '-framework', 'WebKit', '-framework', 'QuartzCore', '-framework', 'Security', path.join(root, 'webview.m'), '-o', path.join(root, 'build/kybern-webview.dylib')], { stdio: 'inherit' })
   execFileSync('codesign', ['--force', '--sign', '-', path.join(root, 'build/kybern-webview.dylib')], { stdio: 'inherit' })
 }

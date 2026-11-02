@@ -133,6 +133,8 @@ export const setNetworkEnabled = (enabled: boolean) => act('enabled', async (c) 
 export const updateAllMachines = (): Promise<NetworkUpdateAllResult> => act('update', async (c) => { const updated = await c.call('network.update_all', {}); emit({ updated }); return updated })
 /** "Keep all machines on the same version": a member that sees a newer version updates itself when idle. */
 export const setFollowUpdates = (enabled: boolean) => act('follow', (c) => c.call('network.follow_updates.set', { enabled }))
+/** "Keep this machine reachable when Kybern is closed": the daemon registers or removes its login item before answering. */
+export const setKeepReachable = (enabled: boolean) => act('reachable', (c) => c.call('network.keep_reachable.set', { enabled }))
 export const retryOutbox = (id: string) => act(`outbox:${id}`, async (c) => { const item = await c.call('outbox.retry', { id }); await loadOutbox(); return item })
 export const cancelOutbox = (id: string) => act(`outbox:${id}`, async (c) => { const item = await c.call('outbox.cancel', { id }); await loadOutbox(); return item })
 export const doctor = (machineId?: MachineId): Promise<DoctorReport> => act('doctor', async (c) => { const report = await c.call('network.doctor', { machine_id: machineId ?? null }); emit({ doctor: report }); return report })

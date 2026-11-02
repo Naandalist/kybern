@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -204,7 +204,13 @@ pub struct Cli {
     binary: Mutex<Option<String>>,
     status: Mutex<Option<(Instant, TsStatus)>>,
     whois: Mutex<HashMap<IpAddr, (Instant, Whois)>>,
+    /// The `whois` call running for an address, which concurrent callers wait on instead of starting their own: a
+    /// browser opening several connections at once costs one CLI call, not one each.
+    whois_running: Mutex<HashMap<IpAddr, Running>>,
 }
+
+/// A `whois` call in flight: its answer, or the error's text, once it is known.
+type Running = Arc<tokio::sync::OnceCell<std::result::Result<Whois, String>>>;
 
 impl Cli {
     async fn run(&self, args: &[&str]) -> Option<(bool, String)> {
@@ -314,6 +320,24 @@ impl Tailscale for Cli {
         {
             return Ok(whois.clone());
         }
+        let running = self.whois_running.lock().unwrap_or_else(|p| p.into_inner()).entry(addr).or_default().clone();
+        let answer = running.get_or_init(|| async { self.whois_now(addr).await.map_err(|error| format!("{error:#}")) }).await.clone();
+        {
+            let mut table = self.whois_running.lock().unwrap_or_else(|p| p.into_inner());
+            if table.get(&addr).is_some_and(|current| Arc::ptr_eq(current, &running)) {
+                table.remove(&addr);
+            }
+        }
+        answer.map_err(|message| anyhow!(message))
+    }
+
+    async fn listen_ip(&self) -> Option<IpAddr> {
+        crate::discovery::tailscale_ip().await
+    }
+}
+
+impl Cli {
+    async fn whois_now(&self, addr: IpAddr) -> Result<Whois> {
         let address = addr.to_string();
         let (ok, text) = self.run(&["whois", "--json", &address]).await.context("Tailscale is not installed on this machine")?;
         if !ok {
@@ -325,10 +349,6 @@ impl Tailscale for Cli {
         cache.retain(|_, (at, _)| at.elapsed() < WHOIS_TTL);
         cache.insert(addr, (Instant::now(), whois.clone()));
         Ok(whois)
-    }
-
-    async fn listen_ip(&self) -> Option<IpAddr> {
-        crate::discovery::tailscale_ip().await
     }
 }
 

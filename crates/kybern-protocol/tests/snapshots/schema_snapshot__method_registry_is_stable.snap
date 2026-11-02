@@ -159,6 +159,8 @@ expression: names
 - github.actions.workflow
 - github.actions.action
 - github.actions.dispatch
+- github.starred
+- github.star
 - threads.worktree.inspect
 - threads.worktree.remove
 - files.search
@@ -210,6 +212,7 @@ expression: names
 - network.doctor
 - machines.info
 - network.follow_updates.set
+- network.keep_reachable.set
 - peer.ops.sync
 - peer.ops.push
 - peer.presence

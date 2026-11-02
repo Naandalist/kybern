@@ -65,6 +65,7 @@ import { SidebarDragLayer, SidebarResizeHandle } from './shell/ResizeHandle.tsx'
 import { ResizeCaptureLayer } from './kit/Resize.tsx'
 import { ThemeFade } from './motion/themeFade.tsx'
 import { Toaster } from './shell/toasts.tsx'
+import { startStarPrompt } from './shell/starPromptApp.ts'
 import { AppUpdateSurface } from './platform/UpdateSurface.tsx'
 import { NetworkIntroSurface } from './machines/NetworkIntro.tsx'
 import { TranscriptReleased } from './platform/TranscriptReleased.tsx'
@@ -149,6 +150,7 @@ function Workspace() {
     startNavHistory()
     startSpaces()
     startPreview()
+    startStarPrompt()
     return startSpaceKeys()
   }, [])
   const connectionStatus = useApp(s => s.status)

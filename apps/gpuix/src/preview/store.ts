@@ -10,10 +10,16 @@ import { activeEnvironment } from '../shell/environment.ts'
 import { recordRecent, recentsKeyForThread } from './recents.ts'
 import { browserAddress, currentAddress } from './address.ts'
 import { webHost } from '../native/webview.ts'
-import { addressPath, forwardedAddress, forwardPort, sourceAddress, type RemoteServer } from './remote.ts'
+import { addressPath, forwardedAddress, forwardPort, localServerOn, sourceAddress, type RemoteServer } from './remote.ts'
+import { fastAddress, fastKey, wantsFast, type FastMode } from './fast.ts'
+import { machineHub, machineRows } from '../machines/index.ts'
+import { shortMachineName } from '../../../../packages/kybern-client/src/forkMachine.ts'
 export type PreviewLoad = { phase: 'idle' | 'resolving' | 'ready' | 'external' } | { phase: 'waiting'; error: 'connection_refused' | 'timed_out'; startedAt: number } | { phase: 'blocked'; header: string; value: string } | { phase: 'error'; error?: string; status?: number; message?: string } | { phase: 'not-found'; name: string } | { phase: 'relay-failed' }
-export interface Entry { target?: PreviewTargetInfo; proxy?: boolean; query?: string; address: string; url: string; frameUrl?: string; closeRelay?: () => void; title: string; ticket?: string; kind: 'file' | 'server' | 'external'; /** A dev server on another machine, shown through a forward of its port. */ machine?: RemoteServer; releaseTicket?: () => void; released?: boolean }
-export interface PreviewState { entries: Entry[]; load: PreviewLoad; loading: boolean; wsFailed?: boolean; wsNoticeDismissed?: boolean; attemptedAddress?: string; attemptedMachine?: RemoteServer; navigatedAway?: boolean; index: number; floating: boolean; busy: boolean; error: string | null; permission?: { address: string; folder: string; grantable: boolean }; opened?: boolean; /** The machine whose servers the empty Browser lists (all machines when unset). */ serversOn?: string; /** The "Forward a port" strip is open. */ forwardOpen?: boolean; forwardMachine?: string; device: boolean; width: number; height: number; preset: string | null; bridge?: { back: number; forward: number }; pageTitle?: string; pagePath?: string; focusAddress?: number }
+export interface Entry { target?: PreviewTargetInfo; proxy?: boolean; query?: string; address: string; url: string; frameUrl?: string; closeRelay?: () => void; title: string; ticket?: string; kind: 'file' | 'server' | 'external'; /** A dev server on another machine, shown through a forward of its port. */ machine?: RemoteServer; releaseTicket?: () => void; released?: boolean
+  /** Fast mode (ADE-116): whether the page loads over the forward's HTTP/2 listener, and the round trip that decided it. */ fast?: FastMode
+  /** The certificate the web view accepts for a Fast page (`https://localhost`): only this one, only for its origin. */ trust?: { sha256: string; pem: string } }
+export interface PreviewState { entries: Entry[]; load: PreviewLoad; loading: boolean; wsFailed?: boolean; wsNoticeDismissed?: boolean; attemptedAddress?: string; attemptedMachine?: RemoteServer; navigatedAway?: boolean; index: number; floating: boolean; busy: boolean; error: string | null; permission?: { address: string; folder: string; grantable: boolean }; opened?: boolean; /** The machine whose servers the empty Browser lists (all machines when unset). */ serversOn?: string; /** The "Forward a port" strip is open. */ forwardOpen?: boolean; forwardMachine?: string; device: boolean; width: number; height: number; preset: string | null; bridge?: { back: number; forward: number }; pageTitle?: string; pagePath?: string; focusAddress?: number
+  /** Fast mode chosen by hand for a server (`fastKey`): true for HTTP/2, false for plain HTTP. Unset follows the round trip. */ fastChoice?: Record<string, boolean> }
 const empty: PreviewState = { entries: [], load: { phase: 'idle' }, loading: false, index: -1, floating: false, opened: false, busy: false, error: null, device: false, width: 390, height: 844, preset: 'iphone-12-pro' }
 const sessions = new Map<string, PreviewState>(), generations = new Map<string, number>()
 let nextGeneration = 0
@@ -50,10 +56,22 @@ function commitEntry(id: string, entry: Entry, replace: boolean, load: PreviewLo
   setPreview(id, { entries, index: replacing ? current.index : entries.length - 1, floating: entry.kind === 'external' ? false : current.floating, busy: false, loading: load.phase === 'ready' && webHost.available, load, wsFailed: false, wsNoticeDismissed: false, navigatedAway: false, opened: false, bridge: undefined, pageTitle: undefined, pagePath: undefined })
 }
 const REMOTE_FILE_MESSAGE = "Files on another machine can't be previewed here yet. Ask the agent to serve the page, then open its address."
-export interface OpenOptions { proxy?: boolean; retry?: boolean; suffix?: string; /** A server on another machine; its port is forwarded to this machine first. */ machine?: RemoteServer; /** The forward exists: `raw` is its local address. */ forwarded?: boolean }
+export interface OpenOptions { proxy?: boolean; retry?: boolean; suffix?: string; /** A server on another machine; its port is forwarded to this machine first. */ machine?: RemoteServer; /** The forward exists: `raw` is its local address. */ forwarded?: boolean
+  /** The forward's Fast mode; `raw` is then its `https://localhost` address and `fast.plain` the one to show and copy. */ fast?: FastMode; trust?: { sha256: string; pem: string }
+  /** Open through the thread machine's own preview ticket, not a forward (the forward could not be opened). */ ticketRoute?: boolean }
+/** A server of a thread that runs on another machine: forwarded to this machine over the direct route when the machine is in
+ * this machine's network (keep-alive TCP, no relay hop), else `undefined` and the page goes through that machine's ticket. */
+function threadServer(id: string, raw: string, options: OpenOptions): RemoteServer | undefined {
+  if (options.machine || options.forwarded || options.ticketRoute || !activeEnvironment().local) return undefined
+  const machineId = machineOfThreadId(id)
+  const row = machineId ? machineRows(machineHub()).find(m => m.machineId === machineId) : undefined
+  return row ? localServerOn(raw, { id: row.machineId, name: shortMachineName(row.name) || row.name, offline: row.offline }) : undefined
+}
 export async function openPreview(id: string, raw: string, allowFolder = false, launch = false, replace = false, options: OpenOptions = {}): Promise<boolean | undefined> {
-  const earlier = previewState(id), machine = options.machine ?? (replace ? earlier.entries[earlier.index]?.machine : undefined)
+  const earlier = previewState(id), machine = options.machine ?? (replace && !options.ticketRoute ? earlier.entries[earlier.index]?.machine : undefined)
   if (machine && !options.forwarded) return openForwarded(id, machine, launch, replace, options)
+  const served = threadServer(id, raw, options)
+  if (served) return openForwarded(id, served, launch, replace, { ...options, fallback: raw })
   const via = options.forwarded ? options.machine : undefined
   const thread = getState().threads.find(t => t.id === id)
   const project = getState().projects.find(p => p.id === thread?.project_id)
@@ -97,7 +115,9 @@ export async function openPreview(id: string, raw: string, allowFolder = false, 
     // Another machine's ticket has no address here: its relay below is the page's address.
     const url = result.path ? remote ? result.path : `${httpBase(client.endpoint.url)}${result.path}${result.target.kind === 'file' ? options.suffix ?? '' : ''}` : result.target.kind === 'file' ? null : result.target.url
     if (!url) throw new Error('Unable to open this local file. Choose an HTML file and try again.')
-    const entry: Entry = { target: result.target, proxy: !!proxy, ...(target.kind === 'search' ? { query: target.query } : {}), address: result.target.kind === 'file' ? result.target.path : address, url, title: title ?? (result.target.kind === 'file' ? result.target.path.split('/').pop() ?? 'Preview' : new URL(address).host), ticket: result.ticket, kind: result.target.kind, ...(via ? { machine: via } : {}) }
+    // A Fast page loads its `https://localhost` listener; the address shown, copied and opened in a browser is the plain one.
+    const shown = options.fast?.on ? options.fast.plain : address
+    const entry: Entry = { target: result.target, proxy: !!proxy, ...(target.kind === 'search' ? { query: target.query } : {}), address: result.target.kind === 'file' ? result.target.path : shown, url, title: title ?? (result.target.kind === 'file' ? result.target.path.split('/').pop() ?? 'Preview' : new URL(shown).host), ticket: result.ticket, kind: result.target.kind, ...(via ? { machine: via } : {}), ...(via && options.fast ? { fast: options.fast } : {}), ...(via && options.trust ? { trust: options.trust } : {}) }
     pendingEntry = entry
     entry.releaseTicket = () => { if (result.ticket) void client.call('previews.close', { ticket: result.ticket }).catch(() => {}) }
     if (result.target.kind === 'server' && proxy && !result.path) throw Error('Kybern cannot forward this server through the current connection.')
@@ -138,19 +158,37 @@ export async function openPreview(id: string, raw: string, allowFolder = false, 
     return false
   }
 }
-/** Forward the port of a server on another machine, then open the forwarded address like any local page. Failures show in the pane. */
-async function openForwarded(id: string, machine: RemoteServer, launch: boolean, replace: boolean, options: OpenOptions): Promise<boolean | undefined> {
+/** Forward the port of a server on another machine, then open the forwarded address like any local page. Failures show in the pane.
+ * Above `FAST_RTT_MS` (or when chosen by hand) the page loads over the forward's HTTP/2 listener (Fast mode, `fast.ts`). */
+async function openForwarded(id: string, machine: RemoteServer, launch: boolean, replace: boolean, options: OpenOptions & { fallback?: string }): Promise<boolean | undefined> {
   const generation = ++nextGeneration; generations.set(id, generation)
   const before = previewState(id)
   setPreview(id, { busy: !options.retry, loading: !options.retry, attemptedMachine: machine, attemptedAddress: sourceAddress(machine), error: null, permission: undefined, load: options.retry && before.load.phase === 'waiting' ? before.load : { phase: 'resolving' } })
   try {
     const client = localClient()!
     const primaryId = client.info?.machine_id ?? client.info?.environment_id
-    const address = primaryId === machine.id ? sourceAddress(machine) : forwardedAddress(await forwardPort(client, machine.id, machine.port), machine.path, machine.scheme)
+    let address = sourceAddress(machine), fast: FastMode | undefined, trust: Entry['trust']
+    if (primaryId !== machine.id) {
+      const forward = await forwardPort(client, machine.id, machine.port)
+      const plain = forwardedAddress(forward, machine.path, machine.scheme)
+      address = plain
+      if (webHost.available && machine.scheme !== 'https' && forward.https_available) {
+        fast = { on: false, plain, rttMs: forward.rtt_ms }
+        if (wantsFast(forward.rtt_ms, previewState(id).fastChoice?.[fastKey(machine)])) {
+          const secure = await client.call('ports.forward', { machine: machine.id, remote_port: machine.port, https: true }).catch(() => undefined)
+          const fastUrl = secure && fastAddress(secure, machine.path)
+          if (fastUrl && secure.https_certificate && secure.https_certificate_sha256) {
+            address = fastUrl; fast = { ...fast, on: true }; trust = { sha256: secure.https_certificate_sha256, pem: secure.https_certificate }
+          }
+        }
+      }
+    }
     if (generations.get(id) !== generation) return false
-    return await openPreview(id, address, false, launch, replace, { ...options, machine, forwarded: true })
+    return await openPreview(id, address, false, launch, replace, { ...options, machine, forwarded: true, fast, trust })
   } catch (e) {
     if (generations.get(id) !== generation) return false
+    // A thread's own server whose machine could not forward it (not in this machine's network): its preview ticket instead.
+    if (options.fallback) return openPreview(id, options.fallback, false, launch, replace, { ...options, machine: undefined, ticketRoute: true })
     const message = e instanceof Error ? e.message : String(e)
     const address = sourceAddress(machine)
     commitEntry(id, { address, url: address, title: machine.name, kind: 'server', machine, released: true }, replace, { phase: 'error', message })
@@ -201,6 +239,13 @@ export function resetPreviews() {
 export function retryPreview(id: string) {
   const s = previewState(id), entry = s.entries[s.index]
   if (entry || s.attemptedAddress) return openPreview(id, s.attemptedAddress ?? entry!.address, false, false, true, { retry: true, ...(s.attemptedMachine ? { machine: s.attemptedMachine } : {}) })
+}
+/** Turn Fast mode on or off for the current page's server (remembered for that server in this Browser), and reload it. */
+export function setPreviewFast(id: string, on: boolean) {
+  const s = previewState(id), entry = s.entries[s.index]
+  if (entry?.kind !== 'server' || !entry.machine) return
+  setPreview(id, { fastChoice: { ...s.fastChoice, [fastKey(entry.machine)]: on } })
+  void openPreview(id, entry.address, false, false, true, { machine: entry.machine })
 }
 export function setPreviewProxy(id: string, proxy: boolean) {
   const s = previewState(id), entry = s.entries[s.index]

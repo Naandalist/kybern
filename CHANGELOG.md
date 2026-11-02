@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.21.2
+
+<!-- kybern-release-title: Fast previews from your other machines -->
+<!-- kybern-release-summary: Dev servers on another machine preview several times faster, machines stay reachable with Kybern closed, and saved Antigravity conversations import. -->
+
+- Previews of a dev server on another machine load much faster. Forwards keep connections ready, so opening a page no longer waits on extra round trips. On slower routes (over about 40 ms), previews switch to Fast mode: HTTP/2 over `https://localhost`, with every request sharing one connection and text compressed on the way. In our tests, a 360-module Vite app over a 213 ms route loaded in under 6 s in Kybern's window, down from 19 s. Hot reload, WebSockets and server-sent events keep working. The Fast chip in the address bar switches a preview back to plain HTTP, for apps that expect `http://localhost` in redirects or API calls.
+- Fast mode uses a certificate made for your install that only Kybern's own web views accept. It is never added to your system's trust store.
+- A thread on another machine opens its own localhost server through the same fast forward.
+- Forwards recover by themselves when the other machine's daemon restarts. Before, they failed until they sat idle for 30 minutes.
+- Machines in your network stay reachable when Kybern is closed. While a machine is in a network, Kybern starts in the background when you sign in: a scheduled task on Windows, a LaunchAgent on macOS and a systemd user service on Linux. Turn it off in Settings → Machines → Keep this machine reachable when Kybern is closed, or with `kybern machines reachable off`.
+- A machine that wakes from sleep reconnects to the others within seconds, instead of waiting out its retry delay.
+- On Linux, an agent or build that runs out of memory no longer stops Kybern's daemon and every conversation with it. Existing installs are fixed on the next start, and `kybern machines doctor` reports one that isn't. A conversation cut off by a daemon stop now says so, instead of showing a raw diagnostic line.
+- Saved Antigravity conversations show up in the first-run scan and in session import, grouped by project, with the same tool cards as a live conversation. Kybern only reads Antigravity's files.
+- Long links and keys in a message wrap inside the bubble, instead of running past its edge and leaving empty space below.
+- The Running, Failed and Passed filter on the Actions page, and the dock's project switcher, keep their highlight on the selected option when you resize the pane.
+- After a few messages, Kybern asks once whether you'd star it on GitHub. If the GitHub CLI is signed in, Star on GitHub stars it right away; otherwise it opens the page. If you have already starred Kybern, you won't see it, and closing it hides it for good.
+
 ## 0.21.1
 
 <!-- kybern-release-title: Clearer model picker and agent settings -->

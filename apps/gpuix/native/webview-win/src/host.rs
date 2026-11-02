@@ -40,7 +40,7 @@ use webview2_com::{
     FocusChangedEventHandler, FrameCreatedEventHandler, FrameDestroyedEventHandler, FrameNavigationCompletedEventHandler,
     LaunchingExternalUriSchemeEventHandler, NavigationCompletedEventHandler, NavigationStartingEventHandler,
     NewWindowRequestedEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler, ScriptDialogOpeningEventHandler,
-    WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
+    ServerCertificateErrorDetectedEventHandler, WebMessageReceivedEventHandler, WebResourceRequestedEventHandler,
 };
 use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::IGeometrySource2D;
@@ -414,6 +414,8 @@ struct Doc {
     category: String,
     generation: Value,
     allowed: Vec<String>,
+    /// PEM bodies of the certificates a Fast preview's `https://localhost` origin may present (`pinned_certificate`).
+    trusted: Vec<String>,
     wrapper: String,
     html: String,
     hwnd: HWND,
@@ -814,11 +816,17 @@ impl Host {
             .and_then(Value::as_array)
             .map(|origins| origins.iter().filter_map(Value::as_str).map(str::to_owned).collect())
             .unwrap_or_default();
+        let trusted = command
+            .get("trustedCertificatePems")
+            .and_then(Value::as_array)
+            .map(|pems| pems.iter().filter_map(Value::as_str).map(crate::policy::pem_body).filter(|body| !body.is_empty()).collect())
+            .unwrap_or_default();
         self.docs.push(Doc {
             id: id.to_owned(),
             category,
             generation: generation.clone(),
             allowed,
+            trusted,
             wrapper: wrapper_url(id),
             html: text(command, "html").to_owned(),
             hwnd,
@@ -1410,6 +1418,25 @@ impl Doc {
             Ok(())
         }));
         unsafe { webview.add_FrameNavigationStarting(&guard_frames, &mut token)? };
+        // A Fast preview (`https://localhost`) presents Kybern's per-install certificate, which no trust store knows:
+        // allow exactly that certificate for the document's own loopback origin; every other error keeps failing. WebView2 remembers an
+        // `ALWAYS_ALLOW` per host and certificate (not port), in this document's own InPrivate profile only.
+        if !self.trusted.is_empty()
+            && let Ok(webview14) = webview.cast::<ICoreWebView2_14>()
+        {
+            let (allowed, trusted) = (self.allowed.clone(), self.trusted.clone());
+            let pinned = ServerCertificateErrorDetectedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let uri = take(|out| unsafe { args.RequestUri(out) });
+                let certificate = unsafe { args.ServerCertificate()? };
+                let pem = take(|out| unsafe { certificate.ToPemEncoding(out) });
+                if crate::policy::pinned_certificate(&uri, &pem, &trusted, &allowed) {
+                    unsafe { args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW)? };
+                }
+                Ok(())
+            }));
+            unsafe { webview14.add_ServerCertificateErrorDetected(&pinned, &mut token)? };
+        }
         let popups_event = event.clone();
         let popups = NewWindowRequestedEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else { return Ok(()) };

@@ -8,7 +8,7 @@ import { stateDetail, type PrState } from './verify.states.ts'
 import { ACTION_PULLS, actionRun, actionRuns } from './verify.actions-fixture.ts'
 import type { PrDetailResult, PrFile, PrReviewEntry, PrTimelineEvent, PullRequest, UsageRow } from '../../../../packages/kybern-client/src/types.ts'
 
-export function actionFixture(options: { long?: boolean; horizontal?: boolean; picker?: boolean; paged?: boolean; slowFiles?: boolean; /** Extra running checks beyond the one in the base fixture. */ running?: number; /** A group project of three repositories (ADE-79): api and docs both have #108, web fails, infra is skipped. */ group?: boolean; /** ADE-85 list and Timeline: a group project of three repositories with pull requests in every readiness group, and a timeline history. */ readiness?: boolean; /** 65 distinct files in folders, with short patches (30 a page), for the Changes tab. */ changes?: boolean; /** A verdict state of the detail page (`verify.states.ts`). */ state?: PrState; /** ADE-97: 100 runs over 24 branches and a 40-job run, for the Actions performance check. */ actionsBig?: boolean } = {}) {
+export function actionFixture(options: { long?: boolean; horizontal?: boolean; picker?: boolean; paged?: boolean; slowFiles?: boolean; /** Extra running checks beyond the one in the base fixture. */ running?: number; /** A group project of three repositories (ADE-79): api and docs both have #108, web fails, infra is skipped. */ group?: boolean; /** ADE-85 list and Timeline: a group project of three repositories with pull requests in every readiness group, and a timeline history. */ readiness?: boolean; /** 65 distinct files in folders, with short patches (30 a page), for the Changes tab. */ changes?: boolean; /** A verdict state of the detail page (`verify.states.ts`). */ state?: PrState; /** ADE-97: 100 runs over 24 branches and a 40-job run, for the Actions performance check. */ actionsBig?: boolean; /** ADE-112: the linked thread is the project's Coordinator, so the dock has its Project panel. */ coordinator?: boolean } = {}) {
   const actionRunList = actionRuns(options.actionsBig)
   const scratch = mkdtempSync(path.join(tmpdir(), 'gpuix-scratch-pages-'))
   const now = new Date().toISOString()
@@ -16,7 +16,8 @@ export function actionFixture(options: { long?: boolean; horizontal?: boolean; p
   const project = options.group || options.readiness
     ? { id: 'pages-fixture', name: 'Acme', path: '/tmp/kybern-pages-fixture', is_git: false, kind: 'group' as const, members, created_at: now, updated_at: now }
     : { id: 'pages-fixture', name: 'Kybern fixture', path: '/tmp/kybern-pages-fixture', is_git: true, created_at: now, updated_at: now }
-  const thread = { id: 'linked', project_id: project.id, title: 'Linked conversation', provider: { kind: 'codex', instance: 'default' }, status: 'idle', permission_mode: 'supervised', last_seq: 0, created_at: now, updated_at: now }
+  const lead = options.coordinator ? { coordinator_project_id: project.id } : {}
+  const thread = { id: 'linked', project_id: project.id, title: 'Linked conversation', provider: { kind: 'codex', instance: 'default' }, status: 'idle', permission_mode: 'supervised', last_seq: 0, created_at: now, updated_at: now, ...lead }
   if (options.horizontal) writeFileSync(path.join(scratch, 'gpuix-ui.json'), JSON.stringify({ 'kybern.split-view.v2': { version: 2, root: { kind: 'leaf', id: 'main', threadId: thread.id }, focusedPaneId: 'main', groups: { main: { threadId: thread.id, tabs: [{kind:'chat'}, {kind:'pr', projectId: project.id, number:108, ...(options.group ? {repo:'api'}:{})}], active: `pr:${project.id}${options.group ? '/api':''}:108`, preview: null } } } }))
   const subscribers = new Map<string, (event: object) => void>()
   let streamSeq=0
@@ -64,7 +65,8 @@ export function actionFixture(options: { long?: boolean; horizontal?: boolean; p
           case 'daemon.info': result = { protocol_version: PROTOCOL_VERSION, environment_id: 'pages-fixture', version: 'fixture', scopes: [] }; break
           case 'projects.list': result = { projects: [project, ...(options.picker ? [{...project,id:'other-known',kind:'single',members:[],is_git:true,name:'Other known project',space_id:'other-space',repo:{remote:'github.com/acme/other'}}]:[])] }; break
           case 'projects.members.status': result = { members: members.map(m=>({...m,dirty_files:0,remote_url:`git@github.com:acme/${m.path}.git`})), agents_md:false,claude_md:false }; break
-          case 'threads.list': result = { threads: [{id:'linked',project_id:project.id,title:'Linked conversation',provider:{kind:'codex',instance:'default'},status:'idle',permission_mode:'supervised',worktree:{branch:pr.head,path:project.path},created_at:now,updated_at:now}], activity: [] }; break
+          case 'threads.list': result = { threads: [{id:'linked',project_id:project.id,title:'Linked conversation',provider:{kind:'codex',instance:'default'},status:'idle',permission_mode:'supervised',worktree:{branch:pr.head,path:project.path},created_at:now,updated_at:now,...lead}], activity: [] }; break
+          case 'notes.list': if (options.coordinator) result = { notes: [] }; else error = 'Fixture rejects notes.list'; break
           case 'threads.get': result = { thread, transcript: [], pending_approvals: [] }; break
           case 'queue.list': result = { messages: [] }; break
           case 'providers.list': result = { providers: [] }; break

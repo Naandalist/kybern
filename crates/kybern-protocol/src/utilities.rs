@@ -27,6 +27,8 @@ pub const PUSH_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PUSH_FILES: usize = 20_000;
 /// The most forwards one daemon holds (§8.3).
 pub const MAX_PORT_FORWARDS: usize = 16;
+/// The credit window of a relay or port stream between two machines that both list `relay.frames.v2`.
+pub const RELAY_WINDOW_V2: i64 = 4 * 1024 * 1024;
 /// A forward with no connection for this long closes (§8.3).
 pub const PORT_FORWARD_IDLE_SECS: u64 = 30 * 60;
 
@@ -200,6 +202,10 @@ pub struct PortsForwardParams {
     /// A port to bind here; the remote port, or the next free port, when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_port: Option<u16>,
+    /// Also serve the forward as `https://localhost:<https_port>` with HTTP/2 (Fast mode), for Kybern's own
+    /// web views, which trust the certificate in [`PortForward::https_certificate`] and nothing else does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub https: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -212,6 +218,22 @@ pub struct PortForward {
     /// Connections open right now.
     pub connections: u32,
     pub created_at: DateTime<Utc>,
+    /// The round trip to the machine, measured when the forward was opened, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u32>,
+    /// The machine can serve this forward over HTTP/2 (`https: true` in `ports.forward`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub https_available: bool,
+    /// The HTTPS (HTTP/2) listener of this forward, once asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_port: Option<u16>,
+    /// The PEM certificate the HTTPS listener presents: Kybern's web views trust exactly this certificate for
+    /// `localhost`, and only for this listener's pages. It is generated per install and never added to a trust store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_certificate: Option<String>,
+    /// Its SHA-256 fingerprint (lowercase hex of the DER).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https_certificate_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -236,6 +258,10 @@ pub struct PeerPortsOpenParams {
 pub struct PeerPortsPrepareParams {
     pub forward_id: Uuid,
     pub port: u16,
+    /// The direct handshake the caller speaks: 2 for `ports.direct.v2` (an authorized socket waits for a mode
+    /// byte). Absent means 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_version: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -251,6 +277,9 @@ pub struct PeerPortsDirect {
     pub port: u16,
     /// Per-forward credential, sent as 64 ASCII bytes before application traffic.
     pub token: String,
+    /// The handshake this listener speaks: 2 when it accepted `direct_version: 2`. Absent means 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

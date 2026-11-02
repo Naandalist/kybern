@@ -6,11 +6,13 @@ import { NOTIFICATION_INSET } from './toastPlacement.ts'
 //   toast('Saved to “Notes”', { action: { label: 'Open', onClick } })
 //   toast.error('Unable to load thread', { description })
 //   toast.dismiss(id)
+//   toast('Enjoying Kybern?', { description, icon: { source, tone: 'warning' }, cancel: { label: 'Dismiss' }, action, duration: Infinity, onClose })
 //
 // Geometry follows sonner: 356px wide, 16px padding, 14px between toasts, 16px
 // from the window corner (over the composer when they meet), three visible (the newest), the popover surface with
 // its 1px border, 13px text, a 16px icon, and an ink action pill (24px, 4px
-// radius, 12px/500). A toast times out after 4 s unless `duration` says
+// radius, 12px/500). A toast with a `cancel` (a quiet second button) is a prompt: its buttons sit on their own row under the
+// text, trailing, the primary last, and its icon aligns with the title's first line. A toast times out after 4 s unless `duration` says
 // otherwise (`Infinity` stays until dismissed: approvals). The timer stops while
 // the pointer is over the stack and while the window is hidden, and resumes with
 // the time that was left. No timer exists while no toast does.
@@ -40,6 +42,7 @@ import { EASE } from '../motion/kit.tsx'
 import { PATCHED_NATIVE } from '../native/local-build.ts'
 import { Label, REDUCED_MOTION, useTheme } from '../ui.tsx'
 import { GlassEdge } from '../kit/GlassEdge.tsx'
+import { toneColor, type Tone } from '../kit/tone.ts'
 import { frostBackdrop, frostFill, useGlass } from '../platform/glass.ts'
 
 export type ToastKind = 'default' | 'success' | 'info' | 'warning' | 'error'
@@ -49,6 +52,12 @@ export interface ToastOptions {
   id?: string
   description?: string
   action?: { label: string; onClick: () => void }
+  /** A quiet second button before `action` (the toast becomes a prompt with its buttons under the text). It closes the toast. */
+  cancel?: { label: string; onClick?: () => void }
+  /** A glyph source for the leading icon, in the tone's colour, instead of the kind's icon. */
+  icon?: { source: string; tone?: Tone }
+  /** Runs once when the toast closes by any path: its close button, either button, `toast.dismiss`, its timer. */
+  onClose?: () => void
   /** 0…1: a progress bar under the text. A toast with this id and title updates in place as it advances (no cross-fade per tick). */
   progress?: number
   /** Milliseconds before it leaves; `Infinity` keeps it until dismissed. Default 4000. */
@@ -63,6 +72,9 @@ interface Item {
   title: string
   description?: string
   action?: { label: string; onClick: () => void }
+  cancel?: { label: string; onClick?: () => void }
+  icon?: { source: string; tone?: Tone }
+  onClose?: () => void
   progress?: number
   duration: number
   /** The card's height in px: measured once painted, estimated before. */
@@ -133,6 +145,9 @@ function dismiss(id?: string) {
     item.startedAt = null
     item.leaving = true
     setTimeout(() => remove(item.key), (REDUCED_MOTION ? FADE : EXIT) * 1000 + 40)
+    const onClose = item.onClose
+    item.onClose = undefined
+    try { onClose?.() } catch (error) { console.error(error) }
   }
   commit()
 }
@@ -154,6 +169,9 @@ function show(kind: ToastKind, title: string, options: ToastOptions = {}): strin
     title,
     description: options.description,
     action: options.action,
+    cancel: options.cancel,
+    icon: options.icon,
+    onClose: options.onClose,
     progress: options.progress,
     duration,
     remaining: duration,
@@ -388,7 +406,30 @@ function ToastCard({ item }: { item: Item }) {
   const t = useTheme()
   const g = useGlass()
   const [hover, setHover] = useState(false)
-  const icon = ICONS[item.kind]
+  const icon = item.icon?.source ?? ICONS[item.kind]
+  const iconColor = item.icon?.tone ? toneColor(t, item.icon.tone) : t.text
+  // A prompt (two buttons): text on top, the buttons on their own trailing row.
+  const prompt = !!item.cancel
+  const text = (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
+      <Label color={t.text} size={13} weight={500} lineHeight={20}>
+        {item.title}
+      </Label>
+      {item.description && (
+        <Label color={prompt ? t.textSecondary : t.text} size={13} lineHeight={18}>
+          {item.description}
+        </Label>
+      )}
+      {item.progress !== undefined && (
+        <div style={{ marginTop: 8, width: '100%', height: 4, borderRadius: 2, overflow: 'hidden', backgroundColor: t.variant === 'dark' ? 'rgba(255,255,255,0.14)' : 'rgba(13,13,13,0.1)' }}>
+          <div
+            paintTransform={PATCHED_NATIVE ? { initial: false, animate: { scaleX: Math.max(0.001, Math.min(1, item.progress)) }, transition: { duration: 0.4, ease: [...EASE.out] as [number, number, number, number] }, origin: [0, 0.5], retain: true } : undefined}
+            style={{ width: '100%', height: 4, borderRadius: 2, backgroundColor: t.text }}
+          />
+        </div>
+      )}
+    </div>
+  )
   return (
     <div
       testId={`toast-${item.kind}`}
@@ -398,8 +439,9 @@ function ToastCard({ item }: { item: Item }) {
       backdrop={frostBackdrop(g, 'pills', 10)}
       style={{
         display: 'flex',
-        alignItems: 'center',
-        gap: 6,
+        flexDirection: prompt ? 'column' : 'row',
+        alignItems: prompt ? 'stretch' : 'center',
+        gap: prompt ? 12 : 6,
         width: WIDTH,
         padding: 16,
         position: 'relative',
@@ -411,27 +453,26 @@ function ToastCard({ item }: { item: Item }) {
       }}
     >
       <GlassEdge radius={10} color={g.frostHighlight} />
-      {icon && <Icon source={icon} size={16} color={t.text} />}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
-        <Label color={t.text} size={13} weight={500} lineHeight={20}>
-          {item.title}
-        </Label>
-        {item.description && (
-          <Label color={t.text} size={13} lineHeight={18}>
-            {item.description}
-          </Label>
-        )}
-        {item.progress !== undefined && (
-          <div style={{ marginTop: 8, width: '100%', height: 4, borderRadius: 2, overflow: 'hidden', backgroundColor: t.variant === 'dark' ? 'rgba(255,255,255,0.14)' : 'rgba(13,13,13,0.1)' }}>
-            <div
-              paintTransform={PATCHED_NATIVE ? { initial: false, animate: { scaleX: Math.max(0.001, Math.min(1, item.progress)) }, transition: { duration: 0.4, ease: [...EASE.out] as [number, number, number, number] }, origin: [0, 0.5], retain: true } : undefined}
-              style={{ width: '100%', height: 4, borderRadius: 2, backgroundColor: t.text }}
-            />
+      {prompt ? (
+        <>
+          {/* The icon sits on the title's 20 px line: 2 px down for a 16 px glyph. */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            {icon && <Icon source={icon} size={16} color={iconColor} style={{ marginTop: 2, flexShrink: 0 }} />}
+            {text}
           </div>
-        )}
-      </div>
-      {item.action && (
-        <Button testId="toast-action" size="sm" variant="primary" onClick={() => { item.action!.onClick(); dismiss(item.id) }} style={{ marginLeft: 8 }}>{item.action.label}</Button>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
+            <Button testId="toast-cancel" size="sm" variant="ghost" onClick={() => { item.cancel!.onClick?.(); dismiss(item.id) }}>{item.cancel!.label}</Button>
+            {item.action && <Button testId="toast-action" size="sm" variant="primary" onClick={() => { dismiss(item.id); item.action!.onClick() }}>{item.action.label}</Button>}
+          </div>
+        </>
+      ) : (
+        <>
+          {icon && <Icon source={icon} size={16} color={iconColor} />}
+          {text}
+          {item.action && (
+            <Button testId="toast-action" size="sm" variant="primary" onClick={() => { item.action!.onClick(); dismiss(item.id) }} style={{ marginLeft: 8 }}>{item.action.label}</Button>
+          )}
+        </>
       )}
       {/* No swipe-away on a desktop window: a hover close keeps a persistent toast dismissable. */}
       {hover && (

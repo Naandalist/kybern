@@ -23,6 +23,7 @@ mod harness_updates;
 mod http;
 mod integrations;
 mod lead_git;
+mod login_service;
 mod maintenance;
 mod native_tools_mcp;
 // Transport (N3) is wired in below; the joining flows and `network.*` handlers (N4) use the rest.
@@ -96,6 +97,10 @@ struct Args {
     /// Private desktop bootstrap handshake. Not part of the public daemon CLI.
     #[arg(long, hide = true)]
     desktop_startup_id: Option<String>,
+    /// Started at login by the item "Keep this machine reachable" registers (ADE-119). Exits at once
+    /// when another daemon already serves the data folder. Not part of the public daemon CLI.
+    #[arg(long, hide = true, conflicts_with_all = ["pair", "print_token", "desktop_startup_id"])]
+    login_service: bool,
 }
 
 #[derive(Serialize)]
@@ -143,6 +148,12 @@ fn desktop_listen_port(requested: u16, desktop_managed: bool, root: &std::path::
     }
 }
 
+/// The login item passes `--port 0`, meaning the port the desktop app saved. Without that file it would bind a random
+/// port that no client knows, and a second daemon could end up serving the same data folder.
+fn login_item_may_listen(login_service: bool, port: u16) -> bool {
+    !login_service || port != 0
+}
+
 /// Stack for each runtime thread. Unoptimized builds give every arm of an
 /// `rpc` dispatch match its own stack slots (the whole match was a poll frame of
 /// about 1.4 MB on macOS and larger with MSVC, now split into parts), so a
@@ -175,19 +186,47 @@ async fn console_closed() {
     std::future::pending::<()>().await
 }
 
+/// `daemon.log`, opened for appending, for a daemon the Windows login item started.
+fn login_service_log(login_service: bool, root: &std::path::Path) -> Option<std::fs::File> {
+    if !(cfg!(windows) && login_service) {
+        return None;
+    }
+    OpenOptions::new().create(true).append(true).open(root.join("daemon.log")).ok()
+}
+
 pub fn run() -> Result<()> {
     runtime()?.block_on(serve())
 }
 
 async fn serve() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,kybern=debug")))
-        .with_target(true)
-        .init();
-
     let args = Args::parse();
+    let paths = config::Paths::resolve(args.data_dir.clone())?;
+    let filter = || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,kybern=debug"));
+    // Windows' login item runs the daemon under a headless console, where its output goes nowhere:
+    // it logs to `daemon.log` itself, as the app's own launch does. launchd and systemd keep the output.
+    match login_service_log(args.login_service, &paths.root) {
+        Some(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_target(true)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        None => tracing_subscriber::fmt().with_env_filter(filter()).with_target(true).init(),
+    }
+
     widen_path();
-    let paths = config::Paths::resolve(args.data_dir)?;
+    // Before the state opens: a second daemon would recover the first one's turns.
+    if args.login_service && login_service::already_served(&paths.root) {
+        tracing::info!(data_dir = %paths.root.display(), "another daemon already serves this data folder; the login item has nothing to start");
+        return Ok(());
+    }
+    if !login_item_may_listen(args.login_service, desktop_listen_port(args.port, args.login_service, &paths.root)?) {
+        tracing::warn!(
+            data_dir = %paths.root.display(),
+            "the login item has no saved desktop port (desktop.port) and would listen on a random port beside the daemon the app starts; it starts nothing. Open Kybern on this machine once to save the port."
+        );
+        return Ok(());
+    }
     let state = state::AppState::initialize(&paths)?;
 
     if args.print_token {
@@ -195,8 +234,15 @@ async fn serve() -> Result<()> {
         println!("{}", state.bootstrap_token);
         return Ok(());
     }
+    state.login_service.use_platform().await;
+    if args.login_service {
+        state.login_service.mark_launched();
+    }
 
-    let requested_port = desktop_listen_port(args.port, args.desktop_startup_id.is_some(), &paths.root)?;
+    // The login item runs the app's own binary on the port the app chose (`desktop.port`), so it is
+    // desktop-managed too: the app updates and replaces it.
+    let desktop_managed = args.desktop_startup_id.is_some() || args.login_service;
+    let requested_port = desktop_listen_port(args.port, desktop_managed, &paths.root)?;
     let requested_addr = SocketAddr::new(args.bind.parse()?, requested_port);
     let listener = tokio::net::TcpListener::bind(requested_addr).await?;
     let addr = listener.local_addr()?;
@@ -210,7 +256,7 @@ async fn serve() -> Result<()> {
         std::fs::write(paths.root.join("desktop.port"), addr.port().to_string())?;
         write_startup_announcement(&paths, startup_id, addr.port())?;
     }
-    state.desktop_managed.store(args.desktop_startup_id.is_some(), std::sync::atomic::Ordering::SeqCst);
+    state.desktop_managed.store(desktop_managed, std::sync::atomic::Ordering::SeqCst);
     state.process_owned.store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Recovery may need to close interrupted turns and capture final snapshots.
@@ -283,6 +329,14 @@ async fn serve() -> Result<()> {
     let login_broker_worker = tokio::spawn(network::broker::run(state.clone()));
     // The universal clipboard: idle unless this machine's owner turned on "Share clipboard automatically".
     let clipboard_worker = tokio::spawn(network::clipboard::run(state.clone()));
+    // "Keep this machine reachable when Kybern is closed": the login item follows membership and settings.
+    let login_service_worker = tokio::spawn({
+        let state = state.clone();
+        async move {
+            state.login_service.migrate(&state.paths.root).await;
+            login_service::run(state).await;
+        }
+    });
 
     if args.pair {
         let endpoints = crate::access::endpoints(&state).await;
@@ -293,6 +347,7 @@ async fn serve() -> Result<()> {
     }
 
     let shutdown_token = state.shutdown.clone();
+    let shutdown_orchestrator = state.orchestrator.clone();
     let shutdown = async move {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => tracing::info!("Ctrl+C received"),
@@ -302,9 +357,16 @@ async fn serve() -> Result<()> {
         // Signal-driven shutdown must also wake maintenance/update workers
         // before we await them and release the endpoint files.
         shutdown_token.cancel();
+        // The same signal reaches the agents; their failures from here on are this stop.
+        shutdown_orchestrator.begin_shutdown();
         tracing::info!("shutting down");
     };
     // The askpass endpoint checks which process holds the connection (`askpass::connection_owned_by`).
+    // TCP_NODELAY: previews, relayed pages and session frames are small, latency-bound writes.
+    use axum::serve::ListenerExt as _;
+    let listener = listener.tap_io(|socket| {
+        let _ = socket.set_nodelay(true);
+    });
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).with_graceful_shutdown(shutdown).await?;
     queue_worker.abort();
     notes_worker.abort();
@@ -314,6 +376,7 @@ async fn serve() -> Result<()> {
     follow_updates_worker.abort();
     login_broker_worker.abort();
     clipboard_worker.abort();
+    login_service_worker.abort();
     let _ = maintenance_worker.await;
     let _ = update_worker.await;
     let _ = self_update_worker.await;
@@ -436,7 +499,7 @@ fn owns_endpoint_file(contents: &str, expected: &str) -> bool {
 mod tests {
     #[cfg(unix)]
     use super::nvm_default_bin;
-    use super::{desktop_listen_port, owns_endpoint_file, runtime, startup_announcement_filename};
+    use super::{desktop_listen_port, login_item_may_listen, owns_endpoint_file, runtime, startup_announcement_filename};
 
     /// A spawned task (every RPC runs in one) has room for more than Tokio's 2 MiB default.
     #[test]
@@ -460,6 +523,11 @@ mod tests {
         assert_eq!(desktop_listen_port(0, true, &root).unwrap(), 59930);
         assert_eq!(desktop_listen_port(4219, true, &root).unwrap(), 4219);
         assert_eq!(desktop_listen_port(0, false, &root).unwrap(), 0);
+        // The login item (`--login-service --port 0`) starts nothing without a saved port.
+        assert!(login_item_may_listen(true, 59930) && login_item_may_listen(false, 0));
+        let unsaved = root.join("unsaved");
+        std::fs::create_dir_all(&unsaved).unwrap();
+        assert!(!login_item_may_listen(true, desktop_listen_port(0, true, &unsaved).unwrap()));
         std::fs::write(root.join("desktop.port"), "broken").unwrap();
         assert!(desktop_listen_port(0, true, &root).is_err());
         std::fs::remove_dir_all(root).unwrap();

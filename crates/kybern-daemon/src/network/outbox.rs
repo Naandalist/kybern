@@ -189,7 +189,7 @@ impl RemoteHub for NetworkHub {
 
     async fn forward_port(&self, target: &str, remote_port: u16) -> Result<u16, String> {
         let info = self.target_of(target).ok_or_else(|| "That machine is not in your network any more.".to_string())?;
-        super::ports::forward_to(&self.network, &self.shutdown, target, &info.name, remote_port, None)
+        super::ports::forward_to(&self.network, &self.shutdown, target, &info.name, remote_port, None, false)
             .await
             .map(|forward| forward.local_port)
             .map_err(|error| error.message)

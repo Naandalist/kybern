@@ -44,6 +44,7 @@ pub mod spaces;
 pub mod status;
 pub mod tailscale;
 pub mod updates;
+pub mod wake_watch;
 pub mod well_known;
 
 #[cfg(all(test, unix))]
@@ -137,6 +138,12 @@ pub struct Timing {
     /// network before it founds one itself (§2.4a). The other one may have its network turned off, or
     /// not run Kybern at all by now; a network founded twice is reconciled by the merge path.
     pub lone_wait: Duration,
+    /// How often the wall clock is compared with the timer, to notice that the machine slept
+    /// ([`wake_watch`]).
+    pub resume_tick: Duration,
+    /// How often Tailscale's status is read while a member is not linked, to notice it came back
+    /// without waiting for the discovery tick or a long backoff ([`wake_watch`]).
+    pub status_poll: Duration,
 }
 
 impl Default for Timing {
@@ -160,6 +167,8 @@ impl Default for Timing {
             // Two discovery ticks at the idle pace, so a machine that is merely slow to notice us
             // still founds before this one gives up.
             lone_wait: Duration::from_secs(12 * 60),
+            resume_tick: Duration::from_secs(5),
+            status_poll: Duration::from_secs(30),
         }
     }
 }
@@ -184,6 +193,9 @@ impl Timing {
             clock_window: Duration::from_secs(60),
             auto_join: true,
             lone_wait: Duration::from_secs(3),
+            // Long enough that a loaded test runner's stall (four ticks) is not taken for a sleep.
+            resume_tick: Duration::from_secs(1),
+            status_poll: Duration::from_millis(300),
         }
     }
 }
@@ -285,7 +297,7 @@ impl Network {
             relays: Default::default(),
             pages: Default::default(),
             files: Default::default(),
-            ports: Default::default(),
+            ports: ports::Forwards::new(data_dir),
             clipboard: Default::default(),
             provisions: Default::default(),
             listen: Default::default(),
@@ -346,6 +358,8 @@ impl Network {
             features::FILES_PUSH_V1.to_string(),
             features::PORTS_V1.to_string(),
             features::PORTS_DIRECT_V1.to_string(),
+            features::PORTS_DIRECT_V2.to_string(),
+            features::RELAY_FRAMES_V2.to_string(),
             features::CLIPBOARD_V1.to_string(),
             features::GROUP_V1.to_string(),
             features::PROVISION_V1.to_string(),

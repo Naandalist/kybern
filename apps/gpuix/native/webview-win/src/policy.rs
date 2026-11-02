@@ -39,6 +39,26 @@ pub fn origin_of(url: &str) -> Option<String> {
     Some(format!("{scheme}://{authority}"))
 }
 
+/// The body of a PEM certificate without its armor and whitespace, so two encodings of one certificate compare equal.
+pub fn pem_body(pem: &str) -> String {
+    pem.lines().filter(|line| !line.starts_with("-----")).flat_map(|line| line.chars()).filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Whether a certificate error for `url` is the pinned certificate of a Fast preview (ADE-116): an `https` loopback origin
+/// the document may load, presenting exactly one of the `trusted` certificates (PEM bodies, [`pem_body`]). Every other
+/// certificate error keeps WebView2's default (the load fails).
+pub fn pinned_certificate(url: &str, pem: &str, trusted: &[String], allowed: &[String]) -> bool {
+    let Some(origin) = origin_of(url) else { return false };
+    let Some(authority) = origin.strip_prefix("https://") else { return false };
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.chars().all(|c| c.is_ascii_digit()) && !authority.ends_with(']') => host,
+        _ => authority,
+    };
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    let body = pem_body(pem);
+    loopback && !body.is_empty() && trusted.iter().any(|t| *t == body) && allowed.iter().any(|a| a.eq_ignore_ascii_case(&origin))
+}
+
 /// Whether a frame may load `url`: an http(s) URL on one of the document's origins, or `about:`.
 pub fn frame_allows(url: &str, allowed: &[String]) -> bool {
     if url.starts_with("about:") {
@@ -175,6 +195,27 @@ pub fn js_string(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_the_pinned_certificate_of_an_allowed_loopback_origin_is_accepted() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJ\nAKHH\n-----END CERTIFICATE-----\n";
+        let crlf = "-----BEGIN CERTIFICATE-----\r\nMIIBkTCB+wIJAKHH\r\n-----END CERTIFICATE-----";
+        let trusted = vec![pem_body(pem)];
+        let allowed = vec!["https://localhost:49152".to_string()];
+        assert!(pinned_certificate("https://localhost:49152/src/main.ts", crlf, &trusted, &allowed));
+        assert!(!pinned_certificate("https://localhost:49153/", pem, &trusted, &allowed), "another origin");
+        assert!(!pinned_certificate("https://example.com:49152/", pem, &trusted, &["https://example.com:49152".into()]), "not loopback");
+        assert!(!pinned_certificate("http://localhost:49152/", pem, &trusted, &["http://localhost:49152".into()]), "not https");
+        assert!(!pinned_certificate(
+            "https://localhost:49152/",
+            "-----BEGIN CERTIFICATE-----\nOTHER\n-----END CERTIFICATE-----",
+            &trusted,
+            &allowed
+        ));
+        assert!(!pinned_certificate("https://localhost:49152/", "", &[String::new()], &allowed), "an empty pin trusts nothing");
+        assert!(!pinned_certificate("https://localhost:49152/", pem, &[], &allowed));
+    }
+
     use super::*;
 
     #[test]

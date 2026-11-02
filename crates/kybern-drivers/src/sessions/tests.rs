@@ -12,7 +12,7 @@ fn session(provider: ProviderKind) -> SavedSession {
     }
 }
 
-fn users(history: &SessionHistory) -> Vec<String> {
+pub(super) fn users(history: &SessionHistory) -> Vec<String> {
     history
         .events
         .iter()
@@ -23,7 +23,7 @@ fn users(history: &SessionHistory) -> Vec<String> {
         .collect()
 }
 
-fn answers(history: &SessionHistory) -> Vec<&str> {
+pub(super) fn answers(history: &SessionHistory) -> Vec<&str> {
     history
         .events
         .iter()

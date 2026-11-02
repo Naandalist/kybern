@@ -36,6 +36,13 @@ pub mod features {
     pub const CLIPBOARD_V1: &str = "clipboard.v1";
     pub const PORTS_DIRECT_V1: &str = "ports.direct.v1";
     pub const PORTS_V1: &str = "ports.v1";
+    /// The direct port transport's second handshake: an authorized socket waits for a mode byte, so a forward keeps
+    /// sockets ready before the browser asks (pre-warmed), and one socket can carry an HTTP/2 connection that the
+    /// target spreads over pooled HTTP/1.1 connections to its dev server (the Fast mode of a preview).
+    pub const PORTS_DIRECT_V2: &str = "ports.direct.v2";
+    /// Relay and port stream data travels as binary WebSocket frames, without base64 or JSON, and a stream's
+    /// credit window is [`crate::RELAY_WINDOW_V2`] instead of 256 KiB.
+    pub const RELAY_FRAMES_V2: &str = "relay.frames.v2";
     pub const SETTINGS_FANOUT_V1: &str = "settings.fanout.v1";
     pub const NOTES_FEDERATED_V1: &str = "notes.federated.v1";
     pub const SECRETS_STORE_V1: &str = "secrets.store.v1";
@@ -60,7 +67,7 @@ pub mod features {
     pub const COMPUTER_USE_V1: &str = "computer.use.v1";
 
     /// Every feature the network design names, in design order.
-    pub const ALL: [&str; 21] = [
+    pub const ALL: [&str; 23] = [
         NETWORK_V1,
         SPACES_SYNC_V1,
         RELAY_V1,
@@ -72,6 +79,8 @@ pub mod features {
         CLIPBOARD_V1,
         PORTS_V1,
         PORTS_DIRECT_V1,
+        PORTS_DIRECT_V2,
+        RELAY_FRAMES_V2,
         SETTINGS_FANOUT_V1,
         NOTES_FEDERATED_V1,
         SECRETS_STORE_V1,
@@ -449,6 +458,51 @@ pub struct NetworkStatus {
     /// newer version on another member updates itself when it is idle.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub follow_updates: bool,
+    /// "Keep this machine reachable when Kybern is closed" and the login item behind it. Absent on
+    /// daemons that cannot keep themselves running at login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_reachable: Option<KeepReachableStatus>,
+}
+
+/// What starts this machine's daemon at login while it is in a network (ADE-119).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginServiceKind {
+    /// Windows: a per-user Task Scheduler task that runs at logon.
+    TaskScheduler,
+    /// macOS: a LaunchAgent in `~/Library/LaunchAgents`.
+    LaunchAgent,
+    /// Linux: a `systemd --user` service.
+    SystemdUser,
+    /// Linux without a user systemd: an XDG autostart entry, started by the desktop session.
+    XdgAutostart,
+}
+
+/// `NetworkStatus::keep_reachable`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct KeepReachableStatus {
+    /// The setting, `settings.network.keep_reachable`.
+    pub enabled: bool,
+    /// The login item should exist now: the setting is on, the network is on and this machine is a member.
+    pub wanted: bool,
+    /// The login item this platform uses. Absent where Kybern cannot register one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<LoginServiceKind>,
+    /// The login item is registered for this data folder and starts this daemon's binary.
+    pub registered: bool,
+    /// This daemon was started by the login item.
+    pub running: bool,
+    /// Another service already starts a daemon for this data folder (a remote install's `kybernd`
+    /// service). Kybern leaves it as it is and registers nothing of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external: Option<String>,
+    /// Why the last registration or removal failed, and what to do next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Problems with a service that starts this daemon, each with what to do next (a systemd unit that
+    /// stops everything when one agent runs out of memory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 // ---- routes (§3.4) ----
@@ -622,6 +676,13 @@ pub struct NetworkUpdateAllResult {
 /// `network.follow_updates.set`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkFollowUpdatesParams {
+    pub enabled: bool,
+}
+
+/// `network.keep_reachable.set`: turn "Keep this machine reachable when Kybern is closed" on or off.
+/// The login item is registered or removed before the answer.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkKeepReachableParams {
     pub enabled: bool,
 }
 
@@ -915,11 +976,17 @@ pub struct NetworkSettings {
     pub enabled: bool,
     /// The fixed port the Tailscale listener binds. When taken, the daemon tries the next six.
     pub port: u16,
+    /// "Keep this machine reachable when Kybern is closed" (ADE-119): while this machine is in a
+    /// network with the network on, its daemon is started at login by a per-user login item, so the
+    /// other members reach it with no app window open. Per machine like the rest of this section: it
+    /// registers an item with this computer's own login, and a laptop may opt out where a desktop
+    /// opts in.
+    pub keep_reachable: bool,
 }
 
 impl Default for NetworkSettings {
     fn default() -> Self {
-        Self { configured: false, enabled: false, port: crate::DEFAULT_PORT }
+        Self { configured: false, enabled: false, port: crate::DEFAULT_PORT, keep_reachable: true }
     }
 }
 
@@ -932,12 +999,14 @@ impl<'de> Deserialize<'de> for NetworkSettings {
             enabled: Option<bool>,
             configured: Option<bool>,
             port: Option<u16>,
+            keep_reachable: Option<bool>,
         }
         let saved = Saved::deserialize(deserializer)?;
         Ok(Self {
             configured: saved.configured.unwrap_or(saved.enabled.is_some()),
             enabled: saved.enabled.unwrap_or(false),
             port: saved.port.unwrap_or(crate::DEFAULT_PORT),
+            keep_reachable: saved.keep_reachable.unwrap_or(true),
         })
     }
 }

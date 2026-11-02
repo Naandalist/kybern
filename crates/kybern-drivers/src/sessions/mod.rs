@@ -1,5 +1,8 @@
 //! Native saved-session discovery and transcript readers. These never send a
 //! prompt or replay a tool. Each reader follows its harness own storage/API.
+mod antigravity;
+#[cfg(test)]
+mod antigravity_tests;
 mod claude;
 mod codex;
 mod cursor;
@@ -34,11 +37,6 @@ pub struct SessionHistory {
     pub events: Vec<ThreadEvent>,
 }
 
-/// Antigravity's conversations live in its own store; reading them is a follow-up.
-fn no_saved_sessions() -> DriverError {
-    DriverError::Unsupported("saved Antigravity conversations can't be imported yet".into())
-}
-
 pub async fn list(kind: ProviderKind, context: &ProbeContext, cursor: Option<&str>, query: &str) -> Result<SessionsListResult> {
     match kind {
         ProviderKind::ClaudeCode => claude::list(context, cursor, query).await,
@@ -46,7 +44,7 @@ pub async fn list(kind: ProviderKind, context: &ProbeContext, cursor: Option<&st
         ProviderKind::Opencode => opencode::list(context, cursor, query).await,
         ProviderKind::Pi | ProviderKind::Omp => pi::list(kind, context, cursor, query).await,
         ProviderKind::Cursor => cursor::list(context, cursor, query).await,
-        ProviderKind::Antigravity => Err(no_saved_sessions()),
+        ProviderKind::Antigravity => antigravity::list(context, cursor, query).await,
     }
 }
 
@@ -60,7 +58,7 @@ pub async fn read(kind: ProviderKind, context: &ProbeContext, id: &str) -> Resul
         ProviderKind::Opencode => opencode::read(context, id).await,
         ProviderKind::Pi | ProviderKind::Omp => pi::read(kind, context, id).await,
         ProviderKind::Cursor => cursor::read(context, id).await,
-        ProviderKind::Antigravity => Err(no_saved_sessions()),
+        ProviderKind::Antigravity => antigravity::read(context, id).await,
     }
 }
 
@@ -85,7 +83,7 @@ pub async fn reader(kind: ProviderKind, context: &ProbeContext) -> Result<Box<dy
         ProviderKind::Codex => Box::new(codex::Reader { rpc: codex::connect(context).await?, context: context.clone() }),
         ProviderKind::Opencode => Box::new(opencode::Reader::start(context).await?),
         ProviderKind::Cursor => Box::new(cursor::Reader::new(context)),
-        ProviderKind::Antigravity => return Err(no_saved_sessions()),
+        ProviderKind::Antigravity => Box::new(antigravity::Reader::new(context)?),
     })
 }
 
@@ -487,7 +485,11 @@ impl History {
     }
 
     fn notice(&mut self, at: DateTime<Utc>, text: String) {
-        self.push(at, EventPayload::ProviderNotice { level: NoticeLevel::Info, text, data: None });
+        self.notice_level(at, NoticeLevel::Info, text);
+    }
+
+    fn notice_level(&mut self, at: DateTime<Utc>, level: NoticeLevel, text: String) {
+        self.push(at, EventPayload::ProviderNotice { level, text, data: None });
     }
 
     fn end(&mut self, stop: StopReason) {

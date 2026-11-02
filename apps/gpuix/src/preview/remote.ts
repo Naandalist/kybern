@@ -33,3 +33,15 @@ export function parseForwardTarget(text: string): { port: number; path: string }
   if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: 'Use a port between 1 and 65535.' }
   return { port, path: addressPath(url.toString()) }
 }
+
+/** A thread on another machine previews `raw` there: a dev server on that machine's own localhost becomes a forward of its
+ *  port (direct TCP, kept-alive, Fast mode), not a page relayed through that machine's daemon. Anything else, or a machine
+ *  that is offline, stays on the thread's own route (`undefined`). */
+export function localServerOn(raw: string, machine: { id: string; name: string; offline?: boolean }): RemoteServer | undefined {
+  if (machine.offline) return undefined
+  const text = raw.trim()
+  let url: URL
+  try { url = new URL(/^\d+$/.test(text) ? `http://localhost:${text}` : text.includes('://') ? text : `http://${text}`) } catch { return undefined }
+  if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || !['http:', 'https:'].includes(url.protocol)) return undefined
+  return { id: machine.id, name: machine.name, port: Number(url.port) || (url.protocol === 'https:' ? 443 : 80), path: addressPath(url.toString()), scheme: url.protocol === 'https:' ? 'https' : 'http' }
+}

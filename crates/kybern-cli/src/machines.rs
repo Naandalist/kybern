@@ -3,7 +3,8 @@
 //! `list`/`status` show the members and what is found on the tailnet; `add` joins a found machine,
 //! `code` shows the code a machine that is not on the tailnet gives to a member, `join` redeems it;
 //! `remove`, `pause`, `resume`, `rename` and `merge` change the network; `routes` and `doctor` say
-//! how machines are reached and what is wrong.
+//! how machines are reached and what is wrong; `reachable` keeps this machine reachable when Kybern
+//! is closed.
 
 use std::io::{IsTerminal, Write};
 
@@ -82,6 +83,12 @@ pub enum MachinesCmd {
         /// `on` or `off`.
         #[arg(value_parser = ["on", "off"])]
         state: String,
+    },
+    /// Keep this machine reachable when Kybern is closed: start the daemon at login while it is in a network.
+    Reachable {
+        /// `on` or `off`. Without it, show the setting and the login item.
+        #[arg(value_parser = ["on", "off"])]
+        state: Option<String>,
     },
     /// This machine's CPU, memory, graphics, harnesses and repositories.
     Info,
@@ -220,6 +227,43 @@ pub fn resolve_found<'a>(found: &'a [FoundMachine], key: &str) -> Result<&'a Fou
     Err(anyhow!("No machine named \"{key}\" was found on your tailnet. Run kybern machines list."))
 }
 
+/// What a login item is called on this platform, for the user.
+fn login_item_name(kind: LoginServiceKind) -> &'static str {
+    match kind {
+        LoginServiceKind::TaskScheduler => "a Task Scheduler task",
+        LoginServiceKind::LaunchAgent => "a LaunchAgent",
+        LoginServiceKind::SystemdUser => "a systemd user service",
+        LoginServiceKind::XdgAutostart => "an autostart entry",
+    }
+}
+
+/// One line on "Keep this machine reachable when Kybern is closed".
+pub fn reachable_line(status: &KeepReachableStatus) -> String {
+    let Some(kind) = status.kind else {
+        return "Reachable when Kybern is closed: not supported on this system.".into();
+    };
+    if let Some(external) = &status.external {
+        return format!("Reachable when Kybern is closed: yes. {external}");
+    }
+    let state = match (status.enabled, status.wanted, status.registered) {
+        (false, _, _) => {
+            "off. Other machines lose this one when Kybern is closed. Turn it on with kybern machines reachable on.".to_string()
+        }
+        (true, false, _) => "on. It applies once this machine is in a network with Connect to your other machines on.".to_string(),
+        (true, true, true) => format!(
+            "on. Kybern starts at login through {}{}.",
+            login_item_name(kind),
+            if status.running { ", which started this daemon" } else { "" }
+        ),
+        (true, true, false) => format!("on, but {} is not registered yet.", login_item_name(kind)),
+    };
+    let mut line = format!("Reachable when Kybern is closed: {state}");
+    for problem in status.error.iter().chain(&status.warnings) {
+        line.push_str(&format!("\n  {problem}"));
+    }
+    line
+}
+
 async fn status(client: &Client) -> Result<NetworkStatus> {
     client.call::<NetworkStatusMethod>(Empty {}).await
 }
@@ -254,6 +298,9 @@ pub fn render_status(status: &NetworkStatus, with_tailscale: bool) {
             )
         };
         println!("{line}");
+        if let Some(reachable) = &status.keep_reachable {
+            println!("{}", reachable_line(reachable));
+        }
     }
     match &status.network_id {
         Some(id) => println!("Network {}  {} machine{}", short(id), status.members.len(), if status.members.len() == 1 { "" } else { "s" }),
@@ -488,6 +535,20 @@ pub async fn run(client: &Client, cmd: MachinesCmd, json: bool) -> Result<()> {
                 println!("Keeping all machines on the same version is {}.", if after.follow_updates { "on" } else { "off" })
             }
         }
+        MachinesCmd::Reachable { state } => {
+            let after = match state {
+                Some(state) => client.call::<NetworkKeepReachableSet>(NetworkKeepReachableParams { enabled: state == "on" }).await?,
+                None => status(client).await?,
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&after.keep_reachable)?)
+            } else {
+                match &after.keep_reachable {
+                    Some(reachable) => println!("{}", reachable_line(reachable)),
+                    None => println!("This daemon cannot keep the machine reachable when Kybern is closed. Update Kybern on this machine."),
+                }
+            }
+        }
         MachinesCmd::Broker { cmd } => match cmd {
             BrokerCmd::Status => {
                 let status = client.call::<LoginBrokerStatusMethod>(Empty {}).await?;
@@ -599,6 +660,29 @@ fn route_label(kind: RouteKind, via: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reachable_line_says_what_the_login_item_does_and_what_to_do() {
+        let on = KeepReachableStatus {
+            enabled: true,
+            wanted: true,
+            kind: Some(LoginServiceKind::TaskScheduler),
+            registered: true,
+            running: true,
+            external: None,
+            error: None,
+            warnings: vec![],
+        };
+        assert_eq!(
+            reachable_line(&on),
+            "Reachable when Kybern is closed: on. Kybern starts at login through a Task Scheduler task, which started this daemon."
+        );
+        let off = KeepReachableStatus { enabled: false, registered: false, running: false, ..on.clone() };
+        assert!(reachable_line(&off).contains("kybern machines reachable on"));
+        let failed = KeepReachableStatus { registered: false, error: Some("Access is denied.".into()), ..on.clone() };
+        assert!(reachable_line(&failed).ends_with("\n  Access is denied."));
+        assert!(reachable_line(&KeepReachableStatus { kind: None, ..on }).contains("not supported"));
+    }
 
     #[test]
     fn routes_are_named_in_words() {

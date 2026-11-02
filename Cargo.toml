@@ -14,7 +14,7 @@ members = [
 exclude = ["apps/gpuix/native/upstream"]
 
 [workspace.package]
-version = "0.21.1"
+version = "0.21.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Tresnanda/kybern"

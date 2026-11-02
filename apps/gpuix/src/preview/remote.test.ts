@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { PortForward } from '../../../../packages/kybern-client/src/types.ts'
 import { addressPath, forwardedAddress, forwardPort, parseForwardTarget, type ForwardClient } from './remote.ts'
+import { localServerOn } from './remote.ts'
 
 const forward = (local: number): PortForward => ({ id: 'f', machine_id: 'm1', machine_name: 'os-kdi', remote_port: 8765, local_port: local, connections: 0, created_at: '2026-10-29T10:00:00Z' })
 
@@ -32,4 +33,15 @@ test('the forward field accepts a port, host:port or an address', () => {
   expect(parseForwardTarget('0')).toHaveProperty('error')
   expect(parseForwardTarget('70000')).toHaveProperty('error')
   expect(parseForwardTarget('example.com:80')).toHaveProperty('error')
+})
+
+test('a thread on another machine forwards its own localhost servers and nothing else', () => {
+  const box = { id: 'm-1', name: 'instabox' }
+  expect(localServerOn('http://localhost:5173/app?x=1', box)).toEqual({ id: 'm-1', name: 'instabox', port: 5173, path: '/app?x=1', scheme: 'http' })
+  expect(localServerOn('3000', box)).toEqual({ id: 'm-1', name: 'instabox', port: 3000, path: '', scheme: 'http' })
+  expect(localServerOn('127.0.0.1:8080', box)?.port).toBe(8080)
+  expect(localServerOn('https://localhost:8443', box)?.scheme).toBe('https')
+  expect(localServerOn('https://example.com', box)).toBeUndefined()
+  expect(localServerOn('/Users/me/index.html', box)).toBeUndefined()
+  expect(localServerOn('http://localhost:5173', { ...box, offline: true })).toBeUndefined()
 })

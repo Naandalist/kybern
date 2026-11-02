@@ -1,12 +1,12 @@
 import { test, expect } from 'bun:test'
 import { createServer, createConnection } from 'node:net'
-import { openRelay, rewriteRelayHead } from './relay.ts'
+import { bodyFraming, openRelay, rewriteRelayHead } from './relay.ts'
 
 test('relay keeps the page credentials, rejects foreign origins and authority-form targets', () => {
   const head = rewriteRelayHead('POST /api?x=1 HTTP/1.1\r\nHost: 127.0.0.1:5321\r\nCookie: page=1\r\nAuthorization: Bearer app\r\nConnection: keep-alive\r\nContent-Length: 5\r\n\r\n', '127.0.0.1:4237', '/preview-proxy/T1', 5321)
   expect(head).toContain('POST /preview-proxy/T1/api?x=1 HTTP/1.1\r\nHost: 127.0.0.1:4237')
-  expect(head).toContain('cookie: page=1'); expect(head).toContain('authorization: Bearer app'); expect(head).toContain('Connection: close')
-  expect(head).not.toContain('keep-alive')
+  expect(head).toContain('cookie: page=1'); expect(head).toContain('authorization: Bearer app'); expect(head).toContain('Connection: keep-alive')
+  expect(head.match(/connection:/gi)).toHaveLength(1)
   for (const request of ['CONNECT example.com:443', 'GET http://evil/', 'GET //evil/']) expect(() => rewriteRelayHead(`${request} HTTP/1.1\r\nHost: 127.0.0.1:5321\r\n\r\n`, 'daemon:9', '/preview-proxy/T1', 5321)).toThrow()
   for (const host of ['evil.example:5321', '127.0.0.1:5322', '127.0.0.1:5321\r\nHost: evil']) expect(() => rewriteRelayHead(`GET / HTTP/1.1\r\nHost: ${host}\r\n\r\n`, 'daemon:9', '/preview-proxy/T1', 5321)).toThrow('421')
 })
@@ -131,4 +131,51 @@ test('a single-page ticket (artifact preview, visual frame) is reachable only at
 test('the relay opens single-page tickets on the daemon or through a member, and nothing beside them', async () => {
   for (const path of ['/visual-frame/V1', '/artifact-preview/A1', '/relay/m-1/http/visual-frame/V1', '/relay/m-1/http/artifact-preview/A1']) (await openRelay(`http://127.0.0.1:9${path}`, 'http://127.0.0.1:9')).close()
   for (const path of ['/visual-frame/V1/', '/visual-frame/V1/x', '/artifact-preview/', '/assets/a1', '/relay/m-1/http/assets/a1']) await expect(openRelay(`http://127.0.0.1:9${path}`, 'http://127.0.0.1:9')).rejects.toThrow('configured daemon')
+})
+
+test('request bodies are framed so the next request on a kept-alive connection starts where the body ends', () => {
+  const sized = bodyFraming('POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\n')
+  expect(sized.feed(Buffer.from('abc'))).toBe(3); expect(sized.done).toBe(false)
+  expect(sized.feed(Buffer.from('deGET /'))).toBe(2); expect(sized.done).toBe(true)
+  expect(bodyFraming('GET / HTTP/1.1\r\n\r\n').done).toBe(true)
+  const chunked = bodyFraming('POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n')
+  const wire = Buffer.from('4;ext=1\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: 1\r\n\r\nGET /next')
+  let taken = 0
+  for (let i = 0; i < wire.length && !chunked.done; i += 3) taken += chunked.feed(wire.subarray(i, Math.min(i + 3, wire.length)))
+  expect(chunked.done).toBe(true)
+  expect(wire.subarray(taken).toString()).toEndWith('GET /next')
+  expect(wire.subarray(0, taken).toString()).toEndWith('X-Trailer: 1\r\n\r\n')
+})
+
+test('a page connection keeps one upstream connection for its requests', async () => {
+  const seen: string[] = []
+  let connections = 0
+  const upstream = createServer(socket => {
+    connections++
+    let buffer = ''
+    socket.on('data', data => {
+      buffer += data.toString()
+      for (;;) {
+        const end = buffer.indexOf('\r\n\r\n'); if (end < 0) return
+        const head = buffer.slice(0, end), length = Number(/content-length: (\d+)/i.exec(head)?.[1] ?? 0)
+        if (buffer.length < end + 4 + length) return
+        const body = buffer.slice(end + 4, end + 4 + length); buffer = buffer.slice(end + 4 + length)
+        seen.push(`${head.split('\r\n')[0]}|${body}`)
+        socket.write(`HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok`)
+      }
+    })
+  })
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  const daemon = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`
+  const relay = await openRelay(`${daemon}/preview-proxy/T1/`, daemon)
+  const port = Number(new URL(relay.url).port), socket = createConnection(port, '127.0.0.1')
+  try {
+    let text = ''
+    const replies = new Promise<void>(resolve => socket.on('data', data => { text += data.toString(); if (text.split('200 OK').length - 1 === 3) resolve() }))
+    socket.write(`GET /a.js HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\nPOST /api HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Length: 5\r\n\r\nhel`)
+    socket.write(`loGET /b.js HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`)
+    await replies
+    expect(seen).toEqual(['GET /preview-proxy/T1/a.js HTTP/1.1|', 'POST /preview-proxy/T1/api HTTP/1.1|hello', 'GET /preview-proxy/T1/b.js HTTP/1.1|'])
+    expect(connections).toBe(1)
+  } finally { socket.destroy(); relay.close(); await new Promise<void>(resolve => upstream.close(() => resolve())) }
 })

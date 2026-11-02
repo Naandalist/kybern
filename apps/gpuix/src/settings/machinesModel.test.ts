@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
-import type { MachineCard } from '../../../../packages/kybern-client/src/types.ts'
+import type { KeepReachableStatus, MachineCard } from '../../../../packages/kybern-client/src/types.ts'
 import type { MachineRow } from '../machines/index.ts'
-import { buildCards, doctorRows, doctorSummary, isBehind, osName, outboxRows, unnamedMachines, updateResultRows, updateSummary } from './machinesModel.ts'
+import { buildCards, doctorRows, doctorSummary, isBehind, osName, outboxRows, reachableRow, unnamedMachines, updateResultRows, updateSummary } from './machinesModel.ts'
 
 const row = (over: Partial<MachineRow> & { machineId: string; name: string }): MachineRow => ({ status: 'online', offline: false, isLocal: false, glyph: { letter: over.name[0]!, hue: 10 }, showGlyph: true, member: true, paused: false, ...over })
 const member = (over: Partial<MachineCard> & { machine_id: string; name: string }): MachineCard => ({ os: 'linux', status: 'online', ...over })
@@ -103,4 +103,14 @@ test('a check run lists failures first with what to do, and says which machine a
   ])
   expect(doctorSummary(report)).toBe('2 of 3 checks need a look')
   expect(doctorSummary({ ...report, checks: [report.checks[0]!] })).toBe('All 1 check passed')
+})
+
+test('the reachable row explains the switch, shows a problem instead, and hides where nothing can be registered', () => {
+  const on: KeepReachableStatus = { enabled: true, wanted: true, kind: 'task_scheduler', registered: true, running: false }
+  expect(reachableRow(on)?.description).toContain('with the app closed')
+  expect(reachableRow({ ...on, enabled: false, registered: false })?.description).toBe('Your other machines reach this one only while Kybern is open.')
+  expect(reachableRow({ ...on, registered: false, error: 'Kybern could not register itself to start at login: Access is denied.' })).toEqual({ description: 'Kybern could not register itself to start at login: Access is denied.', problem: true, locked: false })
+  expect(reachableRow({ ...on, external: 'The systemd user service kybernd.service already starts Kybern at login.' })?.locked).toBe(true)
+  expect(reachableRow({ ...on, kind: null })).toBeNull()
+  expect(reachableRow(undefined)).toBeNull()
 })

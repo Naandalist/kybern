@@ -163,7 +163,8 @@ expression: schema_for!(Settings)
       "default": {
         "configured": false,
         "enabled": false,
-        "port": 4173
+        "port": 4173,
+        "keep_reachable": true
       }
     }
   },
@@ -624,6 +625,11 @@ expression: schema_for!(Settings)
           "minimum": 0,
           "maximum": 65535,
           "default": 4173
+        },
+        "keep_reachable": {
+          "description": "\"Keep this machine reachable when Kybern is closed\" (ADE-119): while this machine is in a\nnetwork with the network on, its daemon is started at login by a per-user login item, so the\nother members reach it with no app window open. Per machine like the rest of this section: it\nregisters an item with this computer's own login, and a laptop may opt out where a desktop\nopts in.",
+          "type": "boolean",
+          "default": true
         }
       }
     }

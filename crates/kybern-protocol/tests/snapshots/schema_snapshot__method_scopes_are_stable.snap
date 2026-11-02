@@ -316,6 +316,10 @@ expression: scopes
   - "orchestration:operate"
 - - github.actions.dispatch
   - "orchestration:operate"
+- - github.starred
+  - "orchestration:read"
+- - github.star
+  - "orchestration:operate"
 - - threads.worktree.inspect
   - "orchestration:read"
 - - threads.worktree.remove
@@ -417,6 +421,8 @@ expression: scopes
 - - machines.info
   - "network:read"
 - - network.follow_updates.set
+  - "network:admin"
+- - network.keep_reachable.set
   - "network:admin"
 - - peer.ops.sync
   - "machine:peer"

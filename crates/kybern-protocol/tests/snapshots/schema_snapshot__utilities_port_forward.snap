@@ -38,6 +38,43 @@ expression: schema_for!(PortForward)
     "created_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "rtt_ms": {
+      "description": "The round trip to the machine, measured when the forward was opened, in milliseconds.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "https_available": {
+      "description": "The machine can serve this forward over HTTP/2 (`https: true` in `ports.forward`).",
+      "type": "boolean"
+    },
+    "https_port": {
+      "description": "The HTTPS (HTTP/2) listener of this forward, once asked for.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "https_certificate": {
+      "description": "The PEM certificate the HTTPS listener presents: Kybern's web views trust exactly this certificate for\n`localhost`, and only for this listener's pages. It is generated per install and never added to a trust store.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "https_certificate_sha256": {
+      "description": "Its SHA-256 fingerprint (lowercase hex of the DER).",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

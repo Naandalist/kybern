@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 /// The value under the first of `names`, ignoring case and underscores.
 fn lookup<'a>(params: &'a Value, names: &[&str]) -> Option<&'a Value> {
@@ -193,19 +193,24 @@ pub(crate) fn find_in_transcript(transcript: &str, before_step: u64, tool_name: 
                 continue;
             }
             let Some(args) = call.get("args").and_then(Value::as_object) else { continue };
-            // Arguments are JSON-encoded strings: "\"/abs\"" is the path /abs.
-            let decoded: Map<String, Value> = args
-                .iter()
-                .map(|(key, value)| {
-                    let value = match value.as_str() {
-                        Some(encoded) => serde_json::from_str(encoded).unwrap_or_else(|_| Value::String(encoded.to_string())),
-                        None => value.clone(),
-                    };
-                    (key.clone(), value)
-                })
-                .collect();
-            found = Some(json!(decoded));
+            found = Some(decode_args(args));
         }
     }
     found
+}
+
+/// A transcript call's `args`: values are often JSON-encoded strings, so
+/// `"\"/abs\""` is the path `/abs`.
+pub(crate) fn decode_args(args: &Map<String, Value>) -> Value {
+    let decoded: Map<String, Value> = args
+        .iter()
+        .map(|(key, value)| {
+            let value = match value.as_str() {
+                Some(encoded) => serde_json::from_str(encoded).unwrap_or_else(|_| Value::String(encoded.to_string())),
+                None => value.clone(),
+            };
+            (key.clone(), value)
+        })
+        .collect();
+    Value::Object(decoded)
 }

@@ -843,10 +843,12 @@ async fn a_forwarded_port_carries_tcp_both_ways_refuses_kybernd_ports_and_closes
     let Some((_cluster, a, b)) = pair().await else { return };
     let remote_port = echo_server().await;
     let client = admin(&a).await;
-    let forwarded = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None }).await.unwrap();
+    let forwarded =
+        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
     assert_eq!((forwarded.remote_port, forwarded.machine_id.as_str()), (remote_port, b.id().as_str()));
     // The same request returns the forward that exists.
-    let again = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None }).await.unwrap();
+    let again =
+        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
     assert_eq!(again.id, forwarded.id);
     assert_eq!(client.call::<PortsList>(Empty {}).await.unwrap().forwards.len(), 1);
     // The agent's preview tool asks the hub for a forward and gets the same one.
@@ -878,7 +880,8 @@ async fn a_forwarded_port_carries_tcp_both_ways_refuses_kybernd_ports_and_closes
     // kybernd's own ports are never reachable: its listeners and the default port.
     let own = [b.primary.port(), b.state.network.listening_port().unwrap(), DEFAULT_PORT];
     for port in own {
-        let refused = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: port, local_port: None }).await;
+        let refused =
+            client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: port, local_port: None, https: false }).await;
         let error = refused.unwrap_err().to_string();
         assert!(error.contains("belongs to Kybern"), "port {port}: {error}");
     }
@@ -893,17 +896,19 @@ async fn a_forwarded_port_carries_tcp_both_ways_refuses_kybernd_ports_and_closes
     assert!(tokio::net::TcpStream::connect(("127.0.0.1", forwarded.local_port)).await.is_err());
 
     // A forward is stopped by hand, too; and a machine that turned ports off refuses it.
-    let second = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None }).await.unwrap();
+    let second =
+        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
     let after = client.call::<PortsStop>(PortsStopParams { id: second.id }).await.unwrap();
     assert!(after.forwards.is_empty());
     b.membership().set(&format!("allow.{}.ports", b.id()), json!(false)).unwrap();
-    let refused = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None }).await;
+    let refused = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await;
     assert!(refused.is_err(), "{refused:?}");
 }
 
 /// One forwarded connection to b's echo server, proven open by an echo.
 async fn open_echo_connection(a: &Node, b: &Node, client: &Client, remote_port: u16) -> tokio::net::TcpStream {
-    let forwarded = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None }).await.unwrap();
+    let forwarded =
+        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
     let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", forwarded.local_port)).await.unwrap();
     socket.write_all(b"ping").await.unwrap();
     let mut got = [0u8; 4];
@@ -1007,9 +1012,9 @@ async fn a_terminal_on_another_machine_runs_there_and_streams_back_through_the_r
 
     assert!(call(&mut socket, 2, "terminals.subscribe", json!({"terminal_id": terminal_id, "replay": true})).await["error"].is_null());
     let command = "echo kybern-$((20+22)); cat only-on-b.txt\n";
-    assert!(
-        call(&mut socket, 3, "terminals.input", json!({"terminal_id": terminal_id, "data": B64.encode(command)})).await["error"].is_null()
-    );
+    // Sent without waiting for its answer here: the output can arrive before it, and `call` would skip it.
+    let input = json!({"jsonrpc": "2.0", "id": 3, "method": "terminals.input", "params": {"terminal_id": terminal_id, "data": B64.encode(command)}});
+    socket.send(Message::Text(input.to_string().into())).await.unwrap();
     let mut output = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while !(output.contains("kybern-42") && output.contains("b-file")) {
@@ -1132,14 +1137,22 @@ async fn the_servers_of_another_machine_are_listed_there_and_open_through_a_forw
         assert!(listed, "the server was not listed on the machine it runs on");
         // Opening it: a forward on a's machine, whose local address serves b's page.
         let on_a = admin(&a).await;
-        let forwarded =
-            on_a.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: port, local_port: None }).await.unwrap();
+        let forwarded = on_a
+            .call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: port, local_port: None, https: false })
+            .await
+            .unwrap();
         let page = reqwest::get(format!("http://127.0.0.1:{}/", forwarded.local_port)).await.unwrap();
         assert_eq!(page.status(), 200);
         assert!(page.text().await.unwrap().contains("served on b"));
         // A machine that is not in the network is a plain error, not a forward to nowhere.
-        let unknown =
-            on_a.call::<PortsForward>(PortsForwardParams { machine: "no-such-machine".into(), remote_port: port, local_port: None }).await;
+        let unknown = on_a
+            .call::<PortsForward>(PortsForwardParams {
+                machine: "no-such-machine".into(),
+                remote_port: port,
+                local_port: None,
+                https: false,
+            })
+            .await;
         assert!(unknown.is_err());
         on_a.call::<PortsStop>(PortsStopParams { id: forwarded.id }).await.unwrap();
     }

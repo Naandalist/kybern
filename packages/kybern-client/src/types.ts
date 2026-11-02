@@ -3303,6 +3303,15 @@ export interface ActionsWorkflowResult { dispatchable: boolean; inputs: Workflow
 export type ActionsActionKind = "rerun" | "rerun_failed" | "rerun_job" | "cancel"
 export interface ActionsActionParams { project_id: ProjectId; repo?: string; action: ActionsActionKind; run_id: number; job_id?: number }
 export interface ActionsDispatchParams { project_id: ProjectId; repo?: string; workflow: string; ref: string; inputs?: Record<string, string> }
+/** `github.starred` / `github.star` (ADE-117): Kybern's own repository (`Tresnanda/kybern`) through the daemon's `gh`. */
+export type GithubStarredParams = Record<string, never>
+export interface GithubStarredResult {
+  /** GitHub answered 204. False on 404, and when `gh` is missing or signed out. */
+  starred: boolean
+  /** `gh` is installed and signed in, so `github.star` can star the repository. */
+  can_star: boolean
+}
+export type GithubStarParams = Record<string, never>
 export interface WorktreeInspectParams { thread_id: ThreadId }
 export interface WorktreeInspectResult { path: string; branch: string; exists: boolean; clean: boolean; merged: boolean; ignored_files: number; blockers: string[]; eligible: boolean }
 export interface WorktreeRemoveParams { thread_id: ThreadId; force?: boolean; delete_branch?: boolean }
@@ -3521,6 +3530,8 @@ export interface NetworkSettings {
   enabled: boolean;
   /** The fixed port the Tailscale listener binds; the daemon tries the next six when it is taken. */
   port: number;
+  /** "Keep this machine reachable when Kybern is closed": start the daemon at login while in a network. Per machine. Absent on older daemons. */
+  keep_reachable?: boolean;
 }
 
 /** A machine's id: the daemon's `environment_id`. */
@@ -3700,6 +3711,30 @@ export interface NetworkStatus {
   removed?: boolean;
   /** "Keep all machines on the same version": a member that sees a newer version updates itself when idle. */
   follow_updates?: boolean;
+  /** "Keep this machine reachable when Kybern is closed" and its login item. Absent on older daemons. */
+  keep_reachable?: KeepReachableStatus | null;
+}
+
+/** What starts the daemon at login: Windows, macOS, Linux with and without a user systemd. */
+export type LoginServiceKind = "task_scheduler" | "launch_agent" | "systemd_user" | "xdg_autostart";
+
+export interface KeepReachableStatus {
+  /** The setting, `settings.network.keep_reachable`. */
+  enabled: boolean;
+  /** The login item should exist now: the setting, the network and membership are all on. */
+  wanted: boolean;
+  /** Absent where Kybern cannot register a login item. */
+  kind?: LoginServiceKind | null;
+  /** The login item is registered for this data folder. */
+  registered: boolean;
+  /** This daemon was started by the login item. */
+  running: boolean;
+  /** Another service (a remote install's) already starts the daemon; Kybern leaves it alone. */
+  external?: string | null;
+  /** Why registering or removing the item failed, and what to do next. */
+  error?: string | null;
+  /** Problems with a service that starts the daemon, each with what to do next. */
+  warnings?: string[];
 }
 
 export type RouteKind = "direct_tailnet" | "direct_advertised" | "ssh" | "relay";
@@ -4107,7 +4142,8 @@ export interface SkillsCopyResult {
 }
 export interface SkillCopyPayload { name: string; from_home: SkillHome; homes: SkillHome[]; replaces?: string[] }
 
-export interface PortsForwardParams { machine: string; remote_port: number; local_port?: number | null }
+/** `https`: also serve the forward as `https://localhost:<https_port>` with HTTP/2 (Fast mode) for Kybern's web views. */
+export interface PortsForwardParams { machine: string; remote_port: number; local_port?: number | null; https?: boolean }
 export interface PortForward {
   id: Uuid;
   machine_id: MachineId;
@@ -4116,10 +4152,20 @@ export interface PortForward {
   local_port: number;
   connections: number;
   created_at: DateTime;
+  /** The round trip to the machine when the forward opened, in milliseconds. */
+  rtt_ms?: number;
+  /** The machine can serve this forward over HTTP/2 (`https: true`). */
+  https_available?: boolean;
+  /** The HTTPS (HTTP/2) listener, once asked for. */
+  https_port?: number;
+  /** The PEM certificate that listener presents; only Kybern's web views trust it, and only for its pages. */
+  https_certificate?: string;
+  /** Its SHA-256 fingerprint, lowercase hex of the DER. */
+  https_certificate_sha256?: string;
 }
 export interface PortsListResult { forwards: PortForward[] }
-export interface PeerPortsPrepareParams { forward_id: string; port: number }
-export interface PeerPortsDirect { port: number; token: string }
+export interface PeerPortsPrepareParams { forward_id: string; port: number; direct_version?: number }
+export interface PeerPortsDirect { port: number; token: string; version?: number }
 export interface PeerPortsPrepareResult { direct?: PeerPortsDirect }
 export interface PeerPortsReleaseParams { forward_id: string }
 export interface PeerPortsOpenParams { stream_id: number; port: number }
@@ -4675,6 +4721,8 @@ export interface Methods {
   "github.actions.workflow": [ActionsWorkflowParams, ActionsWorkflowResult];
   "github.actions.action": [ActionsActionParams, Empty];
   "github.actions.dispatch": [ActionsDispatchParams, Empty];
+  "github.starred": [GithubStarredParams, GithubStarredResult];
+  "github.star": [GithubStarParams, Empty];
   "threads.worktree.inspect": [WorktreeInspectParams, WorktreeInspectResult];
   "threads.worktree.remove": [WorktreeRemoveParams, WorktreeInspectResult];
   "network.status": [Empty, NetworkStatus];
@@ -4694,6 +4742,7 @@ export interface Methods {
   "network.doctor": [{ machine_id?: MachineId | null }, DoctorReport];
   "machines.info": [Empty, MachineInfo];
   "network.follow_updates.set": [{ enabled: boolean }, NetworkStatus];
+  "network.keep_reachable.set": [{ enabled: boolean }, NetworkStatus];
   "network.relay_page.open": [NetworkRelayPageOpenParams, NetworkRelayPageOpenResult];
   "network.relay_page.close": [{ ticket: string }, Empty];
   "peer.ops.sync": [PeerOpsSyncParams, PeerOpsSyncResult];

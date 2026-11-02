@@ -42,6 +42,9 @@ pub enum PortsCmd {
         /// The port to listen on here. Defaults to the remote port or the next free port.
         #[arg(long)]
         local_port: Option<u16>,
+        /// Also serve it as https://localhost over HTTP/2 (Fast mode), with Kybern's own certificate.
+        #[arg(long)]
+        https: bool,
     },
     /// List the forwarded ports.
     List,
@@ -115,8 +118,10 @@ fn render_forwards(forwards: &[PortForward]) {
         println!("no forwarded ports");
     }
     for forward in forwards {
+        let https = forward.https_port.map(|port| format!("  https://localhost:{port} (HTTP/2)")).unwrap_or_default();
+        let rtt = forward.rtt_ms.map(|ms| format!("  {ms} ms")).unwrap_or_default();
         println!(
-            "{}  127.0.0.1:{} -> {}:{}  {} connection(s)",
+            "{}  127.0.0.1:{} -> {}:{}  {} connection(s){rtt}{https}",
             forward.id, forward.local_port, forward.machine_name, forward.remote_port, forward.connections
         );
     }
@@ -124,8 +129,8 @@ fn render_forwards(forwards: &[PortForward]) {
 
 pub async fn run_ports(client: &Client, cmd: PortsCmd, json: bool) -> Result<()> {
     match cmd {
-        PortsCmd::Forward { machine, remote_port, local_port } => {
-            let forward = client.call::<PortsForward>(PortsForwardParams { machine, remote_port, local_port }).await?;
+        PortsCmd::Forward { machine, remote_port, local_port, https } => {
+            let forward = client.call::<PortsForward>(PortsForwardParams { machine, remote_port, local_port, https }).await?;
             if json { println!("{}", serde_json::to_string_pretty(&forward)?) } else { render_forwards(&[forward]) }
         }
         PortsCmd::List => {

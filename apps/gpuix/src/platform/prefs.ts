@@ -14,6 +14,24 @@ function all(): Record<string, unknown> {
   return cache
 }
 export const readPref = <T>(key: string, fallback: T): T => (key in all() ? all()[key] as T : fallback)
+/**
+ * Read the file again, for a value another window's process may have written since (each environment window is its own
+ * process). Unlike `readPref` it throws when the file exists but cannot be read or parsed: a caller that must be able to
+ * keep what it writes (a dismissal) can then refuse to go on.
+ */
+export function reloadPrefs(): Record<string, unknown> {
+  let next: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file(), 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('app.json is not an object')
+    next = parsed as Record<string, unknown>
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    next = {}
+  }
+  cache = next
+  return next
+}
 export function writePref(key: string, value: unknown) {
   const next = { ...all(), [key]: value }
   mkdirSync(path.dirname(file()), { recursive: true })

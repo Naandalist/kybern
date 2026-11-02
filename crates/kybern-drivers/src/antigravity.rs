@@ -15,7 +15,7 @@
 //! command line.
 mod login;
 mod stream;
-mod tools;
+pub(crate) mod tools;
 mod usage;
 
 pub use login::{StoredLogin, parse_login, read_login};
@@ -325,6 +325,23 @@ impl AgentDriver for AntigravityDriver {
 
     async fn probe_fresh_with_context(&self, context: &ProbeContext) -> ProviderStatus {
         self.probe_context(context, true).await
+    }
+
+    async fn list_sessions(
+        &self,
+        context: &ProbeContext,
+        cursor: Option<&str>,
+        query: &str,
+    ) -> Result<kybern_protocol::methods::SessionsListResult> {
+        crate::sessions::list(ProviderKind::Antigravity, context, cursor, query).await
+    }
+
+    async fn read_session(&self, context: &ProbeContext, id: &str) -> Result<crate::sessions::SessionHistory> {
+        crate::sessions::read(ProviderKind::Antigravity, context, id).await
+    }
+
+    async fn open_session_reader(&self, context: &ProbeContext) -> Result<Box<dyn crate::sessions::SessionReader>> {
+        crate::sessions::reader(ProviderKind::Antigravity, context).await
     }
 
     /// A single tool-free run. `--mode plan` keeps the model from editing the

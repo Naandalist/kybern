@@ -246,6 +246,8 @@ fn main() {
     method::<ActionsWorkflow>(&mut methods);
     method::<ActionsAction>(&mut methods);
     method::<ActionsDispatch>(&mut methods);
+    method::<GithubStarred>(&mut methods);
+    method::<GithubStar>(&mut methods);
     method::<WorktreeInspect>(&mut methods);
     method::<WorktreeRemove>(&mut methods);
     method::<FilesSearch>(&mut methods);
@@ -297,6 +299,7 @@ fn main() {
     method::<NetworkDoctor>(&mut methods);
     method::<MachinesInfo>(&mut methods);
     method::<NetworkFollowUpdatesSet>(&mut methods);
+    method::<NetworkKeepReachableSet>(&mut methods);
     method::<PeerOpsSync>(&mut methods);
     method::<PeerOpsPush>(&mut methods);
     method::<PeerPresenceMethod>(&mut methods);

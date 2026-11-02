@@ -3,14 +3,14 @@
 // code; Update all machines. Everything goes through the `network.*` RPCs of the machine the user is at, which any member
 // answers for the rest. Words come from `machinesModel.ts`.
 import { useEffect, useMemo, useState } from 'react'
-import type { DoctorReport, FoundMachine, NetworkUpdateAllResult, OutboxItem } from '../../../../packages/kybern-client/src/types.ts'
+import type { DoctorReport, FoundMachine, NetworkStatus, NetworkUpdateAllResult, OutboxItem } from '../../../../packages/kybern-client/src/types.ts'
 import { Dialog, Tip } from '../nav/overlay.tsx'
 import { N } from '../nav/glyphs.ts'
 import { errorText } from '../nav/actions.ts'
 import { toast } from '../shell/toasts.tsx'
 import { footerText } from '../machines/format.ts'
 import { machineHub, useMachines } from '../machines/index.ts'
-import { addFound, doctor, joinByCode, cancelOutbox, loadMachineInfo, mergeFound, pauseMachine, removeFromNetwork, renameMachine, retryOutbox, setFollowUpdates, setNetworkEnabled, showCode, updateAllMachines, useNetwork } from '../machines/network.ts'
+import { addFound, doctor, joinByCode, cancelOutbox, loadMachineInfo, mergeFound, pauseMachine, removeFromNetwork, renameMachine, retryOutbox, setFollowUpdates, setKeepReachable, setNetworkEnabled, showCode, updateAllMachines, useNetwork } from '../machines/network.ts'
 import { showEnvironmentDialog } from '../environments/Dialogs.tsx'
 import { stopSshTunnel } from '../environments/ssh.ts'
 import { MachineBadge } from '../sidebar/MachineBadge.tsx'
@@ -27,7 +27,7 @@ import { Switch } from '../kit/Switch.tsx'
 import { readClipboardAuto, setClipboardAuto } from '../machines/clipboard.ts'
 import { S } from './glyphs.ts'
 import { Row, Section } from './controls.tsx'
-import { buildCards, doctorRows, doctorSummary, outboxRows, unnamedMachines, updateResultRows, updateSummary, type MachineCardModel } from './machinesModel.ts'
+import { buildCards, doctorRows, doctorSummary, outboxRows, reachableRow, unnamedMachines, updateResultRows, updateSummary, type MachineCardModel } from './machinesModel.ts'
 import { dismissNamesHint, namesHintDismissed } from '../machines/notice.ts'
 import { configDir } from '../environments/registry.ts'
 import { machineGlyph } from '../../../../packages/kybern-client/src/machineMerge.ts'
@@ -73,6 +73,7 @@ export function Machines() {
     {!net.unavailable && <Updates busy={net.busy === 'update'} following={status ? !!status.follow_updates : undefined} machines={cards} result={net.updated} />}
     {!net.unavailable && status && <Section title="Your network" accessory={<Button testId="machines-intro" size="sm" variant="ghost" onClick={() => openIntro(true)}>What is this?</Button>}>
       <Row title="Let your machines find each other" description="Machines signed in to the same Tailscale account join without a code. Turn this off to leave the network and keep your machines separate."><Switch aria-label="Use your network" testId="machines-enabled" checked={status.enabled} disabled={net.busy === 'enabled'} onCheckedChange={(enabled) => void setNetworkEnabled(enabled).catch((e) => toast.error('Unable to change the network', { description: errorText(e) }))} /></Row>
+      <KeepReachable status={status.keep_reachable} busy={net.busy === 'reachable'} />
       <Row title="Check the network" description="Looks at Tailscale, the pairing and each machine, and says what to fix."><Button testId="machines-doctor" busy={net.busy === 'doctor'} onClick={() => void runDoctor()}>Run check</Button></Row>
       {net.doctor && <DoctorResults report={net.doctor} names={new Map(cards.map((card) => [card.machineId, card.name]))} />}
     </Section>}
@@ -289,6 +290,15 @@ function Updates({ busy, following, machines, result }: { busy: boolean; followi
     </div>}
     <Row title="Keep all machines on the same version" description="A machine updates itself, once it is idle, when another one runs a newer version. A machine managed by the desktop app is left out."><Switch aria-label="Keep all machines on the same version" testId="machines-follow-updates" checked={!!following} disabled={following === undefined || net.busy === 'follow'} onCheckedChange={(enabled) => void setFollowUpdates(enabled).catch((e) => toast.error('Unable to change the setting', { description: errorText(e) }))} /></Row>
   </Section>
+}
+
+/** "Keep this machine reachable when Kybern is closed" (ADE-119): the daemon starts at login while this machine is in a network. */
+function KeepReachable({ status, busy }: { status: NetworkStatus['keep_reachable']; busy: boolean }) {
+  const row = reachableRow(status)
+  if (!status || !row) return null
+  return <Row title="Keep this machine reachable when Kybern is closed" description={row.problem ? <ErrorText>{row.description}</ErrorText> : row.description}>
+    <Switch aria-label="Keep this machine reachable when Kybern is closed" testId="machines-keep-reachable" checked={status.enabled} disabled={busy || row.locked} onCheckedChange={(enabled) => void setKeepReachable(enabled).catch((e) => toast.error('Unable to change the setting', { description: errorText(e) }))} />
+  </Row>
 }
 
 /** Work waiting for a machine that is away, or stuck: Retry sends it again, Cancel drops it (design §6.4). */
