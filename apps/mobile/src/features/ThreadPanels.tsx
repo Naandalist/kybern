@@ -5,6 +5,7 @@ import { randomUUID } from "expo-crypto";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { StyleSheet, View } from "react-native";
 import type { AccountSummary, Thread, ThreadTargetState } from "../state/protocol";
+import { hasSignIn } from "../../../../packages/kybern-client/src/machineAgents";
 import { errorText, loadThread, rpc } from "../state/runtime";
 import { MenuButton } from "../ui/ActionMenu";
 import { Button, ErrorBanner, Icon, T } from "../ui/primitives";
@@ -115,8 +116,7 @@ function LimitRecovery({ thread }: { thread: Thread }) {
     (account) =>
       account.provider.kind === thread.provider.kind &&
       account.provider.instance !== thread.provider.instance &&
-      account.status !== "needs_sign_in" &&
-      account.status !== "signed_out",
+      (!hasSignIn(account.provider.kind) || (account.status !== "needs_sign_in" && account.status !== "signed_out")),
   );
   const choice = options.find((account) => account.provider.instance === selected) ?? options[0];
   return (

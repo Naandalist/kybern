@@ -64,6 +64,7 @@ import {
 } from "./transcript";
 
 import { versionAtLeast } from "./groups";
+import { shouldTryOtherAddresses } from "./addressFailover";
 
 export type Environment = Endpoint & { id: string; name: string };
 interface State {
@@ -559,6 +560,9 @@ export function connect(id: string | null) {
   refreshPromise = null;
   providerRefreshPromise = null;
   hub?.releasePrimary();
+  failover = { downSince: undefined, lastTry: 0, trying: false };
+  offFailoverWatch?.();
+  offFailoverWatch = undefined;
   resetRemoteEvents();
   client?.close();
   client = null;
@@ -614,6 +618,9 @@ export function connect(id: string | null) {
   next.onStatus((status, detail) => {
     if (generation !== thisGeneration) return;
     publish({ status, error: status === "open" ? null : (detail ?? null) });
+    if (status === "open") failover.downSince = undefined;
+    else failover.downSince ??= Date.now();
+    tryOtherAddresses(thisGeneration, env, next);
     // The daemon answered: the computer joins the machine set under its machine id.
     if (status === "open") void hub?.primaryOpened(next).catch(() => {});
     if (status !== "open") {
@@ -725,7 +732,58 @@ export function connect(id: string | null) {
         });
     },
   );
+  // The network may learn where this computer is now while its saved address keeps failing: look again then.
+  offFailoverWatch = machines.set.onChange((event) => {
+    if (event.type === "routes" || event.type === "status") tryOtherAddresses(thisGeneration, env, next);
+  });
   next.connect();
+}
+
+// ---- the computer's other addresses (`addressFailover.ts`) ----
+
+let failover: { downSince: number | undefined; lastTry: number; trying: boolean } = { downSince: undefined, lastTry: 0, trying: false };
+let offFailoverWatch: (() => void) | undefined;
+
+/**
+ * The saved address of the computer the phone is at keeps failing: try the addresses the network knows for it
+ * (verified as that computer by the machine set first), and move the saved computer to the first that opens.
+ */
+function tryOtherAddresses(thisGeneration: number, env: Environment, current: KybernClient) {
+  if (generation !== thisGeneration || client !== current || !hub) return;
+  const now = Date.now();
+  if (!shouldTryOtherAddresses({ status: current.status, failure: current.failure, downSince: failover.downSince, lastTry: failover.lastTry, trying: failover.trying, now })) return;
+  const round = failover;
+  round.trying = true;
+  round.lastTry = now;
+  const stale = () => generation !== thisGeneration || client !== current || current.status === "open";
+  void (async () => {
+    try {
+      for (const url of await machineHub().primaryAlternates(env.url)) {
+        if (stale()) return;
+        const endpoint: Endpoint = { url: normalizeDaemonUrl(url), token: env.token, ...(env.environmentId ? { environmentId: env.environmentId } : {}) };
+        try {
+          await openCandidate(endpoint);
+        } catch {
+          continue;
+        }
+        if (stale()) return;
+        await moveComputer(env, endpoint.url);
+        if (generation === thisGeneration) connect(env.id);
+        return;
+      }
+    } catch {
+      // The saved address keeps retrying; the next status change or learned route tries again.
+    } finally {
+      round.trying = false;
+    }
+  })();
+}
+
+/** The computer answers at `url` now: save that address first and keep the old one after it. */
+async function moveComputer(env: Environment, url: string) {
+  publish({ environments: state.environments.map((e) => (e.id === env.id ? { ...e, url } : e)) });
+  const routes = [url, env.url].map((address) => ({ kind: "direct_advertised" as const, url: routeUrl(address) }));
+  await machineHub().saveComputer({ machineId: env.id, name: env.name, routes }, env.token);
 }
 /**
  * Read the computer's lists again. With a machine id (a string: callers also

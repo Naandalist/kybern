@@ -764,12 +764,13 @@ export function ComposerView(input: ComposerViewProps) {
   // Scope approval shortcuts strictly to this editor. Native events cannot
   // prevent text insertion, so consume only the exact digit below.
   useEffect(() => addWindowKeyHandler((e) => {
-    if (pane.frozen || !editor.current || renderer.getFocusedElementId?.() !== editor.current.id) return false
     const m = e.modifiers
     if (m?.cmd || m?.alt || m?.ctrl || m?.shift) return false
     if (!empty || sending || !props.currentThreadId || !/^([1-9]|escape|up|down)$/.test(e.key ?? '')) return false
     const approval = pane.get().open.pendingApprovals[0]
     if (!approval) return false
+    // Last: off macOS the focus query waits on the UI thread, and this runs for every key typed anywhere.
+    if (pane.frozen || !editor.current || renderer.getFocusedElementId?.() !== editor.current.id) return false
     // A summoned card (sign-in, permission) routes its own keys; the password prompt registers none, so typing stays typing.
     const custom = approval.thread_id === props.currentThreadId ? cardKeyHandler(approval.id) : undefined
     if (!custom && !isRowCard(approval)) return false
@@ -1006,7 +1007,7 @@ export function ComposerView(input: ComposerViewProps) {
         }}
       >
         <GlassEdge radius={compact ? 14 : COMPOSER_RADIUS} color={g.frostHighlight} />
-        {completion.menu((card.current && renderer.getElementBounds?.(card.current.id)?.width) || 736)}
+        {completion.menu(() => (card.current && renderer.getElementBounds?.(card.current.id)?.width) || 736)}
         {/* `dragOver && border-[color:var(--color-border-focus)]` with the card's `transition-colors duration-200`. */}
         <DropHighlight over={dragOver} radius={compact ? 14 : COMPOSER_RADIUS} color={t.v('--color-border-focus')} />
         <div style={{ display: 'flex', flexDirection: 'column', paddingTop: 14, paddingBottom: 8, paddingLeft: 16, paddingRight: 16 }}>

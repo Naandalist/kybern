@@ -15,7 +15,7 @@ const sources = {
       (globalThis.__fetches ??= []).push({ url, init });
       return { ok: globalThis.__fetchOk !== false, json: async () => ({ id: "a1", name: "pic.png", media_type: "image/png", size: 3 }) };
     }`,
-  react: "export const useCallback = fn => fn; export const useEffect = () => {}; export const useSyncExternalStore = (...args) => globalThis.reconnectSubscribe?.(...args) ?? args[1]();",
+  react: "export const useCallback = fn => fn; export const useMemo = fn => fn(); export const useEffect = () => {}; export const useSyncExternalStore = (...args) => globalThis.reconnectSubscribe?.(...args) ?? args[1]();",
 };
 export const nativeModuleSource = (specifier) => sources[specifier] ?? null;
 export const seedSecure = (items) => { globalThis.__secure.clear(); for (const [k, v] of Object.entries(items)) globalThis.__secure.set(k, v); };

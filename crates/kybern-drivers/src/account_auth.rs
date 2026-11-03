@@ -214,13 +214,53 @@ pub fn cursor_identity_from_status(value: &Value) -> (AccountStatus, Option<Acco
 
 // ---- omp ----
 
+/// omp has no account of its own: it runs on whichever providers it holds a login
+/// or key for. `omp auth-broker status` only describes an auth broker (a credential
+/// vault most installs never set up), so a local login (`omp login
+/// google-antigravity`, `omp login anthropic`, …) or an API key is read from the
+/// models omp lists, which are only those it can run.
 async fn omp_identity(context: &ProbeContext) -> (AccountStatus, Option<AccountIdentity>) {
     let Ok(binary) = crate::binary::resolve(ProviderKind::Omp, context.binary.as_ref()) else {
         return (AccountStatus::Unknown, None);
     };
-    match run_json(&binary, &["auth-broker", "status", "--json"], context).await {
-        Some((_, value)) => omp_identity_from_status(&value),
-        None => (AccountStatus::Unknown, None),
+    let broker = run_json(&binary, &["auth-broker", "status", "--json"], context).await.map(|(_, value)| omp_identity_from_status(&value));
+    if let Some(signed_in @ (AccountStatus::SignedIn, _)) = broker {
+        return signed_in;
+    }
+    match crate::pi::omp_catalog(&binary, context).await {
+        Some(models) => omp_identity_from_models(&models).unwrap_or_else(|| broker.unwrap_or((AccountStatus::SignedOut, None))),
+        None => broker.unwrap_or((AccountStatus::Unknown, None)),
+    }
+}
+
+/// Signed in when omp lists a model of a provider the user set up; the providers
+/// are named as the plan ("Google Antigravity", "ChatGPT, Claude"). `None` when
+/// only on-device models are listed.
+pub fn omp_identity_from_models(models: &[kybern_protocol::ProviderModel]) -> Option<(AccountStatus, Option<AccountIdentity>)> {
+    let providers = crate::pi::omp_configured_providers(models);
+    if providers.is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = providers.iter().take(2).map(|provider| omp_provider_label(provider)).collect();
+    if providers.len() > 2 {
+        names.push(format!("{} more", providers.len() - 2));
+    }
+    Some((AccountStatus::SignedIn, Some(AccountIdentity { email: None, plan: Some(names.join(", ")), organization: None })))
+}
+
+/// A readable name for an omp provider id.
+pub fn omp_provider_label(provider: &str) -> String {
+    match provider {
+        "google-antigravity" => "Google Antigravity".into(),
+        "google-gemini-cli" => "Gemini CLI".into(),
+        "google" => "Google".into(),
+        "anthropic" => "Claude".into(),
+        "openai-codex" | "openai-codex-device" => "ChatGPT".into(),
+        "openai" => "OpenAI".into(),
+        "github-copilot" => "GitHub Copilot".into(),
+        "openrouter" => "OpenRouter".into(),
+        "xai" | "xai-oauth" => "xAI".into(),
+        other => title_case(other),
     }
 }
 
@@ -539,6 +579,65 @@ mod tests {
         assert_eq!(state, AccountStatus::SignedIn);
         assert_eq!(identity.unwrap().plan.as_deref(), Some("API key · Anthropic"));
         assert_eq!(key_names_identity("{}").0, AccountStatus::SignedOut);
+    }
+
+    #[test]
+    fn omp_is_signed_in_through_any_provider_it_lists() {
+        let models = crate::pi::omp_models_from_json(include_bytes!("../tests/fixtures/omp-models-antigravity.json")).unwrap();
+        let (state, identity) = omp_identity_from_models(&models).unwrap();
+        assert_eq!(state, AccountStatus::SignedIn);
+        assert_eq!(identity.unwrap().plan.as_deref(), Some("Google Antigravity"));
+        let model = |provider: &str| kybern_protocol::ProviderModel {
+            id: format!("{provider}/m"),
+            display_name: "m".into(),
+            resolved_id: None,
+            description: None,
+            provider: Some(provider.into()),
+            efforts: Vec::new(),
+            default_effort: None,
+            is_default: false,
+            parameters: Vec::new(),
+            variants: Vec::new(),
+        };
+        let many = ["openai-codex", "apple", "anthropic", "openrouter"].map(model);
+        assert_eq!(omp_identity_from_models(&many).unwrap().1.unwrap().plan.as_deref(), Some("ChatGPT, Claude, 1 more"));
+        assert!(omp_identity_from_models(&[model("apple")]).is_none());
+        assert_eq!(omp_provider_label("kimi-code"), "Kimi Code");
+    }
+
+    /// A fake omp with no auth broker but a local Antigravity login: Kybern must
+    /// report it signed in, not ask for a Claude (or any) sign-in.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn omp_without_a_broker_reads_its_local_logins() {
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = directory.path().join("models.json");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/omp-models-antigravity.json"), &catalog).unwrap();
+        let binary = directory.path().join("omp");
+        kybern_protocol::process::write_executable(
+            &binary,
+            format!(
+                "#!/bin/sh\ncase \"$1 $2\" in\n  'auth-broker status') echo '{{\"ok\":false,\"reason\":\"not_configured\"}}' ;;\n  'models ls') cat '{}' ;;\n  *) exit 3 ;;\nesac\n",
+                catalog.display()
+            ),
+        )
+        .unwrap();
+        let context = ProbeContext { binary: Some(binary.clone()), ..ProbeContext::default() };
+        let mut probed = identity(ProviderKind::Omp, &context).await;
+        for _ in 0..50 {
+            // A sibling test's freshly forked child can hold the new script busy (ETXTBSY).
+            if probed.0 != AccountStatus::Unknown {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            probed = identity(ProviderKind::Omp, &context).await;
+        }
+        assert_eq!(probed.0, AccountStatus::SignedIn);
+        assert_eq!(probed.1.unwrap().plan.as_deref(), Some("Google Antigravity"));
+
+        // Nothing set up: only the broker's answer is left, and it says signed out.
+        std::fs::write(&catalog, r#"{"models":[{"provider":"apple","selector":"apple/on-device","name":"Apple AFM 3 Core"}]}"#).unwrap();
+        assert_eq!(identity(ProviderKind::Omp, &context).await.0, AccountStatus::SignedOut);
     }
 
     #[test]

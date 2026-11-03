@@ -13,6 +13,7 @@ import { Empty, ErrorBanner } from "../../ui/primitives";
 import { ProviderMark } from "../../ui/ProviderMark";
 import { showToast } from "../../ui/Toast";
 import { Section, WithSettings } from "./common";
+import { hasSignIn } from "../../../../../packages/kybern-client/src/machineAgents";
 import { accountStatusLabel } from "./labels";
 
 export function AccountsSettings() {
@@ -32,7 +33,10 @@ function AccountsBody() {
   useEffect(() => {
     void loadAccounts();
   }, [app.activeId]);
-  const kinds = [...new Set(accounts.map((a) => a.provider.kind))] as ProviderKind[];
+  // Oh My Pi, OpenCode and pi run on the providers set up inside them and have no account of their own.
+  // They are listed only for an extra profile (its own folder) someone added, never with a sign-in state.
+  const shown = accounts.filter((a) => hasSignIn(a.provider.kind) || (!!a.provider.instance && a.provider.instance !== "default"));
+  const kinds = [...new Set(shown.map((a) => a.provider.kind))] as ProviderKind[];
   const fail = (what: string) => (e: unknown) => showToast(`${what} ${errorText(e)}`);
   const rename = (account: AccountSummary) =>
     Alert.prompt(
@@ -86,7 +90,7 @@ function AccountsBody() {
   return (
     <>
       <ErrorBanner error={error} onRetry={() => void loadAccounts()} />
-      {loaded && accounts.length === 0 ? (
+      {loaded && shown.length === 0 ? (
         <Empty icon="person.crop.circle" title="No accounts yet" detail="Sign in to an agent on your computer and it shows up here." />
       ) : null}
       {kinds.map((kind, index) => (
@@ -96,15 +100,19 @@ function AccountsBody() {
           first={index === 0}
           footer={index === kinds.length - 1 ? "Sign in, sign out and add accounts on your computer. Touch and hold an account for more." : null}
         >
-          {accounts
+          {shown
             .filter((a) => a.provider.kind === kind)
             .map((account) => (
               <ListRow
                 key={account.provider.instance}
                 title={account.name}
-                subtitle={[account.identity?.email, account.identity?.plan, account.status === "signed_in" ? null : accountStatusLabel(account.status)]
-                  .filter(Boolean)
-                  .join(" · ") || accountStatusLabel(account.status)}
+                subtitle={
+                  hasSignIn(kind)
+                    ? [account.identity?.email, account.identity?.plan, account.status === "signed_in" ? null : accountStatusLabel(account.status)]
+                        .filter(Boolean)
+                        .join(" · ") || accountStatusLabel(account.status)
+                    : undefined
+                }
                 leading={<ProviderMark kind={kind} size={22} />}
                 value={account.is_default ? "Default" : undefined}
                 menu={menu(account)}

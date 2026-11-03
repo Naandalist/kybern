@@ -20,6 +20,7 @@ import {
   supportsBrowserLogin,
   supportsDeviceCode,
   supportsPasteCode,
+  withoutSignIn,
   type AccountColor,
   type SheetStep,
 } from '../shared/lib/accounts.ts'
@@ -33,7 +34,6 @@ import { Dialog } from '../nav/overlay.tsx'
 import { setNav } from '../nav/store.ts'
 import { errorText } from '../nav/actions.ts'
 import { useNav } from '../nav/store.ts'
-import { Select } from '../settings/controls.tsx'
 import { Button } from '../kit/Button.tsx'
 import { IconButton } from '../kit/IconButton.tsx'
 import { TextField } from '../kit/Field.tsx'
@@ -56,14 +56,6 @@ import { useSettings } from '../settings/store.ts'
 import { useAccountLogin } from './useAccountLogin.ts'
 import { SuccessCheck } from '../motion/SuccessCheck.tsx'
 
-/** Upstream providers `omp login` can use (`OMP_UPSTREAMS`). */
-const OMP_UPSTREAMS = [
-  { id: 'anthropic', label: 'Claude' },
-  { id: 'openai-codex', label: 'ChatGPT' },
-  { id: 'github-copilot', label: 'GitHub Copilot' },
-  { id: 'google-gemini-cli', label: 'Google' },
-] as const
-
 const TERMINAL_COPY: Partial<Record<ProviderKind, string>> = {
   opencode: 'OpenCode asks for an API key. Paste it into the prompt below.',
   pi: 'Pi asks which provider to sign in to. Follow its prompts below.',
@@ -76,7 +68,6 @@ export function Account({ close, provider, instance }: { close: () => void; prov
   const providers = useNav((s) => s.providers)
   const legacy = useAccountsLegacy()
   const [kind, setKind] = useState<ProviderKind | undefined>(provider)
-  const [upstream, setUpstream] = useState<string>(OMP_UPSTREAMS[0].id)
   const [folder, setFolder] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const api = useAccountLogin()
@@ -125,7 +116,7 @@ export function Account({ close, provider, instance }: { close: () => void; prov
     if (!kind) return
     const mode = patch.mode ?? modeFor(kind)
     if (reauth && legacy) { await api.signInLegacy({ kind, instance: reauthInstance! }); return }
-    await api.start({ kind, mode, ...(reauth ? { instance: reauthInstance } : {}), ...(!reauth && folder.trim() ? { directory: folder.trim() } : {}), ...(kind === 'omp' && !reauth && (mode === 'browser' || mode === 'paste') ? { upstream } : {}) })
+    await api.start({ kind, mode, ...(reauth ? { instance: reauthInstance } : {}), ...(!reauth && folder.trim() ? { directory: folder.trim() } : {}) })
   }
 
   // Signing in again starts straight away, with no pick step.
@@ -201,11 +192,12 @@ export function Account({ close, provider, instance }: { close: () => void; prov
   let footer: ReactNode
   if (step === 'pick' || (!step && !reauth)) {
     const ready = !!kind && providers.some((p) => p.kind === kind && p.available)
-    body = <PickStep providers={providers.filter((p) => p.kind !== 'antigravity')} kind={kind} onKind={(next) => {
+    // Antigravity signs in with `agy` on its own sheet; omp has no account (it runs on the providers set up inside it).
+    body = <PickStep providers={providers.filter((p) => p.kind !== 'antigravity' && !withoutSignIn(p.kind))} kind={kind} onKind={(next) => {
       const status = providers.find((p) => p.kind === next)
       if (status && !status.available) { setNav({ settingsOpen: true }); close(); void import('../settings/SettingsScreen.tsx').then((m) => m.openSettingsTab('agents')); return }
       setKind(next)
-    }} upstream={upstream} onUpstream={setUpstream} folder={folder} onFolder={setFolder} advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen} remote={remote} />
+    }} folder={folder} onFolder={setFolder} advancedOpen={advancedOpen} onAdvancedOpen={setAdvancedOpen} remote={remote} />
     footer = <><Button size="lg" testId="account-cancel" variant="ghost" onClick={dismiss}>Cancel</Button><Button size="lg" testId="account-start" variant="primary" disabled={!ready || starting} onClick={() => void begin()}>{kind && supportsBrowserLogin(kind) && !remote ? 'Continue in browser' : 'Continue'}</Button></>
   } else if (step === 'waiting' && login && kind) {
     const url = loginHost(login.url)
@@ -380,7 +372,7 @@ function ColorSwatches({ value, onChange }: { value: AccountColor; onChange: (co
   </div>
 }
 
-function PickStep(props: { providers: { kind: ProviderKind; display_name: string; available: boolean }[]; kind: ProviderKind | undefined; onKind: (kind: ProviderKind) => void; upstream: string; onUpstream: (id: string) => void; folder: string; onFolder: (value: string) => void; advancedOpen: boolean; onAdvancedOpen: (open: boolean) => void; remote: boolean }) {
+function PickStep(props: { providers: { kind: ProviderKind; display_name: string; available: boolean }[]; kind: ProviderKind | undefined; onKind: (kind: ProviderKind) => void; folder: string; onFolder: (value: string) => void; advancedOpen: boolean; onAdvancedOpen: (open: boolean) => void; remote: boolean }) {
   const t = useTheme()
   const c = useControls()
   const { providers, kind, remote } = props
@@ -404,7 +396,6 @@ function PickStep(props: { providers: { kind: ProviderKind; display_name: string
           </div>
         })}
       </div>
-      {kind === 'omp' && <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}><Label color={t.text} size={14} lineHeight={21} weight={500}>Sign in with</Label><Select compact testId="account-upstream" label="Sign in with" value={props.upstream} onChange={props.onUpstream} options={OMP_UPSTREAMS.map((u) => ({ value: u.id, label: u.label }))} /></div>}
       {kind && kind !== 'opencode' && kind !== 'pi' && <div style={{ display: 'flex', flexDirection: 'column' }}>
         <Button testId="account-advanced" variant="ghost" size="sm" label="Advanced" trailing={<Chevron open={props.advancedOpen} size={12} color={t.textSecondary} />} onClick={() => props.onAdvancedOpen(!props.advancedOpen)} style={{ alignSelf: 'flex-start', marginLeft: -8 }}>Advanced</Button>
         {props.advancedOpen && <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 12, paddingBottom: 4 }}>

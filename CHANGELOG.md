@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.6
+
+<!-- kybern-release-title: Faster typing on Windows, Oh My Pi without sign-in -->
+<!-- kybern-release-summary: Typing on Windows no longer lags or shows a timeout error, Oh My Pi works with whatever providers you set up in it, and the mobile app reaches your computer again after an update moves it to a new port. -->
+
+- On Windows, typing no longer stops for seconds or shows "Timed out after 2 seconds waiting for a window update". Each keystroke used to wait several times for the window to finish drawing, which costs a whole frame while an answer streams in; a busy moment longer than 2 seconds also threw that error. Keys now land without waiting, and a busy window catches up instead of failing.
+- Oh My Pi, OpenCode and pi no longer show a sign-in. They use the providers you set up in them (Google Antigravity, Claude, ChatGPT, an API key…), so Kybern lists their models and never asks you to sign in. Oh My Pi signed in only through Google Antigravity used to look signed out, so first-run setup offered Claude Code as the only ready agent. Settings → Accounts no longer lists these agents, unless you added an extra profile for one before.
+- The mobile app reaches your computer again when it moves to a new port, for example after an update. It used to keep retrying the old address, showed the computer as Offline, and Home showed "Open connections" without your spaces. It now tries the computer's other addresses, checks each one is really your computer, and keeps the one that works. Home stays usable while any of your machines answers.
+- Manage machines on the mobile app no longer opens a blank screen or closes the app when one of your machines is offline.
+- A daemon that is shutting down closes its network ports first, so a shutdown that hangs can no longer keep the newer daemon off its usual port.
+
 ## 0.21.5
 
 <!-- kybern-release-title: Tidier previews -->

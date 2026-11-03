@@ -2,7 +2,7 @@
 // installed agent, with its email, plan, usage and status. The CLI account (the agent's own
 // sign-in) comes first; named accounts follow in creation order.
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ACCOUNT_COLORS, ACCOUNT_COLOR_LABELS, isAccountColor, isCliInstance, isNameValid } from '../shared/lib/accounts.ts'
+import { ACCOUNT_COLORS, ACCOUNT_COLOR_LABELS, isAccountColor, isCliInstance, isNameValid, withoutSignIn } from '../shared/lib/accounts.ts'
 import { bindingLimit, limitLabel, PROVIDER_NAMES } from '../shared/lib/providerUsage.ts'
 import type { AccountSummary, ProviderKind, ProviderStatus } from '../../../../packages/kybern-client/src/types.ts'
 import { Icon } from '../icons.tsx'
@@ -56,7 +56,7 @@ const CLI_SIGN_IN_COMMAND: Record<ProviderKind, string> = {
 }
 
 /** Agents whose identity the daemon can read; others keep an unknown status without a loading placeholder. */
-const IDENTITY_KINDS: ProviderKind[] = ['claude-code', 'codex', 'cursor', 'omp', 'antigravity']
+const IDENTITY_KINDS: ProviderKind[] = ['claude-code', 'codex', 'cursor', 'antigravity']
 
 const agentLabel = (kind: ProviderKind, providers: ProviderStatus[]) => providers.find((p) => p.kind === kind)?.display_name ?? PROVIDER_NAMES[kind] ?? kind
 
@@ -86,8 +86,10 @@ export function Accounts() {
   useAccountsFeed()
   // Read accounts and their usage while this tab is open.
   useEffect(() => { void refreshAccounts(); askAccountLimits() }, [])
-  const installed = providers.filter((p) => p.available && accounts.some((a) => a.provider.kind === p.kind))
-  const missing = providers.filter((p) => !p.available)
+  // omp, OpenCode and pi have no account: they are listed only to manage a profile (its own folder) added
+  // before Kybern stopped offering them, so nothing a user set up disappears.
+  const installed = providers.filter((p) => p.available && accounts.some((a) => a.provider.kind === p.kind && (!withoutSignIn(p.kind) || !isCliInstance(a.provider.instance))))
+  const missing = providers.filter((p) => !p.available && !withoutSignIn(p.kind))
   return <>
     {legacy && <PageBlock><Note>{`Update Kybern on ${host} to sign in from the browser.`}</Note></PageBlock>}
     {!legacy && <LoginBrokerSection />}
@@ -118,10 +120,11 @@ function AgentSection({ provider, accounts, readOnly, onRemove, onAssign }: { pr
   const g = useGlass()
   return <PageBlock><div testId={`accounts-${provider.kind}`} style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingBottom: 30 }}>
     <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 2 }}><ProviderMark kind={provider.kind} size={14} /><Label color={t.text} size={14} lineHeight={19.6} weight={600}>{provider.display_name}</Label></div>
-    {!readOnly && accounts.length > 1 && <div style={{ display: 'flex' }}><Note>Accounts share skills and installed plugin files. Sign-ins, sessions and connections stay separate. Conflicting local files are kept in backups.</Note></div>}
+    {!readOnly && withoutSignIn(provider.kind) && <div style={{ display: 'flex' }}><Note>{`${provider.display_name} uses the providers set up in it. Each profile below keeps its own setup and sessions in its own folder.`}</Note></div>}
+    {!readOnly && !withoutSignIn(provider.kind) && accounts.length > 1 && <div style={{ display: 'flex' }}><Note>Accounts share skills and installed plugin files. Sign-ins, sessions and connections stay separate. Conflicting local files are kept in backups.</Note></div>}
     <div style={{ display: 'flex', flexDirection: 'column', ...settingsCardStyle(t, g), overflow: 'hidden' }}><GlassEdge radius={12} color={g.highlight} />
       {accounts.map((account, index) => <AccountRow key={account.provider.instance} first={index === 0} account={account} readOnly={readOnly} onRemove={onRemove} onAssign={onAssign} />)}
-      {!readOnly && provider.kind !== 'antigravity' && <div style={{ display: 'flex', alignItems: 'center', minHeight: 44, paddingLeft: 12, paddingRight: 12, borderTopWidth: accounts.length ? 1 : 0, borderColor: t.v('--app-settings-card-border') }}><Button testId={`account-add-${provider.kind}`} variant="ghost" icon={N.plus} label={`Add ${provider.display_name} account`} onClick={() => openAddAccount({ provider: provider.kind })}>{`Add ${provider.display_name} account`}</Button></div>}
+      {!readOnly && provider.kind !== 'antigravity' && !withoutSignIn(provider.kind) && <div style={{ display: 'flex', alignItems: 'center', minHeight: 44, paddingLeft: 12, paddingRight: 12, borderTopWidth: accounts.length ? 1 : 0, borderColor: t.v('--app-settings-card-border') }}><Button testId={`account-add-${provider.kind}`} variant="ghost" icon={N.plus} label={`Add ${provider.display_name} account`} onClick={() => openAddAccount({ provider: provider.kind })}>{`Add ${provider.display_name} account`}</Button></div>}
     </div>
   </div></PageBlock>
 }
@@ -138,7 +141,7 @@ function AccountRow({ account, first, readOnly, onRemove, onAssign }: { account:
   const plan = account.identity?.plan
   const projectCount = account.projects.length
   const through = account.broker ? (account.broker.state === 'borrowing' ? `Signs in through ${account.broker.machine_name}` : account.broker.message ?? `Signs in through ${account.broker.machine_name}`) : null
-  const detail = [through ?? email ?? 'Email unavailable', through ? null : plan, projectCount > 0 ? (projectCount === 1 ? '1 project' : `${projectCount} projects`) : null, cli ? 'Same as your terminal' : null].filter(Boolean).join(' · ')
+  const detail = [through ?? email ?? (withoutSignIn(kind) ? null : 'Email unavailable'), through ? null : plan, projectCount > 0 ? (projectCount === 1 ? '1 project' : `${projectCount} projects`) : null, cli ? 'Same as your terminal' : null].filter(Boolean).join(' · ')
   return <div testId={`account-row-${kind}-${instance}`} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 12, minHeight: 56, paddingLeft: 18, paddingRight: 18, paddingTop: 12, paddingBottom: 12, borderTopWidth: first ? 0 : 1, borderColor: t.v('--app-settings-card-border') }}>
     {flash && <FlashOverlay />}
     <AccountAvatar kind={kind} color={account.color} instance={instance} size={32} />
@@ -221,6 +224,7 @@ function StatusCell({ account, cli }: { account: AccountSummary; cli: boolean })
   const legacy = useAccountsLegacy()
   const wrap = (children: ReactNode) => <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, minWidth: 104, flexShrink: 0 }}>{children}</div>
   const muted = (text: string) => <Label color={t.textSecondary} size={13} lineHeight={19.5}>{text}</Label>
+  if (withoutSignIn(kind)) return wrap(null)
   const signIn = kind === 'antigravity' ? <Button testId="account-signin-antigravity" onClick={() => requestAntigravitySignIn(() => openAddAccount({ provider: kind }))}>Sign in</Button> : cli ? <HowToSignIn kind={kind} /> : <Button testId={`account-signin-${kind}-${instance}`} onClick={() => openAddAccount({ provider: kind, instance })}>Sign in</Button>
   switch (account.status) {
     case 'signed_in': return wrap(muted('Signed in'))
@@ -295,8 +299,8 @@ function AccountMenu({ account, onRename, onRemove, onAssign }: { account: Accou
   useSettingsModal(open)
   return <Menu testId={`account-actions-${id}`} align="end" minWidth={192} onOpenChange={setOpen} trigger={() => <IconButton icon={N.ellipsis} label="Account actions" active={open} />}>
     {!cli && <MenuItem id="rename" testId={`account-actions-${id}-rename`} label="Rename…" onSelect={onRename} />}
-    {!cli && <MenuItem id="signin" testId={`account-actions-${id}-signin`} label="Sign in again" onSelect={() => openAddAccount({ provider: kind, instance })} />}
-    {!cli && account.can_sign_out && account.status === 'signed_in' && <MenuItem id="sign_out" testId={`account-actions-${id}-sign_out`} label="Sign out" onSelect={() => void signOut()} />}
+    {!cli && !withoutSignIn(kind) && <MenuItem id="signin" testId={`account-actions-${id}-signin`} label="Sign in again" onSelect={() => openAddAccount({ provider: kind, instance })} />}
+    {!cli && !withoutSignIn(kind) && account.can_sign_out && account.status === 'signed_in' && <MenuItem id="sign_out" testId={`account-actions-${id}-sign_out`} label="Sign out" onSelect={() => void signOut()} />}
     {!cli && <MenuSeparator />}
     {!account.is_default && <MenuItem id="default" testId={`account-actions-${id}-default`} label="Make default" onSelect={() => void makeDefaultAccount(account)} />}
     <MenuItem id="projects" testId={`account-actions-${id}-projects`} label="Use for projects…" onSelect={() => onAssign(account)} />

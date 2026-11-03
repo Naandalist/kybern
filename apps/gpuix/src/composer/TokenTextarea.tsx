@@ -42,9 +42,28 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
   const lastEmitted = useRef(props.value)
   const caret = useRef<Pick<InputSelection, 'start' | 'end' | 'reversed'> | null>(null)
   const composing = useRef(false)
+  const lastRange = useRef<InputSelection | null>(null)
+  // One native read per event: this editor and the composer both read the range in the same key and change handlers.
+  const eventRange = useRef<{ id: number; range: InputSelection } | null>(null)
+  /** The native range. Off macOS it is a waited UI-thread call, which throws when that thread stays busy for 2 s; the
+   * key and change handlers read it, so a throw would drop the key and surface as an uncaught error: use the last range. */
+  const nativeSelection = (id: number): InputSelection => {
+    if (eventRange.current?.id === id) return eventRange.current.range
+    let range: InputSelection
+    try {
+      range = lastRange.current = nativeCapabilities(renderer).getInputSelection(id)
+    } catch (error) {
+      console.error(error)
+      // Kept for the rest of this event too: a second read would wait out the busy UI thread again.
+      range = lastRange.current ?? { start: live.current.text.length, end: live.current.text.length, composing: false, reversed: false }
+    }
+    const read = eventRange.current = { id, range }
+    queueMicrotask(() => { if (eventRange.current === read) eventRange.current = null })
+    return range
+  }
   const read = (): InputSelection => {
     if (!node.current) return { start: 0, end: 0, composing: false, reversed: false }
-    const range = nativeCapabilities(renderer).getInputSelection(node.current.id), doc = live.current
+    const range = nativeSelection(node.current.id), doc = live.current
     return { ...range, start: tokenSourceOffset(doc, range.start), end: tokenSourceOffset(doc, range.end, true) }
   }
   const emit = (value: string, at: number, typed: boolean, record = true, refs: readonly TokenReference[] = references) => {
@@ -67,6 +86,7 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
     // Only the changed range is replaced, so the native caret already ends after the inserted text (a picked chip).
     const change = snapToChips(previous, next, textEdit(previous.text, next.text))
     nativeReplacement.current = next.text
+    eventRange.current = null
     nativeCapabilities(renderer).editInput(id, { ...change, expectedValue: previous.text })
     const wanted = selection ?? { start: at, end: at, reversed: false }
     emit(value, at, false, record, refs)
@@ -74,7 +94,7 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
     // `editInput` is synchronous, so the native buffer is `next.text` right now: place the caret against it here rather
     // than from a timer that can run before or after the host's own value write.
     const range = nativeRange(next, wanted)
-    if (range) nativeCapabilities(renderer).setInputSelection(id, range.start, range.end, wanted.reversed)
+    if (range) { nativeCapabilities(renderer).setInputSelection(id, range.start, range.end, wanted.reversed); eventRange.current = null }
     return true
   }
   useImperativeHandle(editorRef, () => ({ selection: read, edit: (start, end, text, added) => {
@@ -98,6 +118,7 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
         if (!range) return
         // A native buffer that still differs from `live` (typing not yet delivered) rejects the range; that keystroke's
         // own change places the caret, so a rejection here must never become an uncaught error.
+        eventRange.current = null
         try { nativeCapabilities(renderer).setInputSelection(id, range.start, range.end, wanted.reversed) } catch {}
       }, 0)
       caret.current = null
@@ -118,7 +139,7 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
     onChange={event => {
       const value = event.value ?? ''
       if (nativeReplacement.current === value) { nativeReplacement.current = null; return }
-      const previous = live.current, range = node.current ? nativeCapabilities(renderer).getInputSelection(node.current.id) : null
+      const previous = live.current, range = node.current ? nativeSelection(node.current.id) : null
       const next = editTokenText(previous, value)
       const interim = tokenText(next.value, references)
       const at = range ? tokenSourceOffset(interim, range.start, true) : next.caret

@@ -43,7 +43,8 @@ test("the implicit instance is the CLI account and named accounts keep their nam
 test("remote daemons route claude and omp to paste, codex to a device code and cursor to the browser", () => {
   assert.equal(initialLoginMode("claude-code", false), "browser")
   assert.equal(initialLoginMode("claude-code", true), "paste")
-  assert.equal(initialLoginMode("omp", true), "paste")
+  assert.equal(initialLoginMode("omp", true), "terminal")
+  assert.equal(initialLoginMode("omp", false), "terminal")
   assert.equal(initialLoginMode("codex", true), "device_code")
   assert.equal(initialLoginMode("codex", false), "browser")
   assert.equal(initialLoginMode("cursor", true), "browser")

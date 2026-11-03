@@ -27,6 +27,12 @@
  * the transcript up and back for 2 s and reads `getBridgeStats` around it: off
  * macOS the app's own waited UI-thread calls (the wheel input subtracted) must stay
  * under 0.5 per served frame, and the transcript must move. Writes `scroll.json`.
+ *
+ * Typing (`--typing 0` skips it): in the same window, the composer of that thread gets a sentence one key at a time
+ * while a synthetic answer streams, timed from each key's input to its paint; every key must land and no error may
+ * reach the process. Off macOS one intercepted key is then answered while the UI thread is held busy (4.5 s) past the
+ * bridge's 2 s timeout (0.21.5 threw "Timed out after 2 seconds waiting for a window update" from resolveKeyEvent):
+ * it must land without an error. Writes `typing.json`.
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -50,6 +56,7 @@ const port = Number(arg('port', '4377'))
 const settle = Number(arg('settle-ms', '4000'))
 const captureMode = arg('capture', 'png')
 const scrollScenario = arg('scroll', '1') !== '0'
+const typingScenario = arg('typing', '1') !== '0'
 const SCROLL_TURNS = 24
 const os = process.platform === 'win32' ? 'windows' : process.platform
 // The scratch daemon's data. Keep it out of `--out` when that folder is uploaded: it holds sockets.
@@ -228,9 +235,27 @@ const scratchEnv = {
   KYBERN_TOKEN: '',
   KYBERN_GPUIX_THREAD: threads[0]!,
 }
+/** Each GPUI draw of the probe window (`KYBERN_FRAME_COSTS`), as the app's stderr reports it. */
+const draws: { at: number; renderMs: number; layoutMs: number; layoutCalls: number }[] = []
+let drawRemainder = ''
+function drawStats(from: number, to: number) {
+  const within = draws.filter(draw => draw.at >= from && draw.at <= to)
+  const pick = (values: number[], q: number) => values.length ? [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(q * values.length))]! : null
+  const render = within.map(draw => draw.renderMs), calls = within.map(draw => draw.layoutCalls)
+  return { draws: within.length, renderMsTotal: render.reduce((a, b) => a + b, 0), renderMs: { p50: pick(render, 0.5), p90: pick(render, 0.9), max: pick(render, 1) }, layoutCalls: { p50: pick(calls, 0.5), p90: pick(calls, 0.9), max: pick(calls, 1) } }
+}
 /** WP1: the app's waited bridge calls per frame while the transcript scrolls (`scripts/bridge-probe-app.ts`). */
 async function scrollBridge() {
-  const f = await launch(path.join(import.meta.dir, 'bridge-probe-app.ts'), { KYBERN_APPEARANCE: 'dark', ...scratchEnv, KYBERN_GPUIX_THREAD: threads[2]! })
+  // KYBERN_FRAME_COSTS: GPUI prints each draw's render and layout time, which the typing probe reports.
+  const f = await launch(path.join(import.meta.dir, 'bridge-probe-app.ts'), { KYBERN_APPEARANCE: 'dark', ...scratchEnv, KYBERN_GPUIX_THREAD: threads[2]!, KYBERN_FRAME_COSTS: '1' }, { stderr: chunk => {
+    const lines = (drawRemainder + chunk).split('\n')
+    drawRemainder = lines.pop() ?? ''
+    for (const line of lines) {
+      const match = line.match(/\[kybern-work\] renderMs=([\d.]+) layoutMs=([\d.]+) layoutCalls=(\d+)/)
+      if (match) draws.push({ at: performance.now(), renderMs: Number(match[1]), layoutMs: Number(match[2]), layoutCalls: Number(match[3]) })
+    }
+    if (draws.length > 20_000) draws.splice(0, draws.length - 20_000)
+  } })
   try {
     await f.app.getByTestId('app-ready').waitFor({ timeoutMs: 90_000 })
     // The app restores the thread the app run left open (KYBERN_GPUIX_THREAD applies only with none): open it as a user would.
@@ -285,6 +310,7 @@ async function scrollBridge() {
       assert.ok(frames && frames >= 5, `only ${frames} frames served while scrolling: too few to judge per-frame cost`)
       assert.ok(result.appWaitedPerFrame! < 0.5, `${result.appWaitedPerFrame!.toFixed(2)} waited calls per frame (${appWaited} over ${frames} frames)`)
     })
+    if (typingScenario) await typing(port)
   } catch (error) {
     console.error(f.diagnostics())
     if (captureMode !== 'none') await capture(f, path.join(out, `${os}-scroll-failure.png`)).catch(() => {})
@@ -292,6 +318,38 @@ async function scrollBridge() {
   } finally {
     await f.close().catch(() => {})
   }
+}
+
+/** Keys into the composer while an answer streams, then one key answered across a UI-thread stall (`bridge-probe-app.ts`). */
+async function typing(port: string) {
+  type Typed = { error?: string; keys: number; missed: string[]; latencyMs: Record<string, number | null>; appWaitedPerKey: number | null; drawnFramesPerKey: number | null; uncaught: string[] }
+  const post = async (body: Record<string, unknown>) => {
+    const typed = await (await fetch(`http://127.0.0.1:${port}/`, { method: 'POST', body: JSON.stringify(body) })).json() as Typed
+    if (typed.error) throw new Error(`typing probe: ${typed.error} ${JSON.stringify(typed)}`)
+    return typed
+  }
+  const typingStarted = performance.now()
+  const streamed = await post({ action: 'type', text: 'the quick brown fox jumps over the lazy dog', intervalMs: 120, stream: true, streamMs: 30_000 })
+  const streamedDraws = drawStats(typingStarted, performance.now())
+  console.log(`[smoke] typing while streaming: ${JSON.stringify({ ...streamed, before: undefined, after: undefined })}`)
+  console.log(`[smoke] draws while typing: ${JSON.stringify(streamedDraws)}`)
+  const report: Record<string, unknown> = { streamed, streamedDraws }
+  await step('typing: every key reaches the composer while an answer streams', () => {
+    assert.deepEqual(streamed.missed, [], `keys never painted: ${JSON.stringify(streamed.missed)}`)
+    assert.deepEqual(streamed.uncaught, [], 'errors reached the process')
+  })
+  if (platform !== 'macos') {
+    // 4.5 s: the key handler's own selection read can wait out 2 s of it, and the answer must still start more than 2 s
+    // before the UI thread is free again (0.21.5's waited answer threw there).
+    const stalled = await post({ action: 'stall-key', key: 'c', stallMs: 4500 })
+    report.stalled = stalled
+    console.log(`[smoke] key across a 4.5 s UI stall: ${JSON.stringify({ ...stalled, before: undefined, after: undefined })}`)
+    await step('typing: a key answered while the UI thread is busy past 2 s lands without an error', () => {
+      assert.deepEqual(stalled.uncaught, [], 'errors reached the process')
+      assert.deepEqual(stalled.missed, [], 'the key never painted')
+    })
+  }
+  writeFileSync(path.join(out, 'typing.json'), JSON.stringify(report, null, 2))
 }
 
 let failed = false

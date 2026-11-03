@@ -2,7 +2,7 @@
 // radio list with each account's tightest limit, "Needs sign-in" rows with their Sign in action,
 // and the "Default changed" note. `NavRail.tsx` mounts it between the card header and the limits.
 import { useEffect, useRef, useState } from 'react'
-import { accountsOfKind, limitsForAccount } from '../shared/lib/accountUi.ts'
+import { accountNeedsSignIn, accountsOfKind, limitsForAccount } from '../shared/lib/accountUi.ts'
 import { CLI_INSTANCE, isCliInstance } from '../shared/lib/accounts.ts'
 import { bindingLimit, PROVIDER_NAMES } from '../shared/lib/providerUsage.ts'
 import type { AccountSummary, ProviderKind, ProviderLimits } from '../../../../packages/kybern-client/src/types.ts'
@@ -67,7 +67,8 @@ function CardAccountRow({ account, left, onChoose }: { account: AccountSummary; 
   const t = useTheme()
   const kind = account.provider.kind
   const cli = account.provider.instance === CLI_INSTANCE
-  const needsSignIn = !cli && (account.status === 'needs_sign_in' || account.status === 'signed_out')
+  // `accountNeedsSignIn` leaves out the CLI account and the agents without a sign-in (omp, OpenCode, pi).
+  const needsSignIn = accountNeedsSignIn(account)
   const email = account.identity?.email ?? account.identity?.plan ?? null
   const body = <>
     <AccountMarkStack kind={kind} color={cli ? null : account.color} size={14} />

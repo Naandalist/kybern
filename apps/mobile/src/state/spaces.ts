@@ -24,6 +24,7 @@ import {
 } from "./protocol";
 import {
   activeEnvironment,
+  currentClient,
   machineHub,
   mutate,
   onClientAttach,
@@ -82,8 +83,35 @@ onClientAttach((client, isCurrent) => {
       })
       .catch(() => {});
 });
-onSubscriptionReady(() => void loadSpaces());
-onEnvironmentReset(() => { spacesLoadVersion++; setSpacePlacements([]); publish({ supported: null, spaces: [], savedId: null }); });
+onSubscriptionReady(() => { networkSpacesFrom = null; void loadSpaces(); });
+onEnvironmentReset(() => { spacesLoadVersion++; networkSpacesFrom = null; setSpacePlacements([]); publish({ supported: null, spaces: [], savedId: null }); });
+
+/** The member the spaces were last read from while the computer the phone is at was away. */
+let networkSpacesFrom: unknown = null;
+/**
+ * While the computer the phone is at is away and another machine of the network answers, read the spaces from that
+ * member: members keep the same spaces, so Home keeps its space switcher. Once per member; the computer's own list
+ * replaces it when it answers again.
+ */
+export function loadSpacesThroughNetwork() {
+  if (currentClient()?.status === "open") return;
+  const client = machineHub().memberClient();
+  if (!client || networkSpacesFrom === client) return;
+  networkSpacesFrom = client;
+  const version = ++spacesLoadVersion;
+  client.call("spaces.list", {}).then(
+    (result) => {
+      if (version !== spacesLoadVersion) return;
+      setSpacePlacements(result.spaces, result.placements);
+      publish({ supported: true, spaces: ordered(result.spaces) });
+    },
+    (e) => {
+      if (version !== spacesLoadVersion) return;
+      if ((e as { code?: number } | null)?.code === METHOD_NOT_FOUND) publish({ supported: false, spaces: [] });
+      else networkSpacesFrom = null;
+    },
+  );
+}
 
 let spacesLoadVersion = 0;
 export async function loadSpaces() {

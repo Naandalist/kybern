@@ -49,7 +49,7 @@ edit('dist/renderer-state.js', '        dispatch(event) {\n            const roo
                 const handler = active?.eventHandlers.get(event.elementId)?.get("keyDown");
                 try { handler?.(keyEvent); active?.handlers.onEvent?.(keyEvent); }
                 catch (error) { flags.prevented = true; throw error; }
-                finally { renderer.resolveKeyEvent(event.requestId, flags.prevented); }
+                finally { try { renderer.resolveKeyEvent(event.requestId, flags.prevented); } catch (error) { console.error(error); } }
                 return !!handler;
             }
             const root = active;""")

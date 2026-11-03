@@ -334,7 +334,7 @@ index 03ac7acb9ec7ecc79490ee013f200471926cc47b..5a74ef8a280754eb0543e601b9a5471f
 +                const handler = active?.eventHandlers.get(event.elementId)?.get("keyDown");
 +                try { handler?.(keyEvent); active?.handlers.onEvent?.(keyEvent); }
 +                catch (error) { flags.prevented = true; throw error; }
-+                finally { renderer.resolveKeyEvent(event.requestId, flags.prevented); }
++                finally { try { renderer.resolveKeyEvent(event.requestId, flags.prevented); } catch (error) { console.error(error); } }
 +                return !!handler;
 +            }
              const root = active;

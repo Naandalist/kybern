@@ -11,6 +11,7 @@ import { PATCHED_NATIVE } from '../native/local-build.ts'
 import { frostBackdrop, frostFill, useGlass } from '../platform/glass.ts'
 import { Label, ProviderMark, REDUCED_MOTION, useTheme } from '../ui.tsx'
 import type { ProviderKind } from '../../../../packages/kybern-client/src/types.ts'
+import { hasSignIn } from '../../../../packages/kybern-client/src/machineAgents.ts'
 import { requestAntigravitySignIn } from '../antigravity/notice.ts'
 import { agents, assumeReady, cursorSetup, openPopover, openSheet, recheck, setDefaultAgent, signInWithBrowser, type Agent } from './agentsStore.ts'
 import { POPOVER_DEFAULT } from './model.ts'
@@ -30,7 +31,8 @@ function copy(agent: Agent, isDefault: boolean): { lead: string; sentence: strin
       : { lead: `${name} is ready`, sentence: 'Kybern uses it side by side with your other agents.' }
     case 'signin': return { lead: `Sign in to ${name}`, sentence: 'Kybern uses it as soon as you are signed in.' }
     case 'unknown': return { lead: `${name} is installed`, sentence: 'Kybern can’t tell if you are signed in. Sign in, or check again.' }
-    case 'missing': return { lead: `${name} isn’t installed`, sentence: agent.kind === 'cursor' ? 'Kybern installs Cursor’s SDK for you in one step.' : `Install it in a terminal, then sign in. Nothing runs until you press Return.` }
+    case 'models': return { lead: `${name} lists no models yet`, sentence: `${name} runs on the providers you set up in it. Add one there, then check again. Kybern lists every model it reports.` }
+    case 'missing': return { lead: `${name} isn’t installed`, sentence: agent.kind === 'cursor' ? 'Kybern installs Cursor’s SDK for you in one step.' : hasSignIn(agent.kind) ? `Install it in a terminal, then sign in. Nothing runs until you press Return.` : `Install it in a terminal, then set up a provider in it. Nothing runs until you press Return.` }
     case 'update': return { lead: `${name} needs an update`, sentence: agent.reason ? agent.reason.replace(/\s+/g, ' ').slice(0, 160) : `Update ${name}, then check again.` }
     case 'waiting': return { lead: `Signing in to ${name}`, sentence: 'Finish signing in in your browser. This page updates when you are done.' }
     case 'installing': return { lead: `Installing ${name}`, sentence: 'Kybern checks again when it is done.' }
@@ -56,6 +58,7 @@ function Actions({ agent, isDefault }: { agent: Agent; isDefault: boolean }) {
       {state === 'unknown' && <Button testId="agent-works" block variant="ghost" onClick={() => assumeReady(kind)}>It already works</Button>}
     </>)
   }
+  if (state === 'models') return row(<Button testId="agent-works" block variant="ghost" onClick={() => assumeReady(kind)}>It already works</Button>)
   if (state === 'missing') {
     return cli
       ? row(<Button testId="agent-install" block onClick={() => void openSheet(kind, 'install')}>Install in terminal</Button>)

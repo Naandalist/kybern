@@ -166,6 +166,22 @@ impl Exposure {
         anyhow::bail!("Ports {want_port} to {last} are all in use on {ip}; free one or choose another network port in settings")
     }
 
+    /// The daemon is shutting down: stop accepting on the Tailscale and network addresses now, and
+    /// open nothing more. A shutdown that waits a long time on agents, terminals or workers (or never
+    /// finishes) must not keep those addresses: the next daemon on this computer listens there, and
+    /// a phone that saved the address would otherwise keep reaching a daemon that refuses sessions.
+    pub async fn close_all(&self) {
+        let mut inner = self.inner.lock().await;
+        // Without the router neither listener can open again.
+        inner.router = None;
+        if let Some(listener) = inner.tailscale.take() {
+            tracing::info!(addr = %listener.addr, "stopped listening on Tailscale");
+        }
+        if let Some(held) = inner.network.take() {
+            tracing::info!(addr = %held.listener.addr, "stopped the machine network listener");
+        }
+    }
+
     /// Close the network listener (the network was turned off or Tailscale went away).
     pub async fn clear_network(&self) {
         if let Some(held) = self.inner.lock().await.network.take() {
@@ -240,6 +256,30 @@ pub async fn apply_network(state: &crate::state::AppState, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closing_at_shutdown_frees_the_extra_addresses_and_opens_nothing_more() {
+        let exposure = Exposure::default();
+        exposure.attach(Router::new()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        exposure.inner.lock().await.tailscale = Some(serve_on(listener, addr, Router::new(), "Tailscale"));
+        assert_eq!(exposure.extra_addrs().await, [addr]);
+        exposure.close_all().await;
+        assert!(exposure.extra_addrs().await.is_empty());
+        // The address is free for the next daemon as soon as the server task sees the stop.
+        let mut rebound = None;
+        for _ in 0..200 {
+            if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+                rebound = Some(listener);
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(rebound.is_some(), "the closed listener still holds {addr}");
+        assert!(exposure.inner.lock().await.router.is_none(), "nothing can open another listener during shutdown");
+    }
 
     #[test]
     fn wildcard_and_exact_listeners_cover_the_tailscale_address() {

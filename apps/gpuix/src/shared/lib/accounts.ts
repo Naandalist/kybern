@@ -9,6 +9,7 @@ import type {
   ProviderKind,
   ProviderSettings,
 } from "../../../../../packages/kybern-client/src/types.ts"
+import { hasSignIn } from "../../../../../packages/kybern-client/src/machineAgents.ts"
 
 /** Palette keys in assignment order. Red and orange are left out on purpose. */
 export const ACCOUNT_COLORS = ["blue", "green", "purple", "pink", "teal", "amber"] as const
@@ -119,13 +120,23 @@ export function legacyAccounts(
 
 // ── Sign-in routing ──────────────────────────────────────────────────────────
 
+/**
+ * Oh My Pi, OpenCode and pi run on whichever providers the user set up inside them (Google
+ * Antigravity, Claude, ChatGPT, Cursor, an API key…). They have no account of their own, so Kybern
+ * never shows a sign-in state, a sign-in button or an "Add account" for them, and lists the
+ * models they report. (Kybern's Antigravity harness, `agy`, is a different agent with a sign-in.)
+ */
+export function withoutSignIn(kind: ProviderKind): boolean {
+  return !hasSignIn(kind)
+}
+
 /** Agents whose sign-in can happen in the user's browser. */
 export function supportsBrowserLogin(kind: ProviderKind): boolean {
-  return kind === "claude-code" || kind === "codex" || kind === "cursor" || kind === "omp"
+  return kind === "claude-code" || kind === "codex" || kind === "cursor"
 }
 /** Agents whose sign-in page shows a code to paste back. */
 export function supportsPasteCode(kind: ProviderKind): boolean {
-  return kind === "claude-code" || kind === "omp"
+  return kind === "claude-code"
 }
 /** Agents with a one-time code to enter on a sign-in page. */
 export function supportsDeviceCode(kind: ProviderKind): boolean {
@@ -135,12 +146,13 @@ export function supportsDeviceCode(kind: ProviderKind): boolean {
 /**
  * How a new sign-in starts. The client decides, because the daemon cannot tell
  * a tunnelled client from a local one. On a remote daemon the browser cannot
- * return to the machine, so claude and omp paste a code and codex uses a
+ * return to the machine, so claude pastes a code and codex uses a
  * device code. Cursor's page polls, so it keeps the browser.
  */
 export function initialLoginMode(kind: ProviderKind, remote: boolean): AccountLoginMode {
-  // Antigravity signs in only through `agy` in a terminal on the machine.
-  if (kind === "opencode" || kind === "pi" || kind === "antigravity") return "terminal"
+  // Antigravity signs in only through `agy`; omp, OpenCode and pi are never signed in from Kybern,
+  // so a stray request opens the agent's own provider picker in a terminal.
+  if (kind === "antigravity" || withoutSignIn(kind)) return "terminal"
   if (!remote) return "browser"
   if (supportsPasteCode(kind)) return "paste"
   if (supportsDeviceCode(kind)) return "device_code"

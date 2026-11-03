@@ -4,7 +4,7 @@
 
 import type { AccountSummary, ProviderKind, ProviderLimits } from "../../../../../packages/kybern-client/src/types.ts"
 import { hasSignIn } from "../../../../../packages/kybern-client/src/machineAgents.ts"
-import { CLI_ACCOUNT_NAME, CLI_INSTANCE, isCliInstance } from "./accounts.ts"
+import { CLI_ACCOUNT_NAME, CLI_INSTANCE, isCliInstance, withoutSignIn } from "./accounts.ts"
 
 /**
  * Limits of one account. Per-account entries carry `instance`; the default
@@ -62,6 +62,7 @@ export function accountsOfKind(accounts: readonly AccountSummary[], kind: Provid
 }
 
 export function accountNeedsSignIn(account: Pick<AccountSummary, "provider" | "status">): boolean {
+  if (withoutSignIn(account.provider.kind)) return false
   return !isCliInstance(account.provider.instance) && (account.status === "needs_sign_in" || account.status === "signed_out")
 }
 

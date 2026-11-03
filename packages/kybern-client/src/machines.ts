@@ -459,6 +459,15 @@ function httpUrlOf(url: string): string {
   }
 }
 
+/** An address as one comparable `http(s)://host:port` base, whether it was written as `ws://…/ws` or `http://…`. */
+function baseUrl(url: string): string {
+  try {
+    return httpBase(url).replace(/\/+$/, "");
+  } catch {
+    return url;
+  }
+}
+
 /** A new token for the machine was minted a moment ago; the next attempt (after the usual retry wait) tries again. */
 function mintLaterError(machine: string): MachineError {
   return { code: "unreachable", message: `${machine} did not accept this device's sign-in. Kybern will try again in a minute` };
@@ -860,6 +869,33 @@ export class MachineSet {
       this.clock.clearTimeout(timer);
     }
     return live();
+  }
+
+  /**
+   * The direct routes of a machine, other than the addresses in `except`, that answer as that machine now, in the order
+   * they should be tried. For a connection the app owns (`adoptConnection`) whose saved address stopped reaching the
+   * machine (its port moved, or an old daemon still holds the address and refuses sessions): the app reopens it on one of
+   * these. A member's routes pass the identity check before they are returned, so no credential goes to an address that
+   * did not prove it is the machine. Relay and SSH routes are left out: the app's own client cannot use them.
+   */
+  async alternateRoutes(machineId: MachineId, except: readonly string[] = []): Promise<Route[]> {
+    await this.load();
+    const slot = this.slots.get(machineId);
+    if (!slot || this.disposed) return [];
+    const skip = new Set(except.map((url) => baseUrl(url)));
+    const routes = orderRoutes(slot.record.routes, slot.record.learned).filter(
+      (route) =>
+        (route.kind === "direct_tailnet" || route.kind === "direct_advertised") &&
+        !skip.has(baseUrl(route.url)) &&
+        !slot.record.blockedRoutes?.includes(routeId(route)) &&
+        !routeRefusal(route),
+    );
+    const verified: Route[] = [];
+    for (const route of routes) {
+      if (this.disposed || this.slots.get(machineId) !== slot) return [];
+      if ((await this.verifyRoute(slot, route)).ok) verified.push(route);
+    }
+    return verified;
   }
 
   /** Close every connection and stop every timer. The set cannot be used afterwards. */

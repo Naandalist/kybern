@@ -2,6 +2,7 @@
 // import mode asks the daemon for and what a window-material option writes. No GPUIX, no daemon: the scenes read these and
 // `model.test.ts` checks them (`.kybern-artifacts/onboarding-cinematic/SPEC.md` §3d, §4, §5, §12).
 import { ANTIGRAVITY_LOGIN_COMMAND, antigravityInstallCommand } from '../../../../packages/kybern-client/src/antigravity.ts'
+import { hasSignIn } from '../../../../packages/kybern-client/src/machineAgents.ts'
 import type { AccountSummary, ProviderKind, ProviderStatus } from '../../../../packages/kybern-client/src/types.ts'
 import { BLUR_MAX, DEFAULT_VARIANT_MATERIAL, defaultBlur, type VariantMaterial } from '../platform/translucency.ts'
 
@@ -49,18 +50,28 @@ export const list = (items: string[]) => new Intl.ListFormat('en-US', { style: '
 export const AGENT_ORDER: readonly ProviderKind[] = ['claude-code', 'codex', 'opencode', 'cursor', 'omp', 'pi', 'antigravity']
 export const AGENT_NAMES: Record<ProviderKind, string> = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'pi', omp: 'Oh My Pi', cursor: 'Cursor', antigravity: 'Antigravity' }
 
-export type AgentState = 'checking' | 'ready' | 'signin' | 'unknown' | 'missing' | 'waiting' | 'installing' | 'update'
+export type AgentState = 'checking' | 'ready' | 'signin' | 'unknown' | 'models' | 'missing' | 'waiting' | 'installing' | 'update'
 
 /** The words on a tile (SPEC §3b). */
 export const STATE_WORD: Record<AgentState, string> = {
-  checking: 'Checking…', ready: 'Ready', signin: 'Sign in', unknown: 'Check sign-in', missing: 'Not installed',
+  checking: 'Checking…', ready: 'Ready', signin: 'Sign in', unknown: 'Check sign-in', models: 'No models', missing: 'Not installed',
   waiting: 'Waiting for browser…', installing: 'Installing…', update: 'Needs an update',
 }
 
-/** What the daemon says about one agent, as a tile state. `loaded` is false until `providers.list` has answered. */
+/** Models an agent offers without any setup, which say nothing about the providers set up in it (omp lists Apple's on-device model on every Mac). */
+const ON_DEVICE_BACKENDS: ReadonlySet<string> = new Set(['apple'])
+
+/** The agent lists a model of a provider the user set up in it. */
+export const listsModels = (status: Pick<ProviderStatus, 'models'>): boolean => (status.models ?? []).some((model) => !ON_DEVICE_BACKENDS.has(model.provider ?? ''))
+
+/**
+ * What the daemon says about one agent, as a tile state. `loaded` is false until `providers.list` has answered.
+ * omp, OpenCode and pi have no account: installed with models listed is ready, whatever an account probe says.
+ */
 export function deriveAgent(status: ProviderStatus | undefined, accounts: readonly AccountSummary[], loaded: boolean): AgentState {
   if (!loaded || !status) return 'checking'
   if (!status.available) return status.binary_path ? 'update' : 'missing'
+  if (!hasSignIn(status.kind)) return listsModels(status) ? 'ready' : 'models'
   if (accounts.some((a) => a.status === 'signed_in')) return 'ready'
   if (accounts.some((a) => a.status === 'needs_sign_in' || a.status === 'signed_out')) return 'signin'
   return 'unknown'
@@ -69,7 +80,7 @@ export function deriveAgent(status: ProviderStatus | undefined, accounts: readon
 /** What the user is doing to a tile right now outranks what the daemon last said. */
 export type AgentOverride = 'waiting' | 'installing' | 'assumed' | null
 export const applyOverride = (state: AgentState, override: AgentOverride): AgentState =>
-  override === 'waiting' ? 'waiting' : override === 'installing' ? 'installing' : override === 'assumed' && (state === 'unknown' || state === 'signin') ? 'ready' : state
+  override === 'waiting' ? 'waiting' : override === 'installing' ? 'installing' : override === 'assumed' && (state === 'unknown' || state === 'signin' || state === 'models') ? 'ready' : state
 
 /** Until the user picks one, the default follows provider order, so it can hop to a better-ranked agent as detection finishes. */
 export function pickDefault(ready: readonly ProviderKind[], userPick: ProviderKind | null): ProviderKind | null {
@@ -115,7 +126,8 @@ export function agentCommand(kind: ProviderKind, mode: 'install' | 'login' | 'up
   const packages: Partial<Record<ProviderKind, string>> = {
     'claude-code': '@anthropic-ai/claude-code', codex: '@openai/codex', opencode: 'opencode-ai', pi: '@earendil-works/pi-coding-agent', omp: '@oh-my-pi/pi-coding-agent',
   }
-  if (mode === 'login') return ({ 'claude-code': 'claude auth login', codex: 'codex login', opencode: 'opencode auth login', omp: 'omp login' } as Partial<Record<ProviderKind, string>>)[kind] ?? null
+  // omp, OpenCode and pi have no sign-in of their own: the user sets their providers up inside them.
+  if (mode === 'login') return ({ 'claude-code': 'claude auth login', codex: 'codex login' } as Partial<Record<ProviderKind, string>>)[kind] ?? null
   const pkg = packages[kind]
   return pkg ? `npm install -g ${pkg}${mode === 'update' ? '@latest' : ''}` : null
 }

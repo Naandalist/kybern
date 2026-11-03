@@ -360,3 +360,38 @@ test("removeMachine deletes the token through delete (a store removes every copy
   assert.equal(creds.tokens.has("a"), false);
   set.dispose();
 });
+
+test("alternateRoutes: the other direct addresses of an app-owned machine that prove they are it, never the one in use, an impostor, a blocked one, SSH or a relay", async () => {
+  const STALE = "http://mac.tail.ts.net:59930";
+  const FRESH = "http://mac.tail.ts.net:4175";
+  const LAN = "http://192.168.1.5:4175";
+  const OTHER = "http://100.64.0.9:4173";
+  const BLOCKED = "http://100.64.0.10:4173";
+  const { set, world } = setup({ records: [rec("mac", [{ kind: "direct_advertised", url: STALE }], { member: true, signingKey: "key-mac", blockedRoutes: [`direct_tailnet|${BLOCKED}|`] })], credentials: { mac: "tok" } });
+  // An old daemon still answers as the Mac at the saved address; the live one moved; something else sits on OTHER.
+  world.host(STALE, "mac");
+  world.host(FRESH, "mac");
+  world.host(LAN, "mac", { online: false });
+  world.host(OTHER, "mac", { answerAs: { machineId: "intruder", key: "key-intruder" } });
+  world.host(BLOCKED, "mac");
+  await set.adoptConnection({ machineId: "mac", name: "Mac" }, appClient(world, "mac"), { autoRefresh: false });
+  // What a member reported for the Mac (`network.routes`).
+  set["learn"](set["slots"].get("mac"), [
+    { kind: "direct_tailnet", url: FRESH },
+    { kind: "direct_tailnet", url: OTHER },
+    { kind: "direct_tailnet", url: BLOCKED },
+    { kind: "direct_advertised", url: LAN },
+    { kind: "ssh", url: "http://127.0.0.1:5555" },
+    { kind: "relay", url: "http://vps.tail.ts.net:4173/relay/mac", via: "vps" },
+  ]);
+  world.probes.length = 0;
+  const routes = await set.alternateRoutes("mac", ["ws://mac.tail.ts.net:59930/ws"]);
+  assert.deepEqual(routes.map((route) => route.url), [FRESH]);
+  assert.ok(!world.probes.some((url) => url.startsWith(STALE)), "the address in use is not probed");
+  assert.ok(!world.probes.some((url) => url.startsWith(BLOCKED)), "a blocked address is not probed");
+  assert.equal(world.clients.length, 0, "nothing was opened and no token was sent");
+  assert.deepEqual(await set.alternateRoutes("nobody"), []);
+  // Without `except` the saved address counts too: it still proves it is the Mac.
+  assert.deepEqual((await set.alternateRoutes("mac")).map((route) => route.url), [FRESH, STALE]);
+  set.dispose();
+});

@@ -165,9 +165,21 @@ async fn model_command_output(bin: &std::path::Path, args: &[&str], context: &Pr
 }
 
 async fn omp_models(bin: &std::path::Path, context: &ProbeContext) -> Vec<ProviderModel> {
-    let Some(output) = model_command_output(bin, &["models", "ls", "--json"], context).await else { return Vec::new() };
-    let Ok(value) = serde_json::from_slice::<Value>(&output) else { return Vec::new() };
-    let Some(items) = value.get("models").and_then(Value::as_array) else { return Vec::new() };
+    omp_catalog(bin, context).await.unwrap_or_default()
+}
+
+/// omp's chat models (`omp models ls --json`), or `None` when omp could not answer.
+/// omp lists only the models it can run: those of providers it holds a login or
+/// key for (any of them: Google Antigravity, ChatGPT, Claude, OpenRouter, …),
+/// plus on-device models that need no sign-in.
+pub(crate) async fn omp_catalog(bin: &std::path::Path, context: &ProbeContext) -> Option<Vec<ProviderModel>> {
+    let output = model_command_output(bin, &["models", "ls", "--json"], context).await?;
+    omp_models_from_json(&output)
+}
+
+pub(crate) fn omp_models_from_json(output: &[u8]) -> Option<Vec<ProviderModel>> {
+    let value = serde_json::from_slice::<Value>(output).ok()?;
+    let items = value.get("models").and_then(Value::as_array)?;
     let mut models: Vec<ProviderModel> = items
         .iter()
         .filter_map(|item| {
@@ -197,7 +209,22 @@ async fn omp_models(bin: &std::path::Path, context: &ProbeContext) -> Vec<Provid
         })
         .collect();
     models.sort_by(|a, b| a.provider.cmp(&b.provider).then_with(|| a.display_name.cmp(&b.display_name)));
-    models
+    Some(models)
+}
+
+/// Providers omp lists without any sign-in or key, and never picks as its default
+/// model: Apple's on-device model (every recent Mac) and omp's bundled tiny models.
+pub const OMP_ON_DEVICE_PROVIDERS: &[&str] = &["apple", "local"];
+
+/// The providers in an omp catalog that the user set up (a login or a key), in catalog order.
+pub fn omp_configured_providers(models: &[ProviderModel]) -> Vec<String> {
+    let mut providers: Vec<String> = Vec::new();
+    for provider in models.iter().filter_map(|model| model.provider.as_deref()) {
+        if !OMP_ON_DEVICE_PROVIDERS.contains(&provider) && !providers.iter().any(|seen| seen == provider) {
+            providers.push(provider.to_string());
+        }
+    }
+    providers
 }
 
 #[async_trait]
@@ -1941,6 +1968,38 @@ impl AgentSession for Handle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `omp models ls --json` from omp 18.16.0 signed in only to Google Antigravity
+    /// (an isolated agent directory with one `google-antigravity` OAuth login).
+    const OMP_ANTIGRAVITY_MODELS: &str = include_str!("../tests/fixtures/omp-models-antigravity.json");
+
+    #[test]
+    fn omp_catalog_keeps_antigravity_models_and_their_efforts() {
+        let models = omp_models_from_json(OMP_ANTIGRAVITY_MODELS.as_bytes()).unwrap();
+        assert_eq!(models.len(), 21);
+        let antigravity: Vec<_> = models.iter().filter(|model| model.provider.as_deref() == Some("google-antigravity")).collect();
+        assert_eq!(antigravity.len(), 20);
+        let gemini = models.iter().find(|model| model.id == "google-antigravity/gemini-3-pro").unwrap();
+        assert_eq!(gemini.display_name, "Gemini 3 Pro");
+        assert_eq!(gemini.efforts, ["low", "high"]);
+        let opus = models.iter().find(|model| model.id == "google-antigravity/claude-opus-4-6").unwrap();
+        assert_eq!(opus.efforts, ["minimal", "low", "medium", "high"]);
+        // `"thinking": null` is a model without effort levels, not a parse failure.
+        assert!(models.iter().find(|model| model.id == "google-antigravity/tab_flash_lite_preview").unwrap().efforts.is_empty());
+        assert_eq!(omp_configured_providers(&models), ["google-antigravity"]);
+    }
+
+    #[test]
+    fn omp_on_device_models_are_not_a_configured_provider() {
+        // omp with no login or key on a Mac lists only Apple's on-device model.
+        let bare = br#"{"models":[{"provider":"apple","kind":"chat","id":"on-device","selector":"apple/on-device","name":"Apple AFM 3 Core","reasoning":false,"thinking":null}]}"#;
+        let models = omp_models_from_json(bare).unwrap();
+        assert_eq!(models.len(), 1);
+        assert!(omp_configured_providers(&models).is_empty());
+        assert!(omp_configured_providers(&omp_models_from_json(br#"{"models":[]}"#).unwrap()).is_empty());
+        assert!(omp_models_from_json(b"not json").is_none());
+        assert!(omp_models_from_json(br#"{"error":"x"}"#).is_none());
+    }
 
     #[test]
     fn configured_app_tools_include_only_effective_supported_bridge_names() {

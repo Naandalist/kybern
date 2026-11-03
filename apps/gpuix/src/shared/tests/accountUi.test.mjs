@@ -57,6 +57,15 @@ test("tooltips and sign-in state", () => {
   assert.equal(accountNeedsSignIn(acct("claude-code", "default", "CLI account", { status: "signed_out" })), false)
 })
 
+test("an omp account never asks for a sign-in: omp runs on the providers set up inside it", () => {
+  assert.equal(accountNeedsSignIn(acct("omp", "work", "Work", { status: "signed_out" })), false)
+  assert.equal(accountNeedsSignIn(acct("omp", "work", "Work", { status: "needs_sign_in" })), false)
+  const omp = { kind: "omp", display_name: "Oh My Pi", available: true }
+  const tabs = accountTabs(pickerTabs({ ...base, agents: [omp], accounts: [acct("omp", "default", "CLI account", { status: "signed_out" }), acct("omp", "work", "Work", { status: "signed_out" })], current: { kind: "omp", instance: "default" } }))
+  assert.deepEqual(tabs.map((t) => t.needsSignIn), [false, false])
+  assert.ok(tabs.every((t) => !/sign/i.test(t.tooltip) && !/sign/i.test(t.ariaLabel)))
+})
+
 test("without canPickProvider only other agents are disabled", () => {
   const tabs = accountTabs(pickerTabs({ ...base, canPickProvider: false }))
   assert.deepEqual(tabs.map((t) => t.disabled), [false, false, false, true, true])

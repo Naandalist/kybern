@@ -41,11 +41,11 @@ const shadow = (t: Theme, lift = false) => ({ offsetX: 0, offsetY: lift ? 10 : 4
 
 function dotColor(t: Theme, state: AgentState) {
   if (state === 'ready') return t.green
-  if (state === 'signin' || state === 'unknown' || state === 'waiting' || state === 'installing') return t.accentBlue
+  if (state === 'signin' || state === 'unknown' || state === 'models' || state === 'waiting' || state === 'installing') return t.accentBlue
   if (state === 'update') return t.red
   return t.textTertiary
 }
-const wordColor = (t: Theme, state: AgentState) => (state === 'signin' || state === 'unknown' ? t.accentBlue : state === 'update' ? t.red : t.textSecondary)
+const wordColor = (t: Theme, state: AgentState) => (state === 'signin' || state === 'unknown' || state === 'models' ? t.accentBlue : state === 'update' ? t.red : t.textSecondary)
 
 /** A ring that breathes while the user is mid-task on a tile (sign-in, install): opacity 1 ↔ .35 over 1.2 s, one retarget per half. */
 function BreathingRing({ color, running }: { color: string; running: boolean }) {

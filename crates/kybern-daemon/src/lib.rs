@@ -367,6 +367,7 @@ async fn serve() -> Result<()> {
 
     let shutdown_token = state.shutdown.clone();
     let shutdown_orchestrator = state.orchestrator.clone();
+    let shutdown_state = state.clone();
     let shutdown = async move {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => tracing::info!("Ctrl+C received"),
@@ -379,6 +380,9 @@ async fn serve() -> Result<()> {
         // The same signal reaches the agents; their failures from here on are this stop.
         shutdown_orchestrator.begin_shutdown();
         tracing::info!("shutting down");
+        // The Tailscale and machine network addresses go first: whatever the rest of the
+        // shutdown waits on, the daemon that replaces this one must be able to listen there.
+        shutdown_state.exposure.close_all().await;
     };
     // The askpass endpoint checks which process holds the connection (`askpass::connection_owned_by`).
     // TCP_NODELAY: previews, relayed pages and session frames are small, latency-bound writes.

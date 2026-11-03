@@ -13,14 +13,15 @@ import { SpaceSwitcher } from "../src/features/Spaces";
 import { setDraft, useDraft } from "../src/state/draft";
 import { plural } from "../src/state/format";
 import { isFreeChatProject, type Thread, type UserMessage } from "../src/state/protocol";
-import { ensureThread, refresh, rpc, startNewChat, supportsOptimisticCreate, useApp } from "../src/state/runtime";
+import { ensureThread, refresh, rpc, startNewChat, supportsOptimisticCreate, useApp, useMachineView } from "../src/state/runtime";
+import { homeReach } from "../src/state/homeReach";
 import { useLists } from "../src/state/useLists";
 import { useMachineTarget, pickMachine } from "../src/state/machineTarget";
 import { useProviders } from "../src/state/machineProviders";
 import { queueNewChat } from "../src/state/outbox";
 import { newThreadId } from "../src/state/ids";
 import { groupCreateFields, supportsWorktree } from "../src/state/groups";
-import { useInSpace, useSpaceProjects } from "../src/state/spaces";
+import { loadSpacesThroughNetwork, useInSpace, useSpaceProjects } from "../src/state/spaces";
 import { relativeTime } from "../src/state/threadList";
 import { isGroupProject } from "../../../packages/kybern-client/src/groups";
 import { optimisticThread } from "../../../packages/kybern-client/src/newChat";
@@ -153,7 +154,13 @@ function HomeScreen() {
     sendMotion.flight?.id,
   ]);
   const [prompt, setPrompt] = useState("");
-  const connected = app.status === "open";
+  // The computer the phone is at answers (`connected`), or another machine of the network does (`reachable`): Home
+  // works either way, and only shows the way to Connections when nothing answers.
+  const view = useMachineView();
+  const { connected, reachable } = homeReach(app.status, view.machines);
+  useEffect(() => {
+    if (!connected && reachable) loadSpacesThroughNetwork();
+  }, [connected, reachable, view.version]);
   // Home works in the active space: a draft project from another space gives way to this one's first.
   const spaceProjects = useSpaceProjects();
   const project =
@@ -163,7 +170,8 @@ function HomeScreen() {
   const workspaceLabel = draft.worktree ? "Worktree" : "This checkout";
   // Where the thread runs (`state/machineTarget.ts`): the last machine used for the project, else the one the phone is at.
   const target = useMachineTarget(project);
-  const chosenMachine = target.remote ? target.chosen : undefined;
+  // Another machine, or the computer the phone is at while it is away: a send there goes through the network (and waits in the outbox when that machine cannot take it now).
+  const chosenMachine = target.remote || !target.reachable ? target.chosen : undefined;
   // The agents follow the machine: another machine's come from that machine.
   const providers = useProviders(chosenMachine ? { machineId: chosenMachine.machineId, reachable: target.reachable } : undefined);
   const recent = useMemo(() => continueThreads(lists.threads, project?.id), [lists.threads, project?.id]);
@@ -260,7 +268,7 @@ function HomeScreen() {
     );
     return { threadId, messageId };
   }
-  const pickup = connected && !outgoing && recent.length > 0;
+  const pickup = reachable && !outgoing && recent.length > 0;
   const open = (thread: Thread) =>
     router.push({ pathname: "/thread/[id]", params: { id: thread.id } });
   return (
@@ -347,7 +355,7 @@ function HomeScreen() {
             style={{ flexGrow: 1, justifyContent: "center", paddingHorizontal: gutter(width), paddingBottom: space.xl }}
           >
             {/* The space Home works in, always shown so New space and Manage spaces stay one tap away; switching refills Continue and the project chip. */}
-            {connected && (
+            {reachable && (
               <View style={{ alignSelf: "center", marginBottom: space.md }}>
                 <SpaceSwitcher compact always />
               </View>
@@ -355,12 +363,12 @@ function HomeScreen() {
             <T variant="largeTitle" accessibilityRole="header" style={{ textAlign: "center" }}>
               What are we building?
             </T>
-            {!connected && (
+            {!reachable && (
               <T variant="subhead" tone="secondary" style={{ marginTop: space.sm, maxWidth: 320, alignSelf: "center", textAlign: "center" }}>
                 Work with your coding agents from anywhere.
               </T>
             )}
-            {!connected && (
+            {!reachable && (
               <View style={{ marginTop: space.xl, alignSelf: "center" }}>
                 <Button
                   onPress={() =>
@@ -411,7 +419,7 @@ function HomeScreen() {
             )}
           </View>
         )}
-        {connected && !outgoing && !pickup && (
+        {reachable && !outgoing && !pickup && (
           <View>
             {SUGGESTIONS.map((item) => (
               <ListRow
@@ -452,12 +460,12 @@ function HomeScreen() {
                 <FooterChip
                   icon="folder"
                   label={project ? `Change project, ${project.name}` : "Add a project"}
-                  value={project?.name ?? (connected ? "Choose a project" : "No computer connected")}
+                  value={project?.name ?? (reachable ? "Choose a project" : "No computer connected")}
                   chevron={!!project}
-                  onPress={() => router.push(connected ? "/project-picker" : "/connect")}
+                  onPress={() => router.push(reachable ? "/project-picker" : "/connect")}
                 />
-                {connected ? <MachineChip target={target} /> : null}
-                {connected && supportsWorktree(project) && (
+                {reachable ? <MachineChip target={target} /> : null}
+                {reachable && supportsWorktree(project) && (
                   <FooterChip
                     icon="arrow.triangle.branch"
                     label={`Thread setup, ${workspaceLabel}`}
@@ -486,7 +494,7 @@ function HomeScreen() {
             </View>
             <Composer
               onSend={send}
-              disabled={!connected || !project}
+              disabled={!reachable || !project}
               prompt={prompt}
               onPromptConsumed={() => setPrompt("")}
             />

@@ -63,7 +63,8 @@ describe('status line (SPEC §3d)', () => {
   test('names the machine', () => expect(statusLine(states({ codex: 'checking' }), null, 'studio-mini')).toBe('Looking for agents on studio-mini…'))
   test('none ready', () => expect(statusLine(states({ 'claude-code': 'missing', codex: 'signin' }), null, mac)).toBe('Install or sign in to an agent to continue. Click one to start.'))
   test('one ready, one to sign in to', () => expect(statusLine(states({ 'claude-code': 'ready', codex: 'signin', cursor: 'missing' }), 'claude-code', mac)).toBe('Claude Code is ready. Sign in to Codex to use both, side by side.'))
-  test('one ready, three to sign in to', () => expect(statusLine(states({ 'claude-code': 'ready', codex: 'signin', omp: 'unknown', pi: 'signin' }), 'claude-code', mac)).toBe('Claude Code is ready. Sign in to Codex, Oh My Pi, and pi to use them all, side by side.'))
+  test('one ready, three to sign in to', () => expect(statusLine(states({ 'claude-code': 'ready', codex: 'signin', cursor: 'unknown', antigravity: 'signin' }), 'claude-code', mac)).toBe('Claude Code is ready. Sign in to Codex, Cursor, and Antigravity to use them all, side by side.'))
+  test('an agent without models is never something to sign in to', () => expect(statusLine(states({ 'claude-code': 'ready', omp: 'models', opencode: 'missing' }), 'claude-code', mac)).toBe('Claude Code is ready. Add more agents anytime to use them side by side.'))
   test('one ready, nothing to sign in to', () => expect(statusLine(states({ 'claude-code': 'ready', codex: 'missing', pi: 'missing' }), 'claude-code', mac)).toBe('Claude Code is ready. Add more agents anytime to use them side by side.'))
   test('two ready', () => expect(statusLine(states({ 'claude-code': 'ready', codex: 'ready' }), 'claude-code', mac)).toBe('You can use Claude Code and Codex side by side. New chats start with Claude Code.'))
   test('three or more ready', () => expect(statusLine(states({ 'claude-code': 'ready', codex: 'ready', cursor: 'ready', pi: 'ready' }), 'claude-code', mac)).toBe('All 4 agents are ready to use side by side. New chats start with Claude Code.'))
@@ -90,6 +91,26 @@ describe('agent state', () => {
     expect(deriveAgent(status(), [account('unknown')], true)).toBe('unknown')
     expect(deriveAgent(status(), [], true)).toBe('unknown')
   })
+  test('omp, OpenCode and pi are ready when installed with models, whatever an account probe says', () => {
+    // omp signed in only to Google Antigravity inside omp: `omp models ls --json` lists its models; `omp auth-broker status` says not_configured.
+    const antigravity = [{ id: 'google-antigravity/gemini-3-pro', display_name: 'Gemini 3 Pro', provider: 'google-antigravity' }, { id: 'google-antigravity/claude-opus-4-6', display_name: 'Claude Opus 4.6', provider: 'google-antigravity' }]
+    const omp = status({ kind: 'omp', display_name: 'Oh My Pi', models: antigravity })
+    const signedOut = { ...account('signed_out'), provider: { kind: 'omp' as const, instance: 'default' } }
+    expect(deriveAgent(omp, [signedOut], true)).toBe('ready')
+    expect(deriveAgent(omp, [], true)).toBe('ready')
+    expect(deriveAgent(status({ kind: 'opencode', models: [{ id: 'crofai/x', display_name: 'X', provider: 'crofai' }] }), [], true)).toBe('ready')
+    expect(deriveAgent(status({ kind: 'pi', models: [{ id: 'anthropic/y', display_name: 'Y', provider: 'anthropic' }] }), [account('needs_sign_in')], true)).toBe('ready')
+    // Apple's on-device model is listed on every Mac and says nothing about the providers set up in omp.
+    expect(deriveAgent(status({ kind: 'omp', models: [{ id: 'apple/on-device', display_name: 'Apple AFM 3 Core', provider: 'apple' }] }), [], true)).toBe('models')
+    expect(deriveAgent(status({ kind: 'omp', models: [] }), [signedOut], true)).toBe('models')
+    expect(applyOverride('models', 'assumed')).toBe('ready')
+    expect(deriveAgent(status({ kind: 'omp', available: false }), [], true)).toBe('missing')
+    // Never a sign-in command for them.
+    expect(agentCommand('omp', 'login')).toBeNull()
+    expect(agentCommand('opencode', 'login')).toBeNull()
+    expect(agentCommand('pi', 'login')).toBeNull()
+  })
+  test('omp ranks as the default when it is the only ready agent', () => expect(pickDefault(['omp'], null)).toBe('omp'))
   test('what the user is doing wins', () => {
     expect(applyOverride('signin', 'waiting')).toBe('waiting')
     expect(applyOverride('missing', 'installing')).toBe('installing')

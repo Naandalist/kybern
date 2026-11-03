@@ -59,10 +59,9 @@ export async function removeFromNetwork(machineId: MachineId, stolen: boolean): 
 
 /** The member that answers network calls for this phone, by id and name. */
 export function memberMachine(): { machineId: MachineId; name: string; version?: string } | undefined {
-  const hub = machineHub();
-  const client = hub.memberClient();
-  if (!client) return undefined;
-  const connection = hub.set.connections().find((c) => hub.set.clientFor(c.record.machineId) === client);
+  // Screens call this while they render. It must not throw for an offline machine (`clientFor` does), or the
+  // Machines page goes blank and the app closes as soon as one machine is away.
+  const connection = machineHub().memberConnection();
   return connection ? { machineId: connection.record.machineId, name: connection.record.name, ...(connection.info?.version ? { version: connection.info.version } : {}) } : undefined;
 }
 
@@ -104,8 +103,8 @@ export async function checkNetwork(): Promise<DoctorReport> {
   return member().call("network.doctor", { machine_id: null });
 }
 
-/** One machine's `machines.info`, asked of that machine (an offline one rejects; the screen shows what it knows). */
-export function readMachineInfo(machineId: MachineId): Promise<MachineInfo> {
+/** One machine's `machines.info`, asked of that machine (an offline one rejects, never throws: screens call it from effects). */
+export async function readMachineInfo(machineId: MachineId): Promise<MachineInfo> {
   return machineHub().clientFor(machineId).call("machines.info", {});
 }
 

@@ -497,10 +497,11 @@ export function useCompletion({
     setMentionRefs(list => [...list.filter(r => !refs.mentions.some(m => m.part.path === r.part.path)), ...refs.mentions])
   }
 
-  const menu = (width: number) =>
+  /** `width` may be a function, read only while the menu is open (a bounds read waits on the UI thread off macOS). */
+  const menu = (width: number | (() => number)) =>
     open ? (
     <CompletionList
-      width={width}
+      width={typeof width === 'function' ? width() : width}
       items={items}
       index={index}
       grouped={!mention || filter === 'all'}

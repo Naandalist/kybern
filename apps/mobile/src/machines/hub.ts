@@ -391,8 +391,14 @@ export class MachineHub {
    * else the nearest member. `except` skips a machine (one being removed).
    */
   memberClient(except?: MachineId): KybernClient | undefined {
+    const member = this.memberConnection(except);
+    return member && this.set.clientFor(member.record.machineId);
+  }
+
+  /** The connection of the machine `memberClient` answers through. Never throws: offline machines are simply passed over. */
+  memberConnection(except?: MachineId): MachineConnection | undefined {
     const local = this.set.localMachineId;
-    const members = this.set
+    return this.set
       .connections()
       .filter(
         (c) =>
@@ -401,8 +407,18 @@ export class MachineHub {
           c.features.has(NETWORK_FEATURES.network) &&
           (c.record.member || c.record.machineId === local),
       )
-      .sort((a, b) => Number(b.record.machineId === local) - Number(a.record.machineId === local) || (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity));
-    return members[0] && this.set.clientFor(members[0].record.machineId);
+      .sort((a, b) => Number(b.record.machineId === local) - Number(a.record.machineId === local) || (a.latencyMs ?? Infinity) - (b.latencyMs ?? Infinity))[0];
+  }
+
+  /**
+   * Other addresses of the computer the phone is at that answer as it now, besides `current` (the one its client is
+   * stuck on): the routes the network reported for it (`network.routes`, learned from a member) and the saved ones.
+   */
+  async primaryAlternates(current: string): Promise<string[]> {
+    const primary = this.primary;
+    if (!primary || this.disposed) return [];
+    const routes = await this.set.alternateRoutes(primary.machineId, [current]);
+    return this.primary === primary ? routes.map((route) => route.url) : [];
   }
 
   /** Read one machine's lists again (the primary's are read by `runtime.ts`). */
