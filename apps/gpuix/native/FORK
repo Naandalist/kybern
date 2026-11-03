@@ -28,11 +28,13 @@ repo=https://github.com/Tresnanda/gpuix.git
 # `kick-deadlock` (ADE-110): that plus the drawable gate's kick flushing CA transactions on a later
 # main-queue turn instead of inside a draw that holds the window lock (0.20.4 deadlocked in
 # resetCursorRects), AppKit display-cycle callbacks that defer instead of waiting on that lock, and
-# the kick-reentry/flush-in-draw faults, until merged into `kybern`.
+# the kick-reentry/flush-in-draw faults.
 # `key-detach`: that plus no UI-thread waits per keystroke off macOS (resolveKeyEvent, subscribeAnimationFrames and
 # setInputDecorations queued, the latter still validated at the call; getElementBounds answers with the last painted
 # bounds without window.refresh(); Markdown and syntax documents used through a registry handle kept on the renderer)
 # and stallUiThread for the checks; no zed change.
+# Both are fast-forwarded into the forks' `next` and `kybern` (gpuix c9647c3, zed a2275d8, 2026-11-04):
+# `commit` and `zed` are the heads of both forks' `kybern` branches.
 commit=c9647c3e003b9f99eaebfa3a22ea2badbcde89da
 # The zed submodule commit `commit` records; update.sh refuses a checkout that differs.
 zed=a2275d84c575f48d149e8f1768248c843fc66040
