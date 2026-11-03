@@ -2,7 +2,7 @@
 // exists while more than one machine is known. The choice is per window and kept with the other sidebar preferences.
 import { useState } from 'react'
 import { useMachines, type MachineRow } from '../machines/index.ts'
-import { footerText, shownStatus, statusText, statusTone, type Tone } from '../machines/format.ts'
+import { daemonLinkDown, footerText, LINK_DOWN_TEXT, shownStatus, statusText, statusTone, type Tone } from '../machines/format.ts'
 import { useNetwork } from '../machines/network.ts'
 import { Icon } from '../icons.tsx'
 import { N } from '../nav/glyphs.ts'
@@ -26,14 +26,25 @@ export function activeMachineFilter(machines: readonly MachineRow[], filter: str
   return filter ? machines.find((machine) => machine.machineId === filter) ?? null : null
 }
 
-/** The rows as the picker shows them: a machine the daemon reports online reads "Online" (`shownStatus`). */
+/**
+ * The rows as the picker shows them: a machine the daemon reports online reads "Online" (`shownStatus`), and one this
+ * app reaches while the daemon here has no session to it is marked (`linkDown`), so it never reads a plain "Online".
+ */
 export function pickerRows(machines: readonly MachineRow[], cards: readonly { machine_id: string; status: string }[] | undefined): MachineRow[] {
   if (!cards?.length) return machines as MachineRow[]
   const daemon = new Map(cards.map((card) => [card.machine_id, card.status]))
   return machines.map((machine) => {
-    const status = shownStatus(machine.status, daemon.get(machine.machineId))
+    const reported = daemon.get(machine.machineId)
+    if (daemonLinkDown(machine.status, reported, machine.isLocal)) return { ...machine, linkDown: true }
+    const status = shownStatus(machine.status, reported)
     return status === machine.status ? machine : { ...machine, status, offline: false }
   })
+}
+
+/** What a picker row says under the machine's name. */
+export function pickerDetail(machine: MachineRow): string {
+  if (machine.linkDown) return LINK_DOWN_TEXT
+  return statusText({ status: machine.status, ...(machine.lastSeenAt !== undefined ? { lastSeenAt: machine.lastSeenAt } : {}) }).replace(/^Offline · /, '')
 }
 
 export function MachineFilter() {
@@ -46,7 +57,7 @@ export function MachineFilter() {
   if (machines.length < 2) return <SingleMachine />
   const chosen = activeMachineFilter(machines, filter)
   const offline = machines.filter((machine) => machine.offline && !machine.paused).length
-  const tone: Tone = chosen ? statusTone(chosen.status) : offline ? 'warn' : 'good'
+  const tone: Tone = chosen ? (chosen.linkDown ? 'warn' : statusTone(chosen.status)) : offline || machines.some((machine) => machine.linkDown) ? 'warn' : 'good'
   const choose = (id: string | null) => setNav({ machineFilter: id })
   return <div style={{ display: 'flex', paddingLeft: 8, paddingRight: 8, paddingBottom: 6 }}>
     <Menu testId="machine-filter" open={open} onOpenChange={setOpen} width={304} rootStyle={{ flexGrow: 1 }} trigger={() =>
@@ -60,7 +71,7 @@ export function MachineFilter() {
       <MenuSeparator />
       {machines.map((machine) => <MenuItem key={machine.machineId} id={machine.machineId} testId={`machine-filter-${machine.machineId}`}
         iconNode={<MachineBadge glyph={machine.glyph} size={16} />} label={machine.isLocal ? `${machine.name} (this computer)` : machine.name}
-        detail={statusText({ status: machine.status, ...(machine.lastSeenAt !== undefined ? { lastSeenAt: machine.lastSeenAt } : {}) }).replace(/^Offline · /, '')}
+        detail={pickerDetail(machine)}
         checked={chosen?.machineId === machine.machineId} onSelect={() => choose(machine.machineId)} />)}
     </Menu>
   </div>

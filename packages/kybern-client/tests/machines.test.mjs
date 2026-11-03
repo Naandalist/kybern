@@ -318,6 +318,52 @@ test("a token the machine revoked is replaced by a fresh one through a member", 
   set.dispose();
 });
 
+test("a refused token that another window already replaced is not discarded, and nothing is minted", async () => {
+  const { world, set, creds } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "old" },
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  // While this window was refused with "old", another window minted "fresh" (which revoked "old") and saved it.
+  world.host(T, "b", { rejectToken: (token) => { if (token !== "old") return false; creds.tokens.set("b", "fresh"); return true; } });
+  world.lists("a", [], []);
+  world.lists("b", [], []);
+  let grants = 0;
+  world.on("a", "network.client_grant", () => { grants += 1; return { token: "minted", scopes: [], routes: [] }; });
+  await set.ensureAll();
+  assert.equal(grants, 0);
+  assert.equal(creds.tokens.get("b"), "fresh");
+  assert.equal(set.connection("b").status, "online");
+  assert.equal(world.clients.filter((c) => c.machineId === "b").at(-1).token, "fresh");
+  set.dispose();
+});
+
+test("tokens for a machine are minted at most once a minute, and less often while they keep being refused", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "old" },
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  // Every token is refused, as if another window kept replacing it.
+  world.host(T, "b", { rejectToken: () => true });
+  world.lists("a", [], []);
+  const grants = [];
+  world.on("a", "network.client_grant", () => { grants.push(clock.now()); return { token: `minted-${grants.length}`, scopes: [], routes: [] }; });
+  await set.ensureAll();
+  assert.equal(grants.length, 1);
+  assert.notEqual(set.connection("b").status, "online");
+  assert.match(set.connection("b").error.message, /try again in a minute/);
+  // Retries keep coming on the usual backoff; mints do not follow each one.
+  for (let i = 0; i < 30; i++) await clock.advance(60_000);
+  assert.ok(grants.length >= 2, `${grants.length} mints in half an hour`);
+  assert.ok(grants.length <= 6, `${grants.length} mints in half an hour`);
+  for (let i = 1; i < grants.length; i++) assert.ok(grants[i] - grants[i - 1] >= 60_000, "never two mints within a minute");
+  // The waits grow while the refusals go on.
+  const gaps = grants.slice(1).map((at, i) => at - grants[i]);
+  assert.ok(gaps.at(-1) >= gaps[0], `${gaps}`);
+  set.dispose();
+});
+
 test("members found through network.status are added, connected and forgotten when removed anywhere", async () => {
   const { world, set, creds, store, cache } = setup({
     records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" })],
@@ -989,7 +1035,7 @@ test("a connect attempt that hangs is abandoned for a fresh one instead of keepi
 
 // A member the daemon reaches and this device cannot (a phone off the tailnet) is reported online at every sync. Only
 // the daemon seeing it come back (offline before, online now) dials it out of its backoff; otherwise it settles at
-// the longest wait instead of a full route search every 30 s.
+// the online wait (two minutes, ADE-124) instead of a full route search every 30 s.
 test("a member the daemon reports online all along but this device cannot reach keeps its backoff", async () => {
   const { world, set, clock } = setup({
     records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
@@ -1015,8 +1061,10 @@ test("a member the daemon reports online all along but this device cannot reach 
     await clock.advance(30_000);
   }
   assert.equal(set.connection("b").status, "offline");
-  // Settled at the 300 s wait: about two attempts in the second ten minutes.
-  assert.ok(probesTo(world, T).length - before <= 3, `${probesTo(world, T).length - before} probes in ten minutes`);
+  // Settled at the 120 s wait for a member the daemon reports online: about five attempts in the second ten minutes,
+  // never one per sync (twenty).
+  const tries = probesTo(world, T).length - before;
+  assert.ok(tries >= 4 && tries <= 6, `${tries} probes in ten minutes`);
 
   // The daemon loses it and sees it again: dialed at once.
   members[1] = card("b", { status: "offline" });
@@ -1055,5 +1103,97 @@ test("a sync started by network.changed uses the status it carried", async () =>
   a.notify("network.changed", {});
   await clock.advance(400);
   assert.equal(reads, before + 1);
+  set.dispose();
+});
+
+// ---- ADE-124: a member the daemon reports online and this app cannot reach yet ----
+
+test("every saved member is dialed at launch, before the daemon's first answer", async () => {
+  const { world, set } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "tok-b" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  world.host(T, "b");
+  world.lists("a", [], []);
+  world.lists("b", [], []);
+  world.on("a", "network.status", () => { throw new Error("not ready yet"); });
+  await set.ensureAll();
+  assert.equal(set.connection("b").status, "online");
+  assert.ok(probesTo(world, T).length >= 1);
+  set.dispose();
+});
+
+test("a failed member the daemon reports online is retried within two minutes, and connects when it answers", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "tok-b" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  const b = world.host(T, "b", { online: false });
+  world.lists("a", [], []);
+  world.lists("b", [], []);
+  let ready = false;
+  const status = () => ({ enabled: true, self_machine: card("a"), members: [card("a"), card("b")] });
+  world.on("a", "network.status", () => { if (!ready) throw new Error("not ready yet"); return status(); });
+  world.on("a", "network.routes", () => ({ routes: [tailnet(T)] }));
+  await set.ensureAll();
+  // Twenty minutes before the daemon answers: b's wait has grown to five minutes.
+  for (let i = 0; i < 20; i++) await clock.advance(60_000);
+  assert.equal(set.connection("b").status, "offline");
+  // The daemon now says b is online (it never said otherwise, so this is not "came back"): the next attempt moves up.
+  ready = true;
+  await set.syncMembers();
+  b.online = true;
+  await clock.advance(121_000);
+  assert.equal(set.connection("b").status, "online");
+  set.dispose();
+});
+
+test("reach dials a machine out of its backoff and resolves once it is connected", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "tok-b" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  const b = world.host(T, "b", { online: false });
+  world.lists("a", [], []);
+  world.lists("b", [], []);
+  await set.ensureAll();
+  for (let i = 0; i < 10; i++) await clock.advance(60_000);
+  assert.throws(() => set.clientFor("b"), OfflineError);
+  b.online = true;
+  assert.equal(await set.reach("b"), true);
+  assert.equal(set.connection("b").status, "online");
+  assert.equal(set.clientFor("b"), set.handleFor("b"));
+  // Already connected: at once, with nothing dialed.
+  const before = world.clients.length;
+  assert.equal(await set.reach("b"), true);
+  assert.equal(world.clients.length, before);
+  set.dispose();
+});
+
+test("reach resolves false while the machine stays unreachable, and a paused one is never dialed", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" }), rec("c", [tailnet("http://100.64.0.3:4173")], { signingKey: "key-c", paused: true })],
+    credentials: { a: "tok-a", b: "tok-b", c: "tok-c" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  world.host(T, "b", { online: false });
+  world.lists("a", [], []);
+  await set.ensureAll();
+  const before = probesTo(world, T).length;
+  const reached = set.reach("b", 5_000);
+  await clock.advance(5_000);
+  assert.equal(await reached, false);
+  assert.ok(probesTo(world, T).length > before, "dialed out of its backoff");
+  assert.equal(clock.pending() > 0, true, "its retry is scheduled again");
+  const probes = world.probes.length;
+  assert.equal(await set.reach("c"), false);
+  assert.equal(world.probes.length, probes);
   set.dispose();
 });

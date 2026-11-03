@@ -3,11 +3,12 @@
 // Service) run only on their own OS; the command is replaced by a fake runner here, and checked against the real Keychain by
 // the manual round trip in the change notes.
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { OsContext } from '../platform/os.ts'
-import { KEYRING_EXIT, UNLOCK_KEYRING, clearCredentialCache, credentialBackends, credentialFile, credentialStore, keyringArgs, keyringOutcome, readFileToken, removeFileToken, setKeyringRunner, writeFileToken, type KeyringRun, type KeyringRunner } from './credentials.ts'
+import { KEYRING_EXIT, UNLOCK_KEYRING, clearCredentialCache, keychainHelper, setKeychainRunner, credentialBackends, credentialFile, credentialStore, keyringArgs, keyringOutcome, readFileToken, removeFileToken, setKeyringRunner, writeFileToken, type KeyringRun, type KeyringRunner } from './credentials.ts'
 
 const ctx = (platform: NodeJS.Platform, env: Record<string, string> = {}): OsContext => ({ platform, env, home: platform === 'win32' ? 'C:\\Users\\ada' : '/home/ada' })
 const SERVICE = 'dev.kybern.desktop.environments'
@@ -149,4 +150,46 @@ test('the file store keeps the token private: 0600 file in a 0700 folder, replac
     removeFileToken(file)
     expect(readFileToken(file)).toBeNull()
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// ---- macOS: one combined item through the kybern-keychain helper ----
+
+test('macOS keeps every token in one item through the helper, which gets the same arguments as `kybern credentials`', async () => {
+  const runs: { args: string[]; input?: string }[] = []
+  const previousHelper = setKeychainRunner(async (args, input) => {
+    runs.push({ args, input })
+    const account = args[args.indexOf('--account') + 1]!
+    switch (args[1]) {
+      case 'get': return vault.has(account) ? { status: 0, stdout: vault.get(account)!, stderr: '' } : { status: KEYRING_EXIT.notFound, stdout: '', stderr: '' }
+      case 'set': vault.set(account, input!); return { status: 0, stdout: '', stderr: '' }
+      default: return { status: vault.delete(account) ? 0 : KEYRING_EXIT.notFound, stdout: '', stderr: '' }
+    }
+  })
+  try {
+    const mac = ctx('darwin', { KYBERN_CLIENT_CONFIG_DIR: path.join(root, 'cfg'), KYBERN_GPUIX_KEYCHAIN_SERVICE: 'kybern-gpuix-test-unit' })
+    vault.set('machine:old', 'old-token') // what 0.21 left behind
+    const store = credentialStore(mac)
+    await store.write('machine:new', 'new-token')
+    expect(await store.read('machine:old')).toBe('old-token')
+    expect([...vault.keys()]).toEqual(['all'])
+    expect(JSON.parse(vault.get('all')!)).toEqual({ 'machine:new': 'new-token', 'machine:old': 'old-token' })
+    expect(runs[0]!.args).toEqual(keyringArgs('get', 'all', 'kybern-gpuix-test-unit'))
+    expect(runs.every(run => !run.args.join(' ').includes('token'))).toBe(true)
+    await store.remove('machine:new')
+    expect(JSON.parse(vault.get('all')!)).toEqual({ 'machine:old': 'old-token' })
+    await expect(store.read('machine:new')).rejects.toThrow('pair this environment again')
+    // The lock file is gone once each change is done.
+    expect(existsSync(path.join(root, 'cfg', 'kybern-gpuix-test-unit.lock'))).toBe(false)
+    setKeychainRunner(async () => null)
+    clearCredentialCache()
+    await expect(credentialStore(mac).read('machine:old')).rejects.toThrow('kybern-keychain helper')
+  } finally { setKeychainRunner(previousHelper) }
+})
+
+test('the committed helper is the pinned build: a new one asks every user again (packaging/keychain/README.md)', () => {
+  const dir = path.join(import.meta.dir, '../../packaging/keychain')
+  const pin = JSON.parse(readFileSync(path.join(dir, 'pin.json'), 'utf8')) as { sha256: string }
+  expect(createHash('sha256').update(readFileSync(path.join(dir, 'kybern-keychain'))).digest('hex')).toBe(pin.sha256)
+  // From source, the app runs the committed helper; packaged, the copy next to its executable.
+  expect(keychainHelper('/nowhere/bun')).toBe(path.join(dir, 'kybern-keychain'))
 })

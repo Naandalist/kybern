@@ -100,7 +100,7 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Install the GPUIX Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --target aarch64-apple-darwin
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
           no-cache: true

@@ -977,7 +977,7 @@ jobs:
     fn jobs_and_needs_from_kyberns_ci() {
         let jobs = parse_jobs(include_str!("../../../.github/workflows/ci.yml"));
         let ids: Vec<_> = jobs.iter().map(|j| j.id.as_str()).collect();
-        assert_eq!(ids, ["changes", "fmt", "clippy", "test", "windows-check", "release", "gpuix", "ci"]);
+        assert_eq!(ids, ["changes", "fmt", "clippy", "test", "windows-check", "release", "gpuix", "keychain-helper", "ci"]);
         assert_eq!(spec(&jobs, "changes").needs, Vec::<String>::new());
         for (id, name) in [("clippy", "clippy (${{ matrix.os }})"), ("test", "test (${{ matrix.os }})")] {
             let job = spec(&jobs, id);
@@ -988,7 +988,7 @@ jobs:
         assert_eq!(spec(&jobs, "fmt").matrix, None);
         let ci = spec(&jobs, "ci");
         assert_eq!(ci.name, "CI");
-        assert_eq!(ci.needs, ["changes", "fmt", "clippy", "test", "windows-check", "release", "gpuix"]);
+        assert_eq!(ci.needs, ["changes", "fmt", "clippy", "test", "windows-check", "release", "gpuix", "keychain-helper"]);
     }
 
     #[test]

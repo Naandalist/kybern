@@ -458,6 +458,60 @@ impl OpSet {
     pub fn project(&self) -> Projection {
         Projection::build(self)
     }
+
+    /// What a removed machine needs to verify that it was removed (ADE-120), oldest first: every Remove that names
+    /// `machine_id`, and the chain that makes each signer valid under [`OpSet::apply`], i.e. the Genesis or
+    /// earliest Add of the signer, then that operation's own signer, and so on. A Merge that brings in a network
+    /// one of those operations belongs to comes too, with its own chain, since the removed machine may have
+    /// been offline across it. Nothing else of the set is in it: no registers, no other Remove, no Add of a
+    /// machine that signed none of these. Empty when no Remove names the machine.
+    pub fn removal_proof(&self, machine_id: &str) -> Vec<OpEnvelope> {
+        let sorted = self.sorted();
+        // The operation that first made each machine a signer, the way the projection counts it.
+        let mut admitted: BTreeMap<&str, &ParsedOp> = BTreeMap::new();
+        for op in &sorted {
+            if let OpKind::Genesis { machine, .. } | OpKind::Add { machine, .. } = &op.op {
+                admitted.entry(machine.machine_id.as_str()).or_insert(op);
+            }
+        }
+        let mut work: Vec<&ParsedOp> = sorted
+            .iter()
+            .copied()
+            .filter(|op| matches!(&op.op, OpKind::Remove { machine_id: removed, .. } if removed == machine_id))
+            .collect();
+        let mut chosen: BTreeMap<&str, &ParsedOp> = BTreeMap::new();
+        let mut networks: BTreeSet<&str> = BTreeSet::new();
+        loop {
+            while let Some(op) = work.pop() {
+                if chosen.insert(op.id(), op).is_some() {
+                    continue;
+                }
+                networks.insert(op.network_id.as_str());
+                if let OpKind::Merge { other_network_id, .. } = &op.op {
+                    networks.insert(other_network_id.as_str());
+                }
+                if let Some(admitting) = admitted.get(op.signer()) {
+                    work.push(admitting);
+                }
+            }
+            let merges: Vec<&ParsedOp> = sorted
+                .iter()
+                .copied()
+                .filter(|op| !chosen.contains_key(op.id()))
+                .filter(|op| {
+                    matches!(&op.op, OpKind::Merge { other_network_id, .. }
+                        if networks.contains(other_network_id.as_str()) || networks.contains(op.network_id.as_str()))
+                })
+                .collect();
+            if merges.is_empty() {
+                break;
+            }
+            work.extend(merges);
+        }
+        let mut proof: Vec<&ParsedOp> = chosen.into_values().collect();
+        proof.sort_by(|a, b| a.order().cmp(&b.order()));
+        proof.into_iter().map(|op| op.envelope.clone()).collect()
+    }
 }
 
 // ---- the projection ----
@@ -886,5 +940,45 @@ mod tests {
         assert!(projection.is_device_revoked("phone:1.a"), "a later write does not bring a revoked device back");
         assert_eq!(projection.revoked_devices.len(), 1, "an empty device id names nothing");
         assert!(!projection.is_device_revoked("phone"));
+    }
+
+    // ADE-120: a machine that was offline while a later member removed it can verify the proof alone.
+    #[test]
+    fn a_removal_proof_holds_the_removal_and_its_signer_chain_and_nothing_else() {
+        let keys: BTreeMap<&str, MachineKeys> = ["a", "b", "c", "d", "e"].into_iter().map(|id| (id, MachineKeys::generate())).collect();
+        let sign =
+            |signer: &str, lamport: u64, kind: OpKind| seal(&keys[signer], signer, encode_body("net", Utc::now(), lamport, &kind).unwrap());
+        let add =
+            |by: &str, lamport: u64, id: &str| sign(by, lamport, OpKind::Add { machine: descriptor(id, &keys[id]), via: JoinVia::Auto });
+        let genesis = genesis(&keys["a"], "a", "net");
+        let (add_c, add_b) = (add("a", 2, "c"), add("a", 3, "b"));
+        // What b held when it went offline.
+        let offline_view = [genesis.clone(), add_c.clone(), add_b.clone()];
+        // While b was away: c added d and e, wrote a register, and d removed b and e.
+        let (add_d, add_e) = (add("c", 4, "d"), add("c", 5, "e"));
+        let register = sign("c", 6, OpKind::Set { key: "machine.c.name".into(), value: json!("Studio") });
+        let remove = |lamport: u64, id: &str| {
+            sign("d", lamport, OpKind::Remove { machine_id: id.into(), ts_node_id: None, reason: RemoveReason::User })
+        };
+        let (remove_b, remove_e) = (remove(7, "b"), remove(8, "e"));
+        let mut member = OpSet::default();
+        let everything = [&offline_view[..], &[add_d.clone(), add_e, register, remove_b.clone(), remove_e][..]].concat();
+        member.apply(everything.iter().map(|op| parse(op).unwrap()).collect(), true);
+
+        let proof = member.removal_proof("b");
+        let ids: Vec<&str> = proof.iter().map(|op| op.id.as_str()).collect();
+        assert_eq!(ids, vec![genesis.id.as_str(), add_c.id.as_str(), add_d.id.as_str(), remove_b.id.as_str()], "oldest first");
+        assert!(member.removal_proof("c").is_empty(), "no Remove names c");
+
+        // The removed machine verifies it from what it held: the chain makes d a signer it knows.
+        let mut b = OpSet::default();
+        b.apply(offline_view.iter().map(|op| parse(op).unwrap()).collect(), true);
+        let mut alone = b.clone();
+        let refused = alone.apply(vec![parse(&remove_b).unwrap()], false);
+        assert!(refused.accepted.is_empty() && !alone.project().is_removed("b"), "without the chain, d is unknown");
+        let applied = b.apply(proof.iter().map(|op| parse(op).unwrap()).collect(), false);
+        assert!(applied.rejected.is_empty(), "{:?}", applied.rejected);
+        assert!(b.project().is_removed("b"));
+        assert!(!b.project().machines.contains_key("e"), "nothing about e reaches b");
     }
 }

@@ -241,6 +241,66 @@ async fn the_idle_exit_spares_a_daemon_that_keeps_its_machine_reachable() {
     assert!(a.state.shutdown.is_cancelled(), "without the setting the idle exit applies as before");
 }
 
+const SMALL_ID: &str = "00000000-0000-7000-8000-000000000001";
+const LARGE_ID: &str = "ffffffff-ffff-7fff-8fff-ffffffffffff";
+
+/// Watch `node`'s login item with `manager`, as a daemon started at login does.
+fn keep_reachable(node: &crate::network::harness::Node, manager: &Arc<Recording>) {
+    std::fs::write(node.state.paths.root.join("desktop.port"), "59933").unwrap();
+    node.state.login_service.set_manager(manager.clone());
+    node.state.login_service.allow_development_build();
+    tokio::spawn(run(node.state.clone()));
+}
+
+/// ADE-120: `b` is offline when `a` removes it, so no session can carry the removal. When `b` comes back it learns
+/// from `a` all the same, leaves the network and drops its login item. `b_dials` picks the id order: the smaller
+/// id dials, so either `b` asks `a` for a session (and is answered with its removal), or `b` nudges `a` and `a`
+/// dials it to say farewell.
+async fn a_machine_removed_while_offline_learns_it_when_it_comes_back(b_dials: bool) {
+    let Some(cluster) = Cluster::new(&[NodeSpec::owner("a"), NodeSpec::owner("b")]) else { return };
+    let (a_id, b_id) = if b_dials { (LARGE_ID, SMALL_ID) } else { (SMALL_ID, LARGE_ID) };
+    let a = cluster.start_as("a", a_id, false).await;
+    let mut b = cluster.start_as("b", b_id, false).await;
+    let at_b = installed_manager();
+    keep_reachable(&b, &at_b);
+    cluster.form(&a, &[&b], JoinVia::Auto).await;
+    eventually("b registers its login item", WAIT, || at_b.registered()).await;
+    eventually("linked", WAIT, || crate::network::harness::linked(&a, &b)).await;
+
+    // b goes away; a removes it while nothing can reach it.
+    b.stop();
+    b.state.exposure.clear_network().await;
+    eventually("a loses b", WAIT, || a.state.network.peers.link(b_id).is_none()).await;
+    drop(b);
+    crate::network::removal::remove(&a.state, b_id, false, &[]).await.unwrap();
+    assert!(a.membership().projection().is_removed(b_id));
+
+    // b comes back, still taking itself for a member, with the item it registered.
+    let b = cluster.start_as("b", b_id, false).await;
+    assert!(b.membership().self_is_member(), "nothing told b while it was away");
+    keep_reachable(&b, &at_b);
+    eventually("b learns it was removed", WAIT, || b.membership().self_removed()).await;
+    eventually("b removes its login item", WAIT, || !at_b.registered()).await;
+    eventually("b forgets its network state", WAIT, || {
+        b.state.network.peers.links().is_empty() && b.state.network.grants.held().is_empty()
+    })
+    .await;
+    assert!(!wanted(&b.state));
+    // It knows now, so it stops reaching for the network: no link comes back.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert!(a.state.network.peers.link(b_id).is_none() && b.state.network.peers.links().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_removed_while_offline_learns_it_when_it_dials_a_member() {
+    a_machine_removed_while_offline_learns_it_when_it_comes_back(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_removed_while_offline_learns_it_when_a_member_dials_it() {
+    a_machine_removed_while_offline_learns_it_when_it_comes_back(false).await;
+}
+
 #[test]
 fn a_login_item_start_finds_a_daemon_that_already_serves_the_folder() {
     let root = crate::network::testutil::TempDir::new("login-served");

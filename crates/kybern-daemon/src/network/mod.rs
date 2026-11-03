@@ -60,6 +60,8 @@ mod plugin_sync_tests;
 #[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
+mod removal_tests;
+#[cfg(test)]
 mod shared_state_tests;
 #[cfg(test)]
 mod skill_sync_tests;
@@ -144,6 +146,13 @@ pub struct Timing {
     /// How often Tailscale's status is read while a member is not linked, to notice it came back
     /// without waiting for the discovery tick or a long backoff ([`wake_watch`]).
     pub status_poll: Duration,
+    /// The soonest a member tells the same removed machine again that it was removed (ADE-120): a removed machine
+    /// that keeps retrying is answered once per this, and refused plainly in between.
+    pub removal_notice_every: Duration,
+    /// The longest one dial of a member may take, every step of it (well-known, session, socket, upgrade). A dial
+    /// past it is given up and counted as a failure; one in flight when the network changes (a wake, a tailnet change,
+    /// the switch) is given up at once and tried again without waiting.
+    pub dial_deadline: Duration,
 }
 
 impl Default for Timing {
@@ -169,6 +178,8 @@ impl Default for Timing {
             lone_wait: Duration::from_secs(12 * 60),
             resume_tick: Duration::from_secs(5),
             status_poll: Duration::from_secs(30),
+            removal_notice_every: Duration::from_secs(30),
+            dial_deadline: Duration::from_secs(45),
         }
     }
 }
@@ -196,6 +207,8 @@ impl Timing {
             // Long enough that a loaded test runner's stall (four ticks) is not taken for a sleep.
             resume_tick: Duration::from_secs(1),
             status_poll: Duration::from_millis(300),
+            removal_notice_every: Duration::from_secs(1),
+            dial_deadline: Duration::from_secs(3),
         }
     }
 }
@@ -252,6 +265,11 @@ pub struct Network {
     self_ts: Mutex<Option<(Instant, SelfTs)>>,
     watching: Mutex<Option<Instant>>,
     nudged: Mutex<Option<Instant>>,
+    /// When this machine last told each removed machine that it was removed ([`Network::removal_notice_due`]).
+    removal_notices: Mutex<std::collections::HashMap<String, Instant>>,
+    /// Removed machines that nudged this machine, so still take themselves for members: the next discovery pass
+    /// that finds one dials it to say farewell ([`Network::take_farewell_wanted`]).
+    farewell_wanted: Mutex<std::collections::BTreeSet<String>>,
     /// Features that come and go while the daemon runs (computer use is listed only while this
     /// machine's tools are ready). Appended to [`Network::features`] after the static list.
     dynamic_features: Mutex<std::collections::BTreeSet<&'static str>>,
@@ -306,6 +324,8 @@ impl Network {
             self_ts: Default::default(),
             watching: Default::default(),
             nudged: Default::default(),
+            removal_notices: Default::default(),
+            farewell_wanted: Default::default(),
             dynamic_features: Default::default(),
             wake: Notify::new(),
             changed: broadcast::channel(16).0,
@@ -358,16 +378,20 @@ impl Network {
             features::SECRETS_STORE_V1.to_string(),
             features::LOGIN_BROKER_V1.to_string(),
             features::UPDATE_V1.to_string(),
+            features::APP_UPDATE_V1.to_string(),
             features::FILES_PUSH_V1.to_string(),
             features::PORTS_V1.to_string(),
             features::PORTS_DIRECT_V1.to_string(),
             features::PORTS_DIRECT_V2.to_string(),
+            features::PORTS_CACHE_V1.to_string(),
+            features::PORTS_ROUTE_V1.to_string(),
             features::RELAY_FRAMES_V2.to_string(),
             features::CLIPBOARD_V1.to_string(),
             features::GROUP_V1.to_string(),
             features::PROVISION_V1.to_string(),
             features::SKILLS_SYNC_V1.to_string(),
             features::PLUGINS_SYNC_V1.to_string(),
+            features::REMOVAL_PROOF_V1.to_string(),
         ];
         list.extend(self.lock(&self.dynamic_features).iter().map(|feature| feature.to_string()));
         list
@@ -434,6 +458,26 @@ impl Network {
         let _ = self.changed.send(());
     }
 
+    /// Whether a removed machine may be told now, again, that it was removed (ADE-120): once per
+    /// [`Timing::removal_notice_every`] for each, whichever way it reaches this machine, so one that keeps retrying
+    /// costs a plain refusal in between. The table is bounded.
+    pub(crate) fn removal_notice_due(&self, machine_id: &str) -> bool {
+        let every = self.timing.removal_notice_every;
+        let mut notices = self.lock(&self.removal_notices);
+        let now = Instant::now();
+        if notices.get(machine_id).is_some_and(|at| now.duration_since(*at) < every) {
+            return false;
+        }
+        if notices.len() >= 256 {
+            notices.retain(|_, at| now.duration_since(*at) < every);
+            if notices.len() >= 256 {
+                return false;
+            }
+        }
+        notices.insert(machine_id.to_string(), now);
+        true
+    }
+
     /// Someone on the tailnet asked this machine who it is. If it is a Kybern machine that has just
     /// started, it wants to be found: look at the tailnet again now. This is how a machine that starts
     /// after its peer gets noticed without waiting a tick. `node_id` is the caller's tailnet node when
@@ -453,6 +497,10 @@ impl Network {
             self.wake();
             return;
         };
+        if let Some(machine_id) = self.removed_at_node(node_id) {
+            // A removed machine that nudges does not know it was removed (one that knows dials and nudges no one).
+            self.lock(&self.farewell_wanted).insert(machine_id);
+        }
         if let Some(machine_id) = self.member_at_node(node_id) {
             if self.peers.nudge_due(&format!("member:{node_id}"), every.min(Duration::from_secs(2))) {
                 self.peers.reset_pair(&machine_id);
@@ -471,6 +519,24 @@ impl Network {
     fn member_at_node(&self, node_id: &str) -> Option<String> {
         let projection = self.membership.as_ref()?.projection();
         projection.members().find(|(_, entry)| entry.descriptor.ts_node_id.as_deref() == Some(node_id)).map(|(id, _)| id.clone())
+    }
+
+    /// The removed machine that ran on a tailnet node, when no member runs there now.
+    fn removed_at_node(&self, node_id: &str) -> Option<String> {
+        let projection = self.membership.as_ref()?.projection();
+        if projection.members().any(|(_, entry)| entry.descriptor.ts_node_id.as_deref() == Some(node_id)) {
+            return None;
+        }
+        projection
+            .machines
+            .iter()
+            .find(|(_, entry)| entry.removed.is_some() && entry.descriptor.ts_node_id.as_deref() == Some(node_id))
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Whether a removed machine nudged this machine since it was last told; it is told at most once per nudge.
+    pub(crate) fn take_farewell_wanted(&self, machine_id: &str) -> bool {
+        self.lock(&self.farewell_wanted).remove(machine_id)
     }
 
     /// Close the session with a member and revoke the grants it holds; the member reconnects with a new

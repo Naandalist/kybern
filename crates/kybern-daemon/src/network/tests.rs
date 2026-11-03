@@ -266,6 +266,7 @@ fn signed_request(from: &Node, to: &Node, scopes: &[Scope]) -> SessionRequest {
         scopes: scopes.iter().map(|scope| scope.as_str().to_string()).collect(),
         renews: None,
         sig: String::new(),
+        features: vec![],
     };
     request.sig = B64.encode(from.membership().keys().sign(&session::request_message(&request)));
     request
@@ -949,4 +950,67 @@ async fn network_changed_builds_one_status_per_change_for_every_connection() {
     a.state.network.notify_changed();
     tokio::time::timeout(WAIT, third.changed()).await.unwrap().unwrap();
     assert!(third.borrow().is_some());
+}
+
+// ---- a dial that never answers (0.21.3 on a sleeping laptop behind a hard NAT) ----
+
+/// Answer `node`'s identity and session handshake on its tailnet address, but never the session socket's WebSocket
+/// upgrade: the state of a path that died after the upgrade request left (the laptop slept, the NAT mapping went away).
+async fn stalling_front(cluster: &Cluster, node: &Node) -> tokio::task::JoinHandle<()> {
+    use axum::routing::get;
+    let listener = tokio::net::TcpListener::bind((cluster.listen_ip(&node.name), *peers::PORT_RANGE.start())).await.unwrap();
+    let app = Router::new().merge(super::routes()).route("/ws", get(std::future::pending::<&'static str>)).with_state(node.state.clone());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dial_that_never_answers_does_not_stop_the_worker_and_a_wake_or_the_switch_starts_over() {
+    let Some(cluster) = Cluster::new(&three()) else { return };
+    // `a` has the smallest id, so it dials both others. `c`'s daemon runs without its worker: only the stalling front
+    // listens on its tailnet address.
+    let a = cluster.start_as("a", "00000000-0000-7000-8000-000000000001", false).await;
+    let b = cluster.start_as("b", "ffffffff-ffff-7fff-8fff-ffffffffffff", false).await;
+    let c = cluster.start("c", false).await;
+    cluster.form(&a, &[&b, &c], JoinVia::Auto).await;
+    let front = stalling_front(&cluster, &c).await;
+    a.state.network.wake();
+    eventually("a and b linked", WAIT, || linked(&a, &b)).await;
+
+    // The dial to c hangs in its upgrade: one pass still ends, within the dial deadline (3 s in the fast timing).
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(15), a.pass()).await.expect("a pass ends although c never answers");
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(a.state.network.peers.status(&c.id()).failures > 0, "the hung dial counts as a failure");
+
+    // The worker keeps working for everyone else: b's session drops and comes back while c still hangs.
+    a.state.network.peers.close(&b.id());
+    eventually("b back while c hangs", WAIT, || linked(&a, &b)).await;
+
+    // A wake gives up a dial in flight at once (its deadline is 3 s away) and ends the wait after failures.
+    a.state.network.peers.reset_pair(&c.id());
+    let pass = {
+        let state = a.state.clone();
+        tokio::spawn(async move { peers::pass(&state).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!pass.is_finished(), "the dial to c hangs");
+    let woke = tokio::time::Instant::now();
+    a.state.network.after_resume();
+    tokio::time::timeout(Duration::from_secs(2), pass).await.expect("the wake gave the hung dial up").unwrap();
+    assert!(woke.elapsed() < Duration::from_millis(1500), "{:?}", woke.elapsed());
+    assert_eq!(a.state.network.peers.status(&c.id()).failures, 0, "a dial given up for a wake is no failure of c");
+
+    // c answers again (its daemon's worker opens its real listener): the switch, off and on, finds it at once.
+    front.abort();
+    let _ = front.await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut c = c;
+    c.stop();
+    let c = cluster.start("c", true).await;
+    super::manage::set_enabled(&a.state, false).await.unwrap();
+    super::manage::set_enabled(&a.state, true).await.unwrap();
+    eventually("a and c linked after the switch", WAIT, || linked(&a, &c)).await;
+    eventually("a and b linked after the switch", WAIT, || linked(&a, &b)).await;
 }

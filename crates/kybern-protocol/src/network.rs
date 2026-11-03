@@ -40,6 +40,14 @@ pub mod features {
     /// sockets ready before the browser asks (pre-warmed), and one socket can carry an HTTP/2 connection that the
     /// target spreads over pooled HTTP/1.1 connections to its dev server (the Fast mode of a preview).
     pub const PORTS_DIRECT_V2: &str = "ports.direct.v2";
+    /// A forward's HTTP/2 connection (mode `H`) also takes one batched revalidation request: the viewing machine
+    /// sends the validators of the responses it keeps, this machine checks each against its dev server over
+    /// loopback, and only changed bodies come back (ADE-126).
+    pub const PORTS_CACHE_V1: &str = "ports.cache.v1";
+    /// Port routes through another member (ADE-126): `peer.ports.hop` (this machine relays a member's forward
+    /// connections to a third machine), `peer.ports.via` (this machine accepts a forward's connections relayed by
+    /// a named member), and a timed throughput probe (mode `P`) on ready sockets.
+    pub const PORTS_ROUTE_V1: &str = "ports.route.v1";
     /// Relay and port stream data travels as binary WebSocket frames, without base64 or JSON, and a stream's
     /// credit window is [`crate::RELAY_WINDOW_V2`] instead of 256 KiB.
     pub const RELAY_FRAMES_V2: &str = "relay.frames.v2";
@@ -49,6 +57,9 @@ pub mod features {
     pub const LOGIN_BROKER_V1: &str = "login.broker.v1";
     /// `peer.update.start`: another member can ask this machine to update itself.
     pub const UPDATE_V1: &str = "update.v1";
+    /// A daemon the desktop app manages answers `peer.update.start` by updating the app: through an open window,
+    /// or by itself while the app is closed (ADE-125). Older versions answer "Updates with the app" instead.
+    pub const APP_UPDATE_V1: &str = "update.app.v1";
     /// A group project's thread (several repositories) can be forked, moved or delegated to this machine:
     /// `group` in `peer.fork`, `peer.move.prepare` and `peer.delegate`, `group_repos` in `peer.git.import`.
     pub const GROUP_V1: &str = "group.v1";
@@ -65,9 +76,13 @@ pub mod features {
     /// pass `machine` to use apps here. Listed in presence only while that is true, so it is not part
     /// of [`ALL`].
     pub const COMPUTER_USE_V1: &str = "computer.use.v1";
+    /// A machine that asks for a session after it was removed is answered with the signed operations that
+    /// removed it (a 403 with a `RemovalNotice` body), so one that was offline at its removal learns of it.
+    /// A session request lists it in its `features` to ask for that answer.
+    pub const REMOVAL_PROOF_V1: &str = "removal.proof.v1";
 
     /// Every feature the network design names, in design order.
-    pub const ALL: [&str; 23] = [
+    pub const ALL: [&str; 27] = [
         NETWORK_V1,
         SPACES_SYNC_V1,
         RELAY_V1,
@@ -80,17 +95,21 @@ pub mod features {
         PORTS_V1,
         PORTS_DIRECT_V1,
         PORTS_DIRECT_V2,
+        PORTS_CACHE_V1,
+        PORTS_ROUTE_V1,
         RELAY_FRAMES_V2,
         SETTINGS_FANOUT_V1,
         NOTES_FEDERATED_V1,
         SECRETS_STORE_V1,
         LOGIN_BROKER_V1,
         UPDATE_V1,
+        APP_UPDATE_V1,
         GROUP_V1,
         PROVISION_V1,
         SKILLS_SYNC_V1,
         PLUGINS_SYNC_V1,
         RELAY_PAGE_V1,
+        REMOVAL_PROOF_V1,
     ];
 }
 

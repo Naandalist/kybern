@@ -16,6 +16,25 @@ export function lastSeen(ms: number | undefined, now = Date.now()): string {
   return ago === 'now' ? 'last seen just now' : /^\d+[mhdw]$/.test(ago) ? `last seen ${ago} ago` : `last seen ${ago}`
 }
 
+/**
+ * A machine the daemon the user is at reports online while this app's own connection to it is down (ADE-124): it is
+ * online, so it never reads "Offline", and the note says this computer is still getting to it.
+ */
+export function reachText(connecting: boolean): string {
+  return connecting ? 'Online · connecting…' : 'Online · not reachable from this computer yet'
+}
+
+/**
+ * This app reaches the machine but the daemon of this computer has no session to it: delegation, port forwards, previews
+ * and relays to it fail until that link is back, so the machine never reads a plain "Online".
+ */
+export const LINK_DOWN_TEXT = "Online · this computer's link is reconnecting"
+
+/** Whether a machine this app reaches is one the daemon here reports without a session (`daemon` is its card's status). */
+export function daemonLinkDown(connection: StatusInput['status'], daemon?: string | null, isLocal = false): boolean {
+  return !isLocal && connection === 'online' && daemon === 'offline'
+}
+
 export function statusText(machine: StatusInput, now = Date.now()): string {
   switch (machine.status) {
     case 'online': return 'Online'
@@ -36,10 +55,14 @@ export function shownStatus(connection: StatusInput['status'], daemon?: string |
   return connection === 'offline' && daemon === 'online' ? 'online' : connection
 }
 
-/** The footer line: "4 machines · 1 offline · 1 paused", and "· 2 waiting" while the outbox holds work for machines that are away. A paused machine is on purpose, so it is not "offline". */
-export function footerText(machines: readonly { offline: boolean; paused?: boolean }[], waiting = 0): string {
+/**
+ * The footer line: "4 machines · 1 offline · 1 paused", and "· 2 waiting" while the outbox holds work for machines that are away.
+ * A paused machine is on purpose, so it is not "offline", and neither is one only saved on this device (`member: false`):
+ * "offline" counts machines of the network (ADE-124).
+ */
+export function footerText(machines: readonly { offline: boolean; paused?: boolean; member?: boolean }[], waiting = 0): string {
   const paused = machines.filter((machine) => machine.paused).length
-  const offline = machines.filter((machine) => machine.offline && !machine.paused).length
+  const offline = machines.filter((machine) => machine.offline && !machine.paused && machine.member !== false).length
   const parts = [`${machines.length} machines`]
   if (offline) parts.push(`${offline} offline`)
   if (paused) parts.push(`${paused} paused`)

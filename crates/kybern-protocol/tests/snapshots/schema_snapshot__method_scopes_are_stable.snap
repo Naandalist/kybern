@@ -74,6 +74,10 @@ expression: scopes
   - "orchestration:operate"
 - - daemon_update.run
   - "orchestration:operate"
+- - app_updater.attach
+  - "orchestration:operate"
+- - app_updater.report
+  - "orchestration:operate"
 - - projects.list
   - "orchestration:read"
 - - projects.browse
@@ -569,6 +573,12 @@ expression: scopes
 - - peer.ports.release
   - "machine:peer"
 - - peer.ports.open
+  - "machine:ports"
+- - peer.ports.via
+  - "machine:ports"
+- - peer.ports.hop
+  - "machine:relay"
+- - peer.ports.hop_check
   - "machine:ports"
 - - peer.ports.data
   - "machine:peer"

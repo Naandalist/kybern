@@ -63,6 +63,7 @@ fn main() {
     add::<TaskItem>(&mut types, "TaskItem");
     add::<TaskItemsChangedNotification>(&mut types, "TaskItemsChangedNotification");
     add::<ProjectsChangedNotification>(&mut types, "ProjectsChangedNotification");
+    add::<AppUpdateRequestedNotification>(&mut types, "AppUpdateRequestedNotification");
     add::<Space>(&mut types, "Space");
     add::<SpacesChangedNotification>(&mut types, "SpacesChangedNotification");
     add::<ThreadsWorkspaceProgress>(&mut types, "ThreadsWorkspaceProgress");
@@ -125,6 +126,8 @@ fn main() {
     method::<DaemonUpdateStatusMethod>(&mut methods);
     method::<DaemonUpdateCheck>(&mut methods);
     method::<DaemonUpdateRun>(&mut methods);
+    method::<AppUpdaterAttach>(&mut methods);
+    method::<AppUpdaterReport>(&mut methods);
     method::<ProjectsList>(&mut methods);
     method::<ProjectsBrowse>(&mut methods);
     method::<ProjectsAdd>(&mut methods);
@@ -356,6 +359,9 @@ fn main() {
     method::<PeerPortsPrepare>(&mut methods);
     method::<PeerPortsRelease>(&mut methods);
     method::<PeerPortsOpen>(&mut methods);
+    method::<PeerPortsVia>(&mut methods);
+    method::<PeerPortsHop>(&mut methods);
+    method::<PeerPortsHopCheck>(&mut methods);
     method::<PeerPortsData>(&mut methods);
     method::<PeerPortsClose>(&mut methods);
     method::<PluginsInventory>(&mut methods);

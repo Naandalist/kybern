@@ -15,6 +15,10 @@
 //! * Speed (ADE-116): a forward to a `ports.direct.v2` machine keeps authorized sockets ready, so a browser connection
 //!   starts without a round trip ([`direct::Route`]), and can also serve `https://localhost:<https_port>` over HTTP/2
 //!   for Kybern's web views ([`fast`]), which multiplexes every request of a page over one connection to the target.
+//! * Slow links (ADE-126): on such a forward the plain listener also parses HTTP when the browser speaks it ([`http`]), so
+//!   every request travels over that one connection too: the target compresses text, this machine shows how far a slow
+//!   page has loaded ([`load`]) and keeps responses for the next load ([`cache`]). When another member reaches the target
+//!   much faster than the direct route, new connections go through it ([`hop`]).
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -35,8 +39,12 @@ use super::peers::PeerLink;
 use super::relay::{self, Chunk, Slot, Stream, StreamKind, frame_cost};
 use crate::state::AppState;
 
+pub mod cache;
 pub mod direct;
 pub mod fast;
+pub mod hop;
+pub mod http;
+pub mod load;
 pub mod tls;
 
 const TARGET: &str = "kybern::network::ports";
@@ -71,11 +79,27 @@ struct Forward {
     /// Starting the HTTPS listener happens once.
     https_start: tokio::sync::Mutex<()>,
     tunnel: fast::Tunnel,
+    /// The target revalidates batches and keeps the dev server's own tags (`ports.cache.v1`): responses are kept here.
+    caching: bool,
+    cache: cache::Cache,
+    load: load::LoadMeter,
+    /// The member new connections go through, and the direct route to return to when it stops answering.
+    via: std::sync::Mutex<Option<(PortRouteVia, Arc<direct::Route>)>>,
+    /// A route choice ([`hop::choose`]) runs.
+    choosing: std::sync::atomic::AtomicBool,
 }
 
 impl Forward {
     fn route_now(&self) -> Option<Arc<direct::Route>> {
         self.route.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.clone()
+    }
+
+    fn caches(&self) -> bool {
+        self.caching
+    }
+
+    fn via_now(&self) -> Option<PortRouteVia> {
+        self.via.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().map(|(via, _)| via.clone())
     }
 
     fn view(&self) -> PortForward {
@@ -93,6 +117,8 @@ impl Forward {
             https_port: https.as_ref().map(|(port, _)| *port),
             https_certificate: https.as_ref().map(|(_, cert)| cert.pem.clone()),
             https_certificate_sha256: https.as_ref().map(|(_, cert)| cert.sha256.clone()),
+            route_via: self.via_now(),
+            loading: self.load.view(),
         }
     }
 }
@@ -102,6 +128,10 @@ impl Forward {
 pub struct Forwards {
     list: std::sync::Mutex<Vec<Arc<Forward>>>,
     pub direct: direct::Listeners,
+    /// The forwards this machine relays for other members.
+    pub hops: hop::Hops,
+    /// Which route each target's forwards take.
+    book: hop::Book,
     certs: std::sync::OnceLock<tls::CertStore>,
 }
 
@@ -134,6 +164,7 @@ impl Forwards {
     /// Close every forward (the daemon is shutting down, or the network was turned off).
     pub fn close_all(&self) {
         self.direct.close_all();
+        self.hops.close_all();
         for forward in self.lock().drain(..) {
             forward.cancel.cancel();
         }
@@ -249,6 +280,11 @@ pub async fn forward_to(
         https: std::sync::Mutex::new(None),
         https_start: tokio::sync::Mutex::new(()),
         tunnel: fast::Tunnel::default(),
+        caching: network.peers.status(machine_id).presence.is_some_and(|p| p.features.iter().any(|f| f == features::PORTS_CACHE_V1)),
+        cache: cache::Cache::default(),
+        load: load::LoadMeter::default(),
+        via: std::sync::Mutex::new(None),
+        choosing: Default::default(),
         connections: AtomicU32::new(0),
         cancel,
     });
@@ -270,6 +306,8 @@ pub async fn forward_to(
     tokio::spawn(accept_loop(network.clone(), shutdown.clone(), forward.clone(), listener));
     if let Some(route) = forward.route_now() {
         tokio::spawn(route.keep_warm(network.clone()));
+        // Only a route already chosen for this target is taken now; measuring waits for a slow load or its end.
+        tokio::spawn(hop::use_booked(network.clone(), forward.clone()));
     }
     if https && let Err(error) = start_https(network, &forward).await {
         tracing::info!(target: TARGET, machine = machine_id, error = %error.message, "the forward has no HTTPS listener");
@@ -355,11 +393,106 @@ async fn current_route(network: &Arc<Network>, forward: &Arc<Forward>) -> Option
     if let Some(old) = old.0 {
         old.stop();
     }
+    // A member's route belonged to the old listener: start from the direct one and choose again.
+    if let Some((via, direct)) = forward.via.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+        direct.stop();
+        hop::release(network, &forward.machine_id, &via.machine_id, forward.id);
+    }
     if let Some(route) = &route {
         tokio::spawn(route.clone().keep_warm(network.clone()));
+        tokio::spawn(hop::use_booked(network.clone(), forward.clone()));
     }
     tracing::info!(target: TARGET, machine = %forward.machine_id, remote_port = forward.remote_port, direct = route.is_some(), "prepared a forward again on a new session");
     route
+}
+
+/// New connections of `forward` go through a member's `route` from now on; `direct` is kept to return to.
+fn take_route(network: &Arc<Network>, forward: &Arc<Forward>, direct: &Arc<direct::Route>, route: Arc<direct::Route>) {
+    let Some(hop) = route.hop.clone() else { return };
+    {
+        let mut held = forward.route.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The session changed while measuring: that route is gone with it.
+        if !held.0.as_ref().is_some_and(|current| Arc::ptr_eq(current, direct)) {
+            route.stop();
+            hop::release(network, &forward.machine_id, &hop.machine_id, forward.id);
+            return;
+        }
+        held.0 = Some(route.clone());
+        // Under the route's lock, so a new session never sees the route without its member, or the reverse.
+        *forward.via.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((PortRouteVia { machine_id: hop.machine_id.clone(), machine_name: hop.machine_name.clone() }, direct.clone()));
+    }
+    tokio::spawn(route.keep_warm(network.clone()));
+    announce(network);
+    tracing::info!(target: TARGET, machine = %forward.machine_id, via = %hop.machine_name, "a forward now goes through another member");
+}
+
+/// A member's route stopped answering: back to the direct route, and that member is not chosen again for a while.
+fn fall_back(network: &Arc<Network>, forward: &Arc<Forward>, failed: &Arc<direct::Route>) -> Option<Arc<direct::Route>> {
+    let mut held = forward.route.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !held.0.as_ref().is_some_and(|current| Arc::ptr_eq(current, failed)) {
+        return held.0.clone();
+    }
+    let (via, direct) = forward.via.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()?;
+    held.0 = Some(direct.clone());
+    drop(held);
+    failed.stop();
+    hop::forget(network, &forward.machine_id);
+    hop::release(network, &forward.machine_id, &via.machine_id, forward.id);
+    // The direct route's ready sockets were kept warm all along.
+    announce(network);
+    tracing::info!(target: TARGET, machine = %forward.machine_id, via = %via.machine_name, "a member's route stopped answering; back to the direct route");
+    Some(direct)
+}
+
+/// Tell clients about a forward's load while it runs and [`load::looks_slow`], after [`load::ANNOUNCE_AFTER`] and at most
+/// every [`load::ANNOUNCE_EVERY`], and once more when it stops showing. A slow load, or the end of a load, is also when
+/// the forward's routes through other members are measured ([`hop::choose`]), so probes never compete with a fast page.
+fn watch_load(network: &Arc<Network>, forward: &Arc<Forward>) {
+    if !forward.load.start_ticking() {
+        return;
+    }
+    let (network, forward) = (network.clone(), forward.clone());
+    tokio::spawn(async move {
+        let mut announced: Option<Instant> = None;
+        let mut measured = false;
+        loop {
+            tokio::select! {
+                _ = forward.cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            let view = forward.load.view();
+            let showing =
+                view.as_ref().is_some_and(|load| load.elapsed_ms >= load::ANNOUNCE_AFTER.as_millis() as u64 && load::looks_slow(load));
+            if showing {
+                if announced.is_none_or(|at| at.elapsed() >= load::ANNOUNCE_EVERY) {
+                    announce(&network);
+                    announced = Some(Instant::now());
+                }
+                if !measured {
+                    measured = true;
+                    tokio::spawn(hop::choose(network.clone(), forward.clone()));
+                }
+            } else if announced.take().is_some() {
+                // The load ended or no longer looks slow: say so once, so the notice goes away.
+                announce(&network);
+            }
+            if view.is_none() && !forward.load.active() {
+                break;
+            }
+        }
+        forward.load.stop_ticking();
+        if announced.is_some() {
+            announce(&network);
+        }
+        if !measured && !forward.cancel.is_cancelled() {
+            tokio::spawn(hop::choose(network.clone(), forward.clone()));
+        }
+        // A request that began while this task was ending starts it again.
+        if forward.load.active() && !forward.cancel.is_cancelled() {
+            watch_load(&network, &forward);
+        }
+    });
 }
 
 /// Open the HTTPS (HTTP/2) listener of a forward, once.
@@ -461,6 +594,9 @@ async fn accept_loop(network: Arc<Network>, shutdown: CancellationToken, forward
     {
         let _ = link.notify(PeerPortsRelease::NAME, json!({"forward_id": forward.id})).await;
     }
+    if let Some(via) = forward.via_now() {
+        hop::release(&network, &forward.machine_id, &via.machine_id, forward.id);
+    }
     network.ports.remove(forward.id);
     announce(&network);
 }
@@ -485,15 +621,36 @@ async fn connection(network: Arc<Network>, forward: Arc<Forward>, mut socket: Tc
     let _ = socket.set_nodelay(true);
     let Some(link) = network.peers.link(&forward.machine_id) else { return };
     if let Some(route) = current_route(&network, &forward).await {
+        // A browser speaking HTTP/1.x is served here, every request over the forward's one HTTP/2 connection: compressed,
+        // counted and cached. Anything else stays a byte-for-byte socket.
+        let opened = if route.ready_sockets() {
+            match http::sniff(&network, &route, &socket).await {
+                http::Sniffed::Http => return http::serve_plain(network, forward, socket).await,
+                http::Sniffed::Raw(opened) => opened,
+            }
+        } else {
+            None
+        };
         // Over the limit, the browser's connection waits for a place rather than being closed.
         let key = format!("ports:{}", link.machine_id);
         let Some(_slot) = network.relays.acquire_wait(&key, relay::MAX_STREAMS_PER_CLIENT, direct::QUEUE_WAIT, &forward.cancel).await
         else {
             return;
         };
-        let remote = tokio::select! {
-            _ = forward.cancel.cancelled() => return,
-            remote = route.open(&network, direct::MODE_RAW) => remote,
+        let remote = match opened {
+            Some(opened) => Some(opened),
+            None => tokio::select! {
+                _ = forward.cancel.cancelled() => return,
+                remote = route.open(&network, direct::MODE_RAW) => remote,
+            },
+        };
+        // A member's route that stopped answering: the direct route takes this connection and the next ones.
+        let remote = match remote {
+            None if route.hop.is_some() => match fall_back(&network, &forward, &route) {
+                Some(direct) => direct.open(&network, direct::MODE_RAW).await,
+                None => None,
+            },
+            remote => remote,
         };
         if let Some(mut remote) = remote {
             tokio::select! {
@@ -780,6 +937,11 @@ mod tests {
             https: std::sync::Mutex::new(None),
             https_start: tokio::sync::Mutex::new(()),
             tunnel: fast::Tunnel::default(),
+            caching: false,
+            cache: cache::Cache::default(),
+            load: load::LoadMeter::default(),
+            via: std::sync::Mutex::new(None),
+            choosing: Default::default(),
             connections: AtomicU32::new(0),
             cancel: CancellationToken::new(),
         };

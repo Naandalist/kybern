@@ -1,7 +1,10 @@
 // The same generic-password service/account as the Tauri client (its `keyring` crate), on each platform's own store. Secrets
 // never enter environments.json, command arguments, logs, or UI persistence.
 //
-// - macOS: the Keychain, through Security.framework, in process (unchanged).
+// - macOS: the Keychain, through the bundled `kybern-keychain` helper (packaging/keychain), never in process. The login
+//   keychain lets only the creating program's exact build (its cdhash) read an item without asking for the keychain
+//   password, and the app's executable changes with every release; the helper's bytes do not. All tokens live in one
+//   item (`combinedKeychain.ts`), so a new helper would cost one prompt, not one per environment.
 // - Windows and Linux: the bundled `kybern credentials get|set|delete` command (crates/kybern-cli/src/credentials.rs), which
 //   is the `keyring` crate the Tauri client uses, so both clients share one set of entries on Credential Manager and the
 //   Secret Service. It runs asynchronously (an unlock prompt can take a while), the secret travels on stdin and stdout, and
@@ -9,10 +12,12 @@
 // - A locked or dismissed keyring is an error: never a reason to write the token to a plain file. Only a machine with no
 //   Secret Service or D-Bus at all (the command exits 5) stores it in a 0600 file under the GPUIX data folder instead.
 // - A scratch run (`KYBERN_GPUIX_CREDENTIALS_DIR`) uses only that folder, on every platform.
-import { dlopen, FFIType as F, ptr, read, toArrayBuffer, type Pointer } from 'bun:ffi'
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { combinedKeychain, type CombinedKeychain, type KeychainItems } from './combinedKeychain.ts'
 import { gpuixLocalDir, osContext, osName, pathFor, type OsContext } from '../platform/os.ts'
 import { bundledCommand } from '../shell/daemon.ts'
 
@@ -24,7 +29,6 @@ function serviceName(ctx: OsContext = osContext()): string {
   if (!ctx.env.KYBERN_CLIENT_CONFIG_DIR || !/^kybern-gpuix-test-[\w-]+$/.test(scratch)) throw new Error('A scratch Keychain service needs KYBERN_CLIENT_CONFIG_DIR and a kybern-gpuix-test-… name')
   return scratch
 }
-const service = (ctx: OsContext = osContext()) => Buffer.from(serviceName(ctx))
 
 export type CredentialBackend = 'scratch-file' | 'keychain' | 'keyring' | 'file'
 /** The stores to try, best first. A write goes to the first that works; a read takes the first that has the token; a remove clears all. */
@@ -54,37 +58,6 @@ export function removeFileToken(file: string) {
   try { unlinkSync(file) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e }
 }
 
-// ---- macOS: Keychain ----
-
-const MISSING = -25300
-function framework() {
-  const security = dlopen('/System/Library/Frameworks/Security.framework/Security', {
-    SecKeychainFindGenericPassword: { args: [F.ptr, F.u32, F.ptr, F.u32, F.ptr, F.ptr, F.ptr, F.ptr], returns: F.i32 },
-    SecKeychainAddGenericPassword: { args: [F.ptr, F.u32, F.ptr, F.u32, F.ptr, F.u32, F.ptr, F.ptr], returns: F.i32 },
-    SecKeychainItemModifyAttributesAndData: { args: [F.ptr, F.ptr, F.u32, F.ptr], returns: F.i32 },
-    SecKeychainItemFreeContent: { args: [F.ptr, F.ptr], returns: F.i32 },
-    SecKeychainItemDelete: { args: [F.ptr], returns: F.i32 },
-  })
-  const cf = dlopen('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation', { CFRelease: { args: [F.ptr], returns: F.void } })
-  return { ...security.symbols, ...cf.symbols }
-}
-let native: ReturnType<typeof framework> | undefined
-function api() {
-  if (process.platform !== 'darwin') throw new Error('The Keychain exists on macOS only')
-  return native ??= framework()
-}
-function checked(status: number) {
-  if (status) throw new Error(`Unlock the system credential store or pair this environment again (Keychain ${status})`)
-}
-function find(id: string, secret: boolean) {
-  const SERVICE = service(), account = Buffer.from(id)
-  const length = new Uint32Array(1)
-  const data = new BigUint64Array(1)
-  const item = new BigUint64Array(1)
-  const status = api().SecKeychainFindGenericPassword(null, SERVICE.length, ptr(SERVICE), account.length, ptr(account), secret ? ptr(length) : null, secret ? ptr(data) : null, ptr(item))
-  return { status, length: length[0]!, data: read.ptr(ptr(data)) as Pointer, item: read.ptr(ptr(item)) as Pointer }
-}
-
 // ---- Windows and Linux: the bundled `kybern credentials` command ----
 
 /** Exit codes of `kybern credentials` (crates/kybern-cli/src/credentials.rs). */
@@ -98,8 +71,8 @@ export function keyringArgs(op: 'get' | 'set' | 'delete', id: string, serviceId:
   return ['credentials', op, '--service', serviceId, '--account', id]
 }
 const KEYRING_TIMEOUT_MS = 120_000
-const runKeyringCommand: KeyringRunner = (args, input) => new Promise((resolve, reject) => {
-  const command = bundledCommand('kybern')
+/** Runs `command …args`, the secret on stdin; `null` when the command is missing. */
+const runCommand = (command: string | undefined, args: string[], input?: string) => new Promise<KeyringRun | null>((resolve, reject) => {
   if (!command) return resolve(null)
   let child
   try { child = spawn(command, args, { stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], windowsHide: true }) } catch (error) { return reject(error) }
@@ -113,6 +86,7 @@ const runKeyringCommand: KeyringRunner = (args, input) => new Promise((resolve, 
   child.on('close', status => finish({ status, stdout, stderr }))
   if (input !== undefined) { child.stdin!.on('error', () => {}); child.stdin!.end(input) }
 })
+const runKeyringCommand: KeyringRunner = (args, input) => runCommand(bundledCommand('kybern'), args, input)
 let keyringRunner: KeyringRunner = runKeyringCommand
 /** Replace the command runner (tests); returns the previous one. */
 export function setKeyringRunner(runner: KeyringRunner | null): KeyringRunner {
@@ -121,6 +95,105 @@ export function setKeyringRunner(runner: KeyringRunner | null): KeyringRunner {
   return previous
 }
 
+// ---- macOS: the `kybern-keychain` helper ----
+
+/** The helper next to the app's executable (`Contents/MacOS`), or the committed one when running from source. */
+export function keychainHelper(execPath = process.execPath): string | undefined {
+  const candidates = [path.join(path.dirname(execPath), 'kybern-keychain'), fileURLToPath(new URL('../../packaging/keychain/kybern-keychain', import.meta.url))]
+  return candidates.find(candidate => existsSync(candidate) && statSync(candidate).isFile())
+}
+const runKeychainHelper: KeyringRunner = (args, input) => runCommand(keychainHelper(), args, input)
+let keychainRunner: KeyringRunner = runKeychainHelper
+/** Replace the helper runner (tests); returns the previous one. */
+export function setKeychainRunner(runner: KeyringRunner | null): KeyringRunner {
+  const previous = keychainRunner
+  keychainRunner = runner ?? runKeychainHelper
+  return previous
+}
+/** One service's raw items through the helper; it speaks the `kybern credentials` contract. */
+export function helperItems(serviceId: string, run: () => KeyringRunner = () => keychainRunner): KeychainItems {
+  const call = async (op: 'get' | 'set' | 'delete', account: string, input?: string) => {
+    const result = await run()(keyringArgs(op, account, serviceId), input)
+    if (!result) throw new Error('This install of Kybern is missing its kybern-keychain helper, which holds your saved device tokens. Reinstall Kybern, then try again.')
+    return keyringOutcome(result, op)
+  }
+  return {
+    get: async account => { const outcome = await call('get', account); return outcome.kind === 'ok' ? outcome.value! : null },
+    set: async (account, value) => { await call('set', account, value) },
+    delete: async account => { await call('delete', account) },
+  }
+}
+export interface FileLockTiming {
+  /** How long a caller waits for the lock: longer than one Keychain dialog in the window that holds it. */
+  waitMs: number
+  /** A lock whose file was not touched for this long belongs to a process that stopped; it is taken over. */
+  staleMs: number
+  /** How often the holder touches the file while its work runs (a Keychain dialog can take up to two minutes). */
+  heartbeatMs: number
+}
+export const LOCK_TIMING: FileLockTiming = { waitMs: KEYRING_TIMEOUT_MS + 15_000, staleMs: 30_000, heartbeatMs: 2_000 }
+
+const lockOwner = (file: string) => { try { return readFileSync(file, 'utf8') } catch { return null } }
+/** Whether the process named in a lock (`<pid>:<nonce>`) still runs; a lock without one (older releases) counts as alive. */
+function ownerRuns(owner: string): boolean {
+  const pid = Number(owner.split(':')[0])
+  if (!Number.isInteger(pid) || pid <= 0) return true
+  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
+}
+/** Remove the lock at `file` if its holder is gone or stopped touching it. True when the caller should try again. */
+function breakStaleLock(file: string, staleMs: number): boolean {
+  const owner = lockOwner(file)
+  let touched: number
+  try { touched = statSync(file).mtimeMs } catch { return true } // released meanwhile
+  if (owner === null) return true
+  const gone = owner !== '' && !ownerRuns(owner)
+  if (!gone && Date.now() - touched <= staleMs) return false
+  // Only the lock judged stale goes, never one another window took a moment ago.
+  if (lockOwner(file) !== owner) return true
+  try { unlinkSync(file) } catch { /* another waiter removed it */ }
+  return true
+}
+
+/**
+ * A lock file shared by every GPUIX process of this user. The file names its holder (`<pid>:<nonce>`), which touches it
+ * while its work runs, so a Keychain dialog that keeps the lock for a while does not let another window take it; a lock
+ * whose holder exited or stopped touching it is taken over. Only the holder removes its own lock.
+ */
+export function fileLock(file: string, timing: FileLockTiming = LOCK_TIMING) {
+  return async <T>(work: () => Promise<T>): Promise<T> => {
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+    const me = `${process.pid}:${randomUUID()}`
+    const deadline = Date.now() + timing.waitMs
+    for (;;) {
+      try {
+        const fd = openSync(file, 'wx', 0o600)
+        try { writeSync(fd, me) } finally { closeSync(fd) }
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (breakStaleLock(file, timing.staleMs)) continue
+        if (Date.now() > deadline) throw new Error('Another Kybern window is saving a device token. Try again in a moment.')
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+    }
+    const heartbeat = setInterval(() => {
+      if (lockOwner(file) !== me) return
+      try { const at = new Date(); utimesSync(file, at, at) } catch { /* released */ }
+    }, timing.heartbeatMs)
+    heartbeat.unref?.()
+    try { return await work() } finally {
+      clearInterval(heartbeat)
+      if (lockOwner(file) === me) try { unlinkSync(file) } catch { /* already gone */ }
+    }
+  }
+}
+const combined = new Map<string, CombinedKeychain>()
+function macKeychain(ctx: OsContext) {
+  const serviceId = serviceName(ctx)
+  let store = combined.get(serviceId)
+  if (!store) combined.set(serviceId, store = combinedKeychain(helperItems(serviceId), fileLock(pathFor(ctx.platform).join(gpuixLocalDir(ctx), `${serviceId}.lock`))))
+  return store
+}
 // ---- one store at a time ----
 
 type Outcome = { kind: 'ok'; value?: string } | { kind: 'missing'; detail?: string } | { kind: 'unavailable'; detail?: string }
@@ -130,37 +203,20 @@ interface Store {
   remove(id: string, ctx: OsContext): Promise<Outcome>
 }
 export const UNLOCK_KEYRING = 'Unlock your keyring, then try again.'
+/** No store holds a token under this id. Anything else a read throws is the store failing (locked, dismissed, broken). */
+export class CredentialMissingError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CredentialMissingError'
+  }
+}
 const UNLOCK = 'Unlock the system credential store or pair this environment again'
 const ok = (value?: string): Outcome => ({ kind: 'ok', value })
 
 const keychain: Store = {
-  async read(id) {
-    const found = find(id, true)
-    if (found.status === MISSING) return { kind: 'missing', detail: `Keychain ${found.status}` }
-    checked(found.status)
-    try { return ok(Buffer.from(toArrayBuffer(found.data, 0, found.length)).toString('utf8')) }
-    finally { api().SecKeychainItemFreeContent(null, found.data); api().CFRelease(found.item) }
-  },
-  async write(id, token) {
-    const found = find(id, false)
-    const password = Buffer.from(token)
-    if (found.status === MISSING) {
-      const SERVICE = service(), account = Buffer.from(id)
-      checked(api().SecKeychainAddGenericPassword(null, SERVICE.length, ptr(SERVICE), account.length, ptr(account), password.length, ptr(password), null))
-    } else {
-      checked(found.status)
-      try { checked(api().SecKeychainItemModifyAttributesAndData(found.item, null, password.length, ptr(password))) }
-      finally { api().CFRelease(found.item) }
-    }
-    return ok()
-  },
-  async remove(id) {
-    const found = find(id, false)
-    if (found.status === MISSING) return { kind: 'missing' }
-    checked(found.status)
-    try { checked(api().SecKeychainItemDelete(found.item)) } finally { api().CFRelease(found.item) }
-    return ok()
-  },
+  async read(id, ctx) { const token = await macKeychain(ctx).read(id); return token === null ? { kind: 'missing' } : ok(token) },
+  async write(id, token, ctx) { await macKeychain(ctx).write(id, token); return ok() },
+  async remove(id, ctx) { await macKeychain(ctx).remove(id); return ok() },
 }
 
 /** What a `kybern credentials` run means: an outcome the stores can fall back on, or an error the user must act on (never echoes the input). */
@@ -184,7 +240,7 @@ const fileStore: Store = {
   remove: async (id, ctx) => { removeFileToken(credentialFile(id, ctx)); return ok() },
 }
 const scratchStore: Store = {
-  read: async (id) => { const file = scratchFile(id); return ok(readFileSync(file, 'utf8').trim()) },
+  read: async (id) => { const token = readFileToken(scratchFile(id)); return token ? ok(token) : { kind: 'missing' } },
   write: async (id, token) => { writeFileToken(scratchFile(id), token); return ok() },
   remove: async (id) => { removeFileToken(scratchFile(id)); return ok() },
 }
@@ -193,7 +249,7 @@ const STORES: Record<CredentialBackend, Store> = { 'scratch-file': scratchStore,
 // Off macOS each read is a process spawn, so a token read or written once stays in memory for the life of the process.
 const cache = new Map<string, string>()
 /** Forget every cached token (tests). */
-export function clearCredentialCache() { cache.clear() }
+export function clearCredentialCache() { cache.clear(); combined.clear() }
 
 let warnedFile = false
 /** The credential store of `ctx` (this machine by default). `readCredential` and the others are this, bound to the real process. */
@@ -209,7 +265,7 @@ export function credentialStore(ctx: OsContext = osContext()) {
         if (result.kind === 'ok') { if (cached) cache.set(id, result.value!); return result.value! }
         detail ??= result.detail
       }
-      throw new Error(detail ? `${UNLOCK} (${detail})` : UNLOCK)
+      throw new CredentialMissingError(detail ? `${UNLOCK} (${detail})` : UNLOCK)
     },
     async write(id: string, token: string): Promise<void> {
       const backends = credentialBackends(ctx)

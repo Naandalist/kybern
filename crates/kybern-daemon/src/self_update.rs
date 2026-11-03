@@ -3,8 +3,8 @@
 //! binary next to the running one and restarts under the service manager.
 //! It runs on the maintenance cadence when `auto_update_daemon` is on, or on
 //! request from a client, and only while no turn, approval, background task or
-//! queued message is in flight. A daemon the desktop app started is left
-//! alone: that binary lives in the app bundle and updates with the app.
+//! queued message is in flight. A daemon the desktop app started never replaces
+//! itself: that binary belongs to the installed app, which `app_update` updates instead.
 //!
 //! `update_track` picks the feed: Stable reads the latest GitHub release, Dev
 //! also reads the dev feed (a rolling `dev-feed` prerelease whose
@@ -88,6 +88,11 @@ impl DaemonUpdates {
             tracing::error!(%error, "could not persist daemon update status");
         }
         *self.record.lock().unwrap() = record;
+    }
+
+    /// Record progress made elsewhere: the desktop app's update (`app_update`).
+    pub(crate) fn record(&self, store: &Store, record: DaemonUpdate) {
+        self.save(store, record);
     }
 
     /// Queue an install; the worker picks it up on its next pass.
@@ -468,11 +473,16 @@ pub async fn run(state: AppState) {
 /// Hand over to the freshly installed binary after the graceful shutdown.
 /// Under systemd the unit restarts us on a non-zero exit; anywhere else we
 /// start the replacement ourselves with the same arguments and log file.
-pub fn restart(log_file: &Path) -> ! {
+pub fn restart(log_file: &Path, exe: Option<PathBuf>) -> ! {
     if std::env::var_os("INVOCATION_ID").is_some() {
         std::process::exit(RESTART_EXIT_CODE);
     }
-    let exe = std::env::current_exe().expect("current executable");
+    // The installed path, not what this process reports for itself after the swap: Linux names a replaced binary
+    // `<path> (deleted)`. An app update may name the new daemon itself.
+    let exe = exe.unwrap_or_else(|| {
+        let exe = std::env::current_exe().expect("current executable");
+        crate::login_service::installed_binary(exe.clone()).unwrap_or(exe)
+    });
     let mut command = std::process::Command::new(exe).no_window();
     command.args(std::env::args_os().skip(1)).stdin(std::process::Stdio::null());
     match std::fs::OpenOptions::new().append(true).create(true).open(log_file) {

@@ -13,6 +13,7 @@
 //! Reaching such a machine from a third member by relaying its session is not implemented.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use kybern_protocol::Scope;
 use serde_json::json;
@@ -76,8 +77,9 @@ async fn connect_socket(
     let parsed = reqwest::Url::parse(&ws_url).map_err(|error| format!("{ws_url} is not an address: {error}"))?;
     let host = parsed.host_str().ok_or("the address has no host")?.to_string();
     let port = parsed.port_or_known_default().ok_or("the address has no port")?;
-    let addr: SocketAddr = tokio::net::lookup_host((host.as_str(), port))
+    let addr: SocketAddr = tokio::time::timeout(Duration::from_secs(10), tokio::net::lookup_host((host.as_str(), port)))
         .await
+        .map_err(|_| format!("could not find {host} in time"))?
         .map_err(|error| format!("could not find {host}: {error}"))?
         .next()
         .ok_or_else(|| format!("{host} has no address"))?;
@@ -85,8 +87,11 @@ async fn connect_socket(
     let mut request = ws_url.as_str().into_client_request().map_err(|error| error.to_string())?;
     let header = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|error| error.to_string())?;
     request.headers_mut().insert(AUTHORIZATION, header);
-    let (socket, _) =
-        tokio_tungstenite::client_async_tls(request, stream).await.map_err(|error| format!("the session socket was refused: {error}"))?;
+    let wait = super::peers::upgrade_timeout(&network.timing);
+    let (socket, _) = tokio::time::timeout(wait, tokio_tungstenite::client_async_tls(request, stream))
+        .await
+        .map_err(|_| format!("the session socket did not answer within {} s", wait.as_secs_f32()))?
+        .map_err(|error| format!("the session socket was refused: {error}"))?;
     Ok(socket)
 }
 

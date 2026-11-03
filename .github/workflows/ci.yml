@@ -209,7 +209,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-pnpm-apps
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
           # The Bun binary downloads in seconds; a cache entry per ref is not worth the storage.
@@ -226,13 +226,30 @@ jobs:
       - name: shared client tests
         run: node --experimental-strip-types --test packages/kybern-client/tests/*.test.mjs
 
+  keychain-helper:
+    # The committed macOS Keychain helper must be the build of its source
+    # (apps/gpuix/packaging/keychain/reproduce.sh), so a pull request cannot swap
+    # the binary alone. It needs the Xcode the helper was linked with (27.0).
+    # The Desktop workflow also checks its signing certificate before packaging.
+    name: keychain helper (reproduce)
+    needs: changes
+    if: needs.changes.outputs.gpuix == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rebuild the helper and compare it with the committed one
+        run: apps/gpuix/packaging/keychain/reproduce.sh
+
   ci:
     # One check that is red when any job failed or was cancelled, and green when
     # the jobs a change does not need were skipped. A branch protection
     # rule needs only this name.
     name: CI
     if: always()
-    needs: [changes, fmt, clippy, test, windows-check, release, gpuix]
+    needs: [changes, fmt, clippy, test, windows-check, release, gpuix, keychain-helper]
     runs-on: ubuntu-24.04
     steps:
       - env:

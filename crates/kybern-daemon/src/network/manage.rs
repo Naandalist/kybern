@@ -98,10 +98,14 @@ pub async fn set_enabled_guarded(state: &AppState, enabled: bool, only_if_unconf
         state.settings.set(settings).map_err(|error| JoinError::Unavailable(format!("{error:#}")))?;
     }
     state.network.set_enabled(enabled);
+    // Either way the worker starts over: dials in flight are given up and every wait after failed attempts ends, so
+    // turning the network off and on again is a way out of anything stuck.
+    state.network.peers.after_resume();
     crate::exposure::apply_network(state, enabled).await;
     if !enabled {
         state.network.peers.close_all();
     }
+    tracing::info!(target: TARGET, enabled, "the machine network was switched; the worker starts over");
     state.network.notify_changed();
     state.network.wake();
     Ok(())

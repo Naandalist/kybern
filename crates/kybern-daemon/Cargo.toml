@@ -41,6 +41,8 @@ x25519-dalek = { version = "=3.0.0", features = ["static_secrets"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc"] }
 zeroize = "=1.9.0"
 semver = "=1.0.28"
+# Verifies the desktop app's signed updates with the key its own updater uses (ADE-125). Zero dependencies.
+minisign-verify = "=0.3.0"
 toml_edit = { version = "=0.25.13", default-features = false, features = ["parse", "display"] }
 # The Fast (HTTP/2) mode of a forwarded preview (ADE-116): TLS to Kybern's web views with a per-install
 # certificate, HTTP/2 between the machines, pooled HTTP/1.1 to the dev server.

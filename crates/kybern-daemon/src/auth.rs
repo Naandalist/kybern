@@ -25,22 +25,38 @@ pub fn generate() -> String {
     format!("kyb_{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Ensure a bootstrap token exists on disk and in the store. Returns the raw token.
-pub fn ensure_bootstrap(store: &Store, path: &std::path::Path) -> Result<String> {
+/// The label the bootstrap token is stored under. A label is only a name: a paired device chooses
+/// its own, so nothing may be authorized by it. Pairing refuses it (see [`is_reserved_label`]).
+pub const BOOTSTRAP_LABEL: &str = "bootstrap";
+
+/// Whether a device may not pair under this name: the bootstrap token's, in any case.
+pub fn is_reserved_label(label: &str) -> bool {
+    label.trim().eq_ignore_ascii_case(BOOTSTRAP_LABEL)
+}
+
+/// The bootstrap token: its raw value (only for the local desktop app) and its id in the store.
+pub struct Bootstrap {
+    pub token: String,
+    pub id: Uuid,
+}
+
+/// Ensure a bootstrap token exists on disk and in the store.
+pub fn ensure_bootstrap(store: &Store, path: &std::path::Path) -> Result<Bootstrap> {
     if let Ok(existing) = std::fs::read_to_string(path) {
         let existing = existing.trim().to_string();
         if !existing.is_empty()
             && let Some(rec) = store.token_lookup(&hash(&existing))?
             && !rec.revoked
         {
-            return Ok(existing);
+            return Ok(Bootstrap { token: existing, id: rec.id });
         }
     }
     let token = generate();
-    store.token_insert(Uuid::now_v7(), &hash(&token), "bootstrap", &Scope::ALL)?;
+    let id = Uuid::now_v7();
+    store.token_insert(id, &hash(&token), BOOTSTRAP_LABEL, &Scope::ALL)?;
     write_private(path, &token)?;
     tracing::info!(path = %path.display(), "wrote new bootstrap token");
-    Ok(token)
+    Ok(Bootstrap { token, id })
 }
 
 fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
@@ -76,6 +92,12 @@ impl Principal {
     pub fn has(&self, scope: Scope) -> bool {
         self.scopes.contains(&scope)
     }
+}
+
+/// Whether the principal holds this daemon's bootstrap token, the one only the local desktop app
+/// reads from the data directory. Decided by token id, never by label.
+pub fn is_bootstrap(state: &crate::state::AppState, principal: &Principal) -> bool {
+    principal.kind == PrincipalKind::Device && principal.token_id == state.bootstrap_token_id
 }
 
 /// Whether the principal may still use the connection: a device token that is not revoked, or a

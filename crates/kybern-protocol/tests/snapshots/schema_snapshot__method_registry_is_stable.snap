@@ -38,6 +38,8 @@ expression: names
 - daemon_update.status
 - daemon_update.check
 - daemon_update.run
+- app_updater.attach
+- app_updater.report
 - projects.list
 - projects.browse
 - projects.add
@@ -286,6 +288,9 @@ expression: names
 - peer.ports.prepare
 - peer.ports.release
 - peer.ports.open
+- peer.ports.via
+- peer.ports.hop
+- peer.ports.hop_check
 - peer.ports.data
 - peer.ports.close
 - plugins.inventory

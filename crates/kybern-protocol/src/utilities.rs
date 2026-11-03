@@ -234,6 +234,40 @@ pub struct PortForward {
     /// Its SHA-256 fingerprint (lowercase hex of the DER).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub https_certificate_sha256: Option<String>,
+    /// The member new connections travel through when it reaches the machine much faster than the direct route
+    /// (ADE-126). Absent on the direct route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_via: Option<PortRouteVia>,
+    /// A page load in progress over this forward, while it is still fetching. Absent when nothing is loading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loading: Option<PortLoad>,
+}
+
+/// The member a forward's connections are relayed through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PortRouteVia {
+    pub machine_id: MachineId,
+    pub machine_name: String,
+}
+
+/// What a forward has fetched for the page that is loading now. A load starts with the first request after a quiet
+/// moment and ends when no request has been open for a short while.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PortLoad {
+    /// Response bytes that crossed the network for this load so far (compressed, as they travelled).
+    pub received_bytes: u64,
+    /// Response bytes answered from this machine's cache of the dev server's responses.
+    #[serde(default)]
+    pub cached_bytes: u64,
+    /// What the previous complete load of this forward transferred, as an estimate of the whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_bytes: Option<u64>,
+    /// The transfer rate over the last few seconds.
+    pub bytes_per_second: u64,
+    /// Requests not yet answered in full.
+    pub open_requests: u32,
+    /// How long the load has run, in milliseconds.
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -285,6 +319,51 @@ pub struct PeerPortsDirect {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PeerPortsReleaseParams {
     pub forward_id: Uuid,
+}
+
+/// `peer.ports.via` (`ports.route.v1`): the caller's forward `forward_id` may also arrive relayed by member `via`, with
+/// a token of its own that works only from `via`'s node and only while `via` itself may use this machine's ports. The
+/// forward's own token never passes through `via`. `drop` takes that permission back.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PeerPortsViaParams {
+    pub forward_id: Uuid,
+    pub via: MachineId,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PeerPortsViaResult {
+    /// The route's token, sent as 64 ASCII bytes through `via`. Absent for `drop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+/// `peer.ports.hop` (`ports.route.v1`): relay the caller's connections for forward `forward_id` to the listener
+/// `port` that machine `target` prepared for it. This machine resolves `target`'s address from membership and asks
+/// `target` to confirm the listener (`peer.ports.hop_check`) before it relays anything.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PeerPortsHopParams {
+    pub forward_id: Uuid,
+    pub target: MachineId,
+    pub port: u16,
+}
+
+/// `peer.ports.hop_check` (`ports.route.v1`), from the relaying member to the target: `port` is the listener of
+/// `caller`'s forward `forward_id`, and the caller named this member with `peer.ports.via`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PeerPortsHopCheckParams {
+    pub caller: MachineId,
+    pub forward_id: Uuid,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PeerPortsHopResult {
+    /// Port on this machine's Tailscale address that relays to the target.
+    pub port: u16,
+    /// Per-hop credential, sent as 64 ASCII bytes before the target's own handshake.
+    pub token: String,
 }
 
 // ---- clipboard (M4 / U2, design §8.2) ----

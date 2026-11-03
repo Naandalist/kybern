@@ -364,6 +364,13 @@ const FAILURE_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000,
 const ATTEMPT_STALE_MS = 120_000;
 /** How often a sync may dial a member the daemon saw come back, out of its backoff. */
 const REDIAL_MS = 30_000;
+/**
+ * The longest wait between attempts at a member the daemon the user is at reports online. It answers there, so this
+ * device should keep trying, but not with a full route search every sync (a phone off the tailnet, ADE-121).
+ */
+const ONLINE_RETRY_MAX_MS = 120_000;
+/** How long `reach` waits for a machine to connect before it gives up (default). */
+const REACH_TIMEOUT_MS = 20_000;
 const LIVE: ReadonlySet<MachineConnectionStatus> = new Set(["online", "relaying", "needs-update"]);
 
 interface Opened {
@@ -409,6 +416,8 @@ interface Slot {
   tried?: Set<string>;
   failures: number;
   retryTimer?: unknown;
+  /** When `retryTimer` fires (clock ms). */
+  retryAt?: number;
   /** When the attempt in `attempt` started (clock ms). */
   attemptAt?: number;
   /** When a sync last dialed it because the daemon saw it come back (clock ms). */
@@ -424,7 +433,20 @@ interface Slot {
   external: boolean;
   /** Read the lists on connect and in a whole-set `refresh()`. */
   autoRefresh: boolean;
+  /** When this set last minted a token for the machine (clock ms), and how long it waits before the next. */
+  mintedAt?: number;
+  mintWaitMs?: number;
 }
+
+/**
+ * A minted token revokes the one this device held there, so mints are limited per machine: at most one a minute, and
+ * the wait doubles (to a quarter of an hour) while mints keep following each other, as they would if two windows kept
+ * replacing each other's token. A quiet stretch resets it.
+ */
+export const MINT_MIN_INTERVAL_MS = 60_000;
+export const MINT_MAX_INTERVAL_MS = 15 * 60_000;
+/** `token` found no saved token but minted one for this machine too recently; the attempt is retried later. */
+const MINT_LATER = Symbol("mint later");
 
 /** The `http(s)` base of a daemon address, for showing the route of a connection the app opened. */
 function httpUrlOf(url: string): string {
@@ -435,6 +457,11 @@ function httpUrlOf(url: string): string {
   } catch {
     return "http://localhost";
   }
+}
+
+/** A new token for the machine was minted a moment ago; the next attempt (after the usual retry wait) tries again. */
+function mintLaterError(machine: string): MachineError {
+  return { code: "unreachable", message: `${machine} did not accept this device's sign-in. Kybern will try again in a minute` };
 }
 
 function errorMessage(code: MachineErrorCode, machine: string): string {
@@ -795,11 +822,44 @@ export class MachineSet {
   async networkChanged(): Promise<void> {
     for (const slot of this.slots.values()) {
       slot.failures = 0;
-      this.clock.clearTimeout(slot.retryTimer);
+      this.cancelRetry(slot);
     }
     await Promise.all(
       [...this.slots.values()].map((slot) => (LIVE.has(slot.status) ? this.probeBetter(slot) : this.connectSlot(slot))),
     );
+  }
+
+  /**
+   * Connect to a machine now, out of its backoff, and wait until it is up: what the app does when the user opens
+   * something that lives there. Resolves true when the machine is connected (at once if it already is), false when
+   * it is paused, opened by the app itself, or still not connected after `timeoutMs`.
+   */
+  async reach(machineId: MachineId, timeoutMs = REACH_TIMEOUT_MS): Promise<boolean> {
+    await this.load();
+    const slot = this.slots.get(machineId);
+    if (!slot) throw new UnknownMachineError(machineId);
+    const live = () => !!slot.inner && LIVE.has(slot.status) && this.slots.get(slot.record.machineId) === slot;
+    if (live()) return true;
+    if (slot.external || slot.record.paused || this.disposed) return false;
+    let timer: unknown;
+    let timedOut = false;
+    const waited = new Promise<void>((resolve) => {
+      timer = this.clock.setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, timeoutMs);
+    });
+    try {
+      // The attempt under way (or a new one), then one more if that one failed: the first can be an attempt that
+      // started before the machine came back. A machine that is up sooner ends the wait at once.
+      for (let round = 0; round < 2 && !live() && !timedOut && !this.disposed && !slot.record.paused; round++) {
+        slot.failures = 0;
+        await Promise.race([this.connectSlot(slot), waited]);
+      }
+    } finally {
+      this.clock.clearTimeout(timer);
+    }
+    return live();
   }
 
   /** Close every connection and stop every timer. The set cannot be used afterwards. */
@@ -1072,7 +1132,7 @@ export class MachineSet {
 
   private dropSlot(slot: Slot) {
     slot.gen++;
-    this.clock.clearTimeout(slot.retryTimer);
+    this.cancelRetry(slot);
     this.clock.clearTimeout(slot.graceTimer);
     slot.offInner?.();
     slot.offInner = undefined;
@@ -1170,7 +1230,7 @@ export class MachineSet {
     if (slot.external) return Promise.resolve();
     if (slot.attempt && this.clock.now() - (slot.attemptAt ?? 0) < ATTEMPT_STALE_MS) return slot.attempt;
     // A stuck attempt is superseded: the new generation makes whatever it still finds close itself.
-    this.clock.clearTimeout(slot.retryTimer);
+    this.cancelRetry(slot);
     const gen = ++slot.gen;
     slot.attemptAt = this.clock.now();
     const attempt = (async () => {
@@ -1225,10 +1285,12 @@ export class MachineSet {
     scope: { before?: string },
   ): Promise<{ kind: "open"; opened: Opened } | { kind: "unpaired" | "none"; error?: MachineError }> {
     const { record } = slot;
-    let token = await this.token(slot);
+    const first = await this.token(slot);
     if (gen !== slot.gen) return { kind: "none" };
-    if (!token)
+    if (first === MINT_LATER) return { kind: "none", error: mintLaterError(record.name) };
+    if (!first)
       return { kind: "unpaired", error: { code: "unpaired", message: errorMessage("unpaired", record.name) } };
+    let token: string = first;
     let routes = this.candidates(slot);
     if (scope.before === undefined) slot.tried = new Set(routes.map(routeId));
     if (scope.before !== undefined) {
@@ -1266,12 +1328,22 @@ export class MachineSet {
         }
         if (outcome.kind === "open") return outcome;
         if (outcome.kind === "revoked" && !retried) {
-          // The machine no longer accepts this device's token: mint a fresh one through a member, once.
+          // The machine no longer accepts this device's token. Another window may already have saved a fresh one
+          // (minting revoked the token this one held): use that. Only the refused token is discarded, and then a
+          // fresh one is minted through a member, once.
           retried = true;
           const { credentials } = this.options;
+          const stored = await credentials.get(record.machineId);
+          if (gen !== slot.gen) return { kind: "none" };
+          if (stored && stored !== token) {
+            token = stored;
+            continue;
+          }
           await (credentials.discard ? credentials.discard(record.machineId) : credentials.delete(record.machineId));
-          token = await this.token(slot);
-          if (!token) return { kind: "unpaired", error: { code: "unpaired", message: errorMessage("unpaired", record.name) } };
+          const fresh = await this.token(slot);
+          if (fresh === MINT_LATER) return { kind: "none", error: mintLaterError(record.name) };
+          if (!fresh) return { kind: "unpaired", error: { code: "unpaired", message: errorMessage("unpaired", record.name) } };
+          token = fresh;
           continue;
         }
         note("unreachable", route);
@@ -1382,7 +1454,7 @@ export class MachineSet {
     const live = opened.owned !== false || opened.inner.status === "open";
     slot.offInner?.();
     this.clock.clearTimeout(slot.graceTimer);
-    this.clock.clearTimeout(slot.retryTimer);
+    this.cancelRetry(slot);
     slot.inner = opened.inner;
     slot.route = opened.route;
     slot.latencyMs = opened.latencyMs ?? slot.latencyMs;
@@ -1447,7 +1519,7 @@ export class MachineSet {
   private goOffline(slot: Slot, status: "offline" | "unpaired" | "paused", error?: MachineError) {
     if (status === "paused") slot.gen++;
     this.clock.clearTimeout(slot.graceTimer);
-    this.clock.clearTimeout(slot.retryTimer);
+    this.cancelRetry(slot);
     const inner = slot.inner;
     if (inner) slot.lastSeenAt ??= this.clock.now();
     slot.offInner?.();
@@ -1460,8 +1532,25 @@ export class MachineSet {
     slot.error = slot.record.paused ? undefined : error;
     this.touch(slot, "status");
     if (slot.record.paused || slot.external || this.disposed) return;
-    const delay = FAILURE_DELAYS_MS[Math.min(slot.failures++, FAILURE_DELAYS_MS.length - 1)]!;
-    slot.retryTimer = this.clock.setTimeout(() => void this.connectSlot(slot), delay);
+    let delay = FAILURE_DELAYS_MS[Math.min(slot.failures++, FAILURE_DELAYS_MS.length - 1)]!;
+    // The daemon the user is at reaches it: keep trying more often than for a machine nobody sees.
+    if (slot.daemonSaw === "online") delay = Math.min(delay, ONLINE_RETRY_MAX_MS);
+    this.retryIn(slot, delay);
+  }
+
+  private cancelRetry(slot: Slot) {
+    this.clock.clearTimeout(slot.retryTimer);
+    slot.retryTimer = undefined;
+    slot.retryAt = undefined;
+  }
+
+  private retryIn(slot: Slot, delay: number) {
+    this.cancelRetry(slot);
+    slot.retryAt = this.clock.now() + delay;
+    slot.retryTimer = this.clock.setTimeout(() => {
+      slot.retryAt = undefined;
+      void this.connectSlot(slot);
+    }, delay);
   }
 
   // ---- routes: better ones, learned ones ----
@@ -1543,12 +1632,22 @@ export class MachineSet {
       })[0];
   }
 
-  /** This device's token for a machine: the saved one, else one minted through a member (§3.4). */
-  private async token(slot: Slot): Promise<string | undefined> {
+  /**
+   * This device's token for a machine: the saved one, else one minted through a member (§3.4), at most as often as
+   * `MINT_MIN_INTERVAL_MS` and its backoff allow (`MINT_LATER` otherwise).
+   */
+  private async token(slot: Slot): Promise<string | undefined | typeof MINT_LATER> {
     const saved = await this.options.credentials.get(slot.record.machineId);
     if (saved) return saved;
     const member = this.bestMember(slot);
     if (!member?.inner) return undefined;
+    const now = this.clock.now();
+    const wait = slot.mintWaitMs ?? MINT_MIN_INTERVAL_MS;
+    if (slot.mintedAt !== undefined && now - slot.mintedAt < wait) return MINT_LATER;
+    // Mints that follow each other within twice the wait are churn: wait longer next time. Otherwise start over.
+    slot.mintWaitMs =
+      slot.mintedAt !== undefined && now - slot.mintedAt < wait * 2 ? Math.min(wait * 2, MINT_MAX_INTERVAL_MS) : MINT_MIN_INTERVAL_MS;
+    slot.mintedAt = now;
     try {
       const grant = (await member.inner.call("network.client_grant", {
         machine_id: slot.record.machineId,
@@ -1701,6 +1800,11 @@ export class MachineSet {
       if (!slot) continue;
       const cameBack = card.status === "online" && slot.daemonSaw !== undefined && slot.daemonSaw !== "online";
       slot.daemonSaw = card.status;
+      // Reported online while this device has it offline and waiting longer than the online cap (it failed before the
+      // daemon's first answer, at launch say): its next attempt moves up to the cap. Never sooner, so a member this
+      // device cannot reach is not searched every sync.
+      if (card.status === "online" && slot !== source && wantsDial(slot) && !slot.attempt && slot.retryAt !== undefined &&
+        slot.retryAt - this.clock.now() > ONLINE_RETRY_MAX_MS) this.retryIn(slot, ONLINE_RETRY_MAX_MS);
       const stuck = card.status === "online" && slot.attempt !== undefined && this.clock.now() - (slot.attemptAt ?? 0) >= ATTEMPT_STALE_MS;
       if (!(cameBack || stuck) || slot === source || !wantsDial(slot) || fresh.includes(slot)) continue;
       // At most every REDIAL_MS, however often it flaps.
@@ -1708,7 +1812,7 @@ export class MachineSet {
       if (cameBack) {
         slot.redialAt = this.clock.now();
         slot.failures = 0;
-        this.clock.clearTimeout(slot.retryTimer);
+        this.cancelRetry(slot);
       }
       redial.push(slot);
     }

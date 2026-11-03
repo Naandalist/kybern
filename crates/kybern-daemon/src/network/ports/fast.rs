@@ -7,22 +7,22 @@
 //! the dev server over pooled HTTP/1.1. A cold load then costs about one round trip per level of the import graph.
 //!
 //! WebSocket upgrades (hot reload) arrive over HTTP/1.1, which the web views use for them on the same origin; each gets
-//! its own raw direct socket. Server-sent events are ordinary streaming responses.
+//! its own raw direct socket. Server-sent events are ordinary streaming responses. Each request is handled as on the plain
+//! listener ([`super::http::exchange`]): counted, cached and compressed the same way.
 
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use http_body_util::BodyExt;
+use hyper::Request;
 use hyper::body::Incoming;
 use hyper::client::conn::http2::SendRequest;
-use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use kybern_protocol::*;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use super::direct::{self, MODE_HTTP2, MODE_RAW, ProxyBody, status_response, strip_hop_headers};
+use super::direct::{self, MODE_HTTP2, ProxyBody};
 use super::{Counted, Forward};
 use crate::network::Network;
 
@@ -32,11 +32,16 @@ const TARGET: &str = "kybern::network::ports";
 #[derive(Default)]
 pub struct Tunnel {
     /// The connection and the route it runs on: a new route (a new session) needs a new connection.
-    sender: tokio::sync::Mutex<Option<(Arc<direct::Route>, SendRequest<Incoming>)>>,
+    sender: tokio::sync::Mutex<Option<(Arc<direct::Route>, SendRequest<ProxyBody>)>>,
 }
 
 impl Tunnel {
-    async fn sender(&self, network: &Network, route: &Arc<direct::Route>, cancel: &CancellationToken) -> Option<SendRequest<Incoming>> {
+    pub(super) async fn sender(
+        &self,
+        network: &Network,
+        route: &Arc<direct::Route>,
+        cancel: &CancellationToken,
+    ) -> Option<SendRequest<ProxyBody>> {
         let mut held = self.sender.lock().await;
         if let Some((on, sender)) = held.as_ref()
             && Arc::ptr_eq(on, route)
@@ -114,13 +119,7 @@ pub(super) async fn start(network: &Arc<Network>, forward: &Arc<Forward>) -> Res
                     let (network, forward) = (network.clone(), forward.clone());
                     hyper::service::service_fn(move |request: Request<Incoming>| {
                         let (network, forward) = (network.clone(), forward.clone());
-                        async move {
-                            // The route of the session open now: after the target restarts this prepares the forward again.
-                            let Some(route) = super::current_route(&network, &forward).await.filter(|route| route.ready_sockets()) else {
-                                return Ok::<_, Infallible>(status_response(StatusCode::BAD_GATEWAY));
-                            };
-                            Ok::<_, Infallible>(handle(&network, &forward, &route, request).await)
-                        }
+                        async move { Ok::<_, Infallible>(super::http::exchange(&network, &forward, request, "https").await) }
                     })
                 };
                 let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
@@ -134,105 +133,4 @@ pub(super) async fn start(network: &Arc<Network>, forward: &Arc<Forward>) -> Res
         }
     });
     Ok(port)
-}
-
-fn is_upgrade(request: &Request<Incoming>) -> bool {
-    request.version() <= hyper::Version::HTTP_11 && request.headers().contains_key(hyper::header::UPGRADE)
-}
-
-/// The host the browser asked for: the `:authority` of HTTP/2, the `Host` header of HTTP/1.1.
-fn authority(request: &Request<Incoming>) -> Option<String> {
-    request
-        .uri()
-        .authority()
-        .map(|authority| authority.to_string())
-        .or_else(|| request.headers().get(hyper::header::HOST).and_then(|host| host.to_str().ok()).map(str::to_string))
-}
-
-async fn handle(
-    network: &Arc<Network>,
-    forward: &Arc<Forward>,
-    route: &Arc<direct::Route>,
-    request: Request<Incoming>,
-) -> Response<ProxyBody> {
-    if is_upgrade(&request) {
-        return upgrade(network, forward, route, request).await;
-    }
-    let Some(host) = authority(&request) else { return status_response(StatusCode::BAD_REQUEST) };
-    let (mut parts, body) = request.into_parts();
-    let path = parts.uri.path_and_query().map(|pq| pq.as_str().to_string()).unwrap_or_else(|| "/".into());
-    let Ok(uri) = format!("https://{host}{path}").parse::<hyper::Uri>() else { return status_response(StatusCode::BAD_REQUEST) };
-    strip_hop_headers(&mut parts.headers);
-    parts.headers.remove(hyper::header::HOST);
-    parts.uri = uri;
-    parts.version = hyper::Version::HTTP_2;
-    // One retry on a fresh connection when the held one turned out to be gone (the target restarted, the route changed).
-    let Some(mut sender) = forward.tunnel.sender(network, route, &forward.cancel).await else {
-        return status_response(StatusCode::BAD_GATEWAY);
-    };
-    if sender.ready().await.is_err() {
-        match forward.tunnel.sender(network, route, &forward.cancel).await {
-            Some(fresh) => sender = fresh,
-            None => return status_response(StatusCode::BAD_GATEWAY),
-        }
-    }
-    match sender.send_request(Request::from_parts(parts, body)).await {
-        Ok(response) => {
-            let (mut parts, body) = response.into_parts();
-            strip_hop_headers(&mut parts.headers);
-            Response::from_parts(parts, body.boxed())
-        }
-        Err(error) => {
-            tracing::debug!(target: TARGET, ?error, "a forwarded HTTP/2 request failed");
-            status_response(StatusCode::BAD_GATEWAY)
-        }
-    }
-}
-
-/// A WebSocket (or other HTTP/1.1 upgrade): its own raw socket to the target, the request written as HTTP/1.1, then the
-/// two upgraded connections joined.
-async fn upgrade(
-    network: &Arc<Network>,
-    forward: &Arc<Forward>,
-    route: &Arc<direct::Route>,
-    mut request: Request<Incoming>,
-) -> Response<ProxyBody> {
-    let Some(socket) = route.open(network, MODE_RAW).await else { return status_response(StatusCode::BAD_GATEWAY) };
-    let Ok((mut sender, connection)) =
-        hyper::client::conn::http1::handshake::<_, http_body_util::Empty<hyper::body::Bytes>>(TokioIo::new(socket)).await
-    else {
-        return status_response(StatusCode::BAD_GATEWAY);
-    };
-    tokio::spawn(connection.with_upgrades());
-    let mut outbound = Request::builder()
-        .method(request.method().clone())
-        .uri(request.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/"))
-        .version(hyper::Version::HTTP_11);
-    for (name, value) in request.headers() {
-        if name != hyper::header::PROXY_AUTHORIZATION {
-            outbound = outbound.header(name, value);
-        }
-    }
-    let Ok(outbound) = outbound.body(http_body_util::Empty::new()) else { return status_response(StatusCode::BAD_REQUEST) };
-    let browser_side = hyper::upgrade::on(&mut request);
-    let mut response = match sender.send_request(outbound).await {
-        Ok(response) => response,
-        Err(_) => return status_response(StatusCode::BAD_GATEWAY),
-    };
-    if response.status() == StatusCode::SWITCHING_PROTOCOLS {
-        let target_side = hyper::upgrade::on(&mut response);
-        let cancel = forward.cancel.clone();
-        let count = Counted::new(forward);
-        tokio::spawn(async move {
-            let _count = count;
-            let (Ok(browser), Ok(target)) = tokio::join!(browser_side, target_side) else { return };
-            let (mut browser, mut target) = (TokioIo::new(browser), TokioIo::new(target));
-            tokio::select! {
-                _ = tokio::io::copy_bidirectional(&mut browser, &mut target) => {},
-                _ = cancel.cancelled() => {},
-            }
-        });
-    }
-    let (parts, body) = response.into_parts();
-    Response::from_parts(parts, body.boxed())
 }

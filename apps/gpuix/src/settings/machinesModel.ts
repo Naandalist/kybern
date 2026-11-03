@@ -4,7 +4,7 @@ import { looksGeneratedName, shortMachineName } from '../../../../packages/kyber
 import { harnessChips, machineSpecs, osKind, type HarnessChip, type MachineSpecs, type OsKind } from '../../../../packages/kybern-client/src/machineSpecs.ts'
 import type { KeepReachableStatus, MachineCard, MachineId, MachineInfo } from '../../../../packages/kybern-client/src/types.ts'
 import type { MachineRow } from '../machines/index.ts'
-import { statusText, statusTone, type Tone } from '../machines/format.ts'
+import { daemonLinkDown, LINK_DOWN_TEXT, reachText, shownStatus, statusText, statusTone, type Tone } from '../machines/format.ts'
 
 export interface MachineCardModel {
   machineId: string
@@ -27,6 +27,10 @@ export interface MachineCardModel {
   harnesses: HarnessChip[]
   /** The machine (or its network card) said which harnesses it has; false for one that never answered. */
   harnessesKnown: boolean
+  /** The daemon the user is at reports it online, and this app is still connecting to it. */
+  reaching: boolean
+  /** This app reaches it, and the daemon of this computer has no session to it: what goes through the daemon fails. */
+  linkDown: boolean
   /** The machine runs an older version than the one the user is at. */
   behind: boolean
   canPause: boolean
@@ -55,8 +59,17 @@ export function buildCards(input: {
 }): MachineCardModel[] {
   const cards = new Map(input.members.map((card) => [card.machine_id, card]))
   const names = new Map(input.rows.map((row) => [row.machineId, row.name]))
-  return input.rows.map((row) => {
-    const card = cards.get(row.machineId)
+  return input.rows.map((raw) => {
+    const card = cards.get(raw.machineId)
+    // The status the picker shows: online when the daemon the user is at says so, even while this app's own connection
+    // is down, with a note that this computer is still reaching it (ADE-124).
+    const status = shownStatus(raw.status, card?.status)
+    const reaching = status !== raw.status
+    const linkDown = daemonLinkDown(raw.status, card?.status, raw.isLocal)
+    // When it was last seen: whichever saw it last, this app or the daemon.
+    const daemonSeen = card?.last_seen_at ? Date.parse(card.last_seen_at) : NaN
+    const lastSeenAt = Number.isFinite(daemonSeen) ? Math.max(daemonSeen, raw.lastSeenAt ?? 0) : raw.lastSeenAt
+    const row: MachineRow = { ...raw, status, offline: reaching ? false : raw.offline, ...(lastSeenAt !== undefined ? { lastSeenAt } : {}) }
     const version = card?.version ?? row.version
     const harnesses = card?.harnesses?.length ? card.harnesses : []
     const info = input.infos[row.machineId]
@@ -66,8 +79,10 @@ export function buildCards(input: {
       name: shortMachineName(row.name) || row.name,
       row,
       member: row.member,
-      tone: statusTone(row.status),
-      status: statusText({ status: row.status, ...(row.lastSeenAt !== undefined ? { lastSeenAt: row.lastSeenAt } : {}), ...(via ? { via } : {}), ...(row.error ? { error: row.error } : {}) }, input.now),
+      tone: reaching || linkDown ? 'warn' : statusTone(row.status),
+      status: reaching ? reachText(!!row.connecting) : linkDown ? LINK_DOWN_TEXT : statusText({ status: row.status, ...(row.lastSeenAt !== undefined ? { lastSeenAt: row.lastSeenAt } : {}), ...(via ? { via } : {}), ...(row.error ? { error: row.error } : {}) }, input.now),
+      reaching,
+      linkDown,
       version: version || null,
       os: osKind(card?.os ?? row.os),
       osLabel: osName(card?.os ?? row.os),

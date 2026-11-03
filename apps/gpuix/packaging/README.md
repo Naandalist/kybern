@@ -13,13 +13,26 @@ with id `dev.kybern.gpuix.test`, so LaunchServices and notifications never confu
 installed app (macOS 27 posts a Rosetta-retirement notice naming whatever x86_64 bundle launches).
 `bun packaging/rosetta-check.ts <out>` smoke-checks that test bundle under Rosetta; it needs
 macOS 27 or earlier, since macOS 28 drops Rosetta for apps. Releases never pass `--test`.
-No packages are installed, no native addon is rebuilt, and only ad-hoc signing
-is used. No signing identity/key lookup, installation, PATH change or Login Item.
+No packages are installed, no native addon is rebuilt, and nothing is installed:
+no PATH change or Login Item.
+
+Signing: with `KYBERN_CODESIGN_IDENTITY` (and `KYBERN_CODESIGN_KEYCHAIN`) set, the
+dylibs, `kybernd`, `kybern` and the app are signed with that identity; otherwise
+ad hoc, and the script says so. Releases sign with the self-signed "Kybern Code
+Signing" certificate (no Apple Developer ID, no notarization):
+`scripts/bundle-gpuix.sh` imports it from `MACOS_SIGNING_P12_BASE64` /
+`MACOS_SIGNING_P12_PASSWORD` into a throwaway keychain (`scripts/macos-signing.sh`).
+Every version then has the designated requirement
+`identifier "dev.kybern.gpuix" and certificate leaf = H"0508616c…"` instead of a
+per-build cdhash. Gatekeeper treats it as it treated the ad-hoc app (`spctl`
+rejects both; the installer and updater never quarantine it). The Keychain
+helper `kybern-keychain` is copied as committed and never re-signed; see
+[`keychain/README.md`](keychain/README.md) for why.
 
 Output: `dist/Kybern GPUIX.app`, already covered by this app's `dist/` ignore rule.
 Bundle ID `dev.kybern.gpuix` is distinct from the retired Tauri app's `dev.kybern.desktop`.
 The icons are in `packaging/icons/` (copied at build time).
-No entitlements are needed for this local, non-sandboxed, non-hardened ad-hoc app.
+No entitlements are needed for this non-sandboxed, non-hardened app.
 This is a local development bundle, not notarized distribution packaging.
 
 ## Windows x64 (beta)

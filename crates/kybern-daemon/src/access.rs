@@ -61,6 +61,10 @@ pub struct Pairing {
 #[error("Too many pairing attempts. Wait a minute and try again")]
 pub struct PairingRateLimited;
 
+#[derive(Debug, thiserror::Error)]
+#[error("That device name is reserved. Choose another name and pair again")]
+pub struct ReservedDeviceName;
+
 impl Pairing {
     pub fn create(&self, label: Option<String>) -> Result<(String, DateTime<Utc>)> {
         self.create_for(Purpose::Device, label)
@@ -74,6 +78,9 @@ impl Pairing {
     fn create_for(&self, purpose: Purpose, label: Option<String>) -> Result<(String, DateTime<Utc>)> {
         if label.as_ref().is_some_and(|label| label.len() > MAX_PAIRING_LABEL_BYTES) {
             return Err(anyhow!("Device label is too long"));
+        }
+        if label.as_deref().is_some_and(crate::auth::is_reserved_label) {
+            return Err(ReservedDeviceName.into());
         }
         let mut codes = self.codes.lock().unwrap();
         codes.retain(|_, p| p.expires_at > Utc::now());
@@ -117,6 +124,10 @@ impl Pairing {
     /// Exchange a code for a new token. Returns the raw token and its scopes.
     pub fn redeem(&self, store: &Store, code: &str, device_name: Option<String>) -> Result<(String, Vec<Scope>)> {
         self.spend_attempt()?;
+        // Refused before the code is spent, so the device can retry under another name.
+        if device_name.as_deref().is_some_and(crate::auth::is_reserved_label) {
+            return Err(ReservedDeviceName.into());
+        }
         let pending = self.take(code, Purpose::Device)?;
         let token = crate::auth::generate();
         let label = device_name.unwrap_or(pending.label);

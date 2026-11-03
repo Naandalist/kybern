@@ -4,6 +4,7 @@ mod account_login;
 mod agent_guide;
 mod antigravity_mcp;
 mod app_tools;
+mod app_update;
 mod artifacts;
 mod askpass;
 mod auth;
@@ -120,7 +121,16 @@ fn startup_announcement_filename(id: &str) -> Result<String> {
 
 fn write_startup_announcement(paths: &config::Paths, id: &str, port: u16) -> Result<()> {
     let path = paths.root.join(startup_announcement_filename(id)?);
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&path)?;
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        // A restart onto an updated binary keeps the app's arguments, and with them a startup id the app already read
+        // (it removes the file only once, after its own launch). Nobody waits for it now.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            tracing::debug!(path = %path.display(), "the desktop startup endpoint was published before; not again");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     serde_json::to_writer(
         &mut file,
         &DesktopStartupAnnouncement { port, protocol_version: PROTOCOL_VERSION, version: env!("CARGO_PKG_VERSION") },
@@ -271,6 +281,14 @@ async fn serve() -> Result<()> {
     }
     let update_worker = tokio::spawn(harness_updates::run(state.clone()));
     let self_update_worker = tokio::spawn(self_update::run(state.clone()));
+    // Updates of the desktop app this daemon belongs to (ADE-125): idle until this machine is asked to update.
+    let app_update_worker = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let _ = app_update::cleanup();
+            app_update::run(state).await;
+        }
+    });
     let maintenance_worker = tokio::spawn(maintenance::run(state.clone(), !args.pair));
     let notes_worker = tokio::spawn(purge_expired_notes(state.clone()));
     let queue_state = state.clone();
@@ -381,11 +399,13 @@ async fn serve() -> Result<()> {
     let _ = maintenance_worker.await;
     let _ = update_worker.await;
     let _ = self_update_worker.await;
+    let _ = app_update_worker.await;
     state.orchestrator.shutdown().await;
     state.terminals.shutdown().await;
     release_endpoint_files(&paths, addr);
     if state.restart_pending.load(std::sync::atomic::Ordering::SeqCst) {
-        self_update::restart(&paths.root.join("daemon.log"));
+        let exe = state.restart_exe.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        self_update::restart(&paths.root.join("daemon.log"), exe);
     }
     Ok(())
 }

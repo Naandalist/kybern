@@ -5,7 +5,7 @@ import type { KybernClient } from '../../../../packages/kybern-client/src/client
 import { OfflineError, type MachineTransport } from '../../../../packages/kybern-client/src/machines.ts'
 import type { Project, Thread } from '../../../../packages/kybern-client/src/types.ts'
 import type { EnvironmentProfile } from '../environments/registry.ts'
-import { MachineHub, type MachineHubOptions } from './hub.ts'
+import { MachineHub, machineClientOptions, type MachineHubOptions } from './hub.ts'
 import { LEGACY_PREFIX, recordOfProfile, recordsFromRegistry } from './records.ts'
 import { finishMachineSetup } from '../composer/machineSetup.ts'
 
@@ -439,4 +439,81 @@ test("the app's own connection to a relayed machine sends the member's token on 
       { path: '/assets/a1', auth: 'Bearer tok-instabox', relay: null },
     ])
   } finally { server.stop(true) }
+})
+
+// ADE-124: SatyaMas refused the app's saved token (it had been replaced), at the socket upgrade and silently. The
+// hub's clients had no way to tell that from a machine that is down, so the set retried the dead token every five
+// minutes and never minted a new one. Now the refusal is checked with `POST /session`, the token is discarded, a
+// fresh one is minted through the machine the user is at, and the machine connects with it.
+test('a token the machine refuses at the upgrade is replaced through the member, and the machine connects', async () => {
+  const upgrades: string[] = []
+  const server = Bun.serve<{ token: string }, never>({
+    hostname: '127.0.0.1', port: 0,
+    fetch(request, srv) {
+      const auth = request.headers.get('authorization') ?? ''
+      const url = new URL(request.url)
+      if (url.pathname === '/session') return new Response(auth === 'Bearer new' ? '{"ticket":"t"}' : 'invalid device credential', { status: auth === 'Bearer new' ? 200 : 401 })
+      if (url.pathname === '/ws') {
+        upgrades.push(auth)
+        if (auth !== 'Bearer new') return new Response('invalid token', { status: 401 })
+        return srv.upgrade(request, { data: { token: auth } }) ? undefined : new Response('no upgrade', { status: 500 })
+      }
+      return new Response('not found', { status: 404 })
+    },
+    websocket: {
+      message(ws, text) {
+        const frame = JSON.parse(String(text)) as { id: number; method: string }
+        const result = frame.method === 'daemon.info'
+          ? { protocol_version: 1, environment_id: 'pc-1', machine_id: 'pc-1', version: '0.21.1', features: ['network.v1'] }
+          : frame.method === 'projects.list' ? { projects: [] } : frame.method === 'threads.list' ? { threads: [] } : {}
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result }))
+      },
+    },
+  })
+  try {
+    const card = (id: string) => ({ machine_id: id, name: id, os: 'linux', status: 'online' })
+    const mac = new FakeDaemon('mac-1', {
+      'network.status': () => ({ enabled: true, self_machine: card('mac-1'), members: [card('mac-1')], found: [], outbox: {}, tailscale: {} }),
+      'network.client_grant': () => ({ token: 'new', scopes: [], routes: [] }),
+    }, ['network.v1'])
+    const tokens = new Map([['pc-1', 'old']])
+    const discarded: string[] = []
+    const { hub } = makeHub([], {
+      records: () => [{ machineId: 'pc-1', name: 'PC', member: false, routes: [{ kind: 'direct_advertised', url: `http://127.0.0.1:${server.port}` }] }],
+      credentials: { get: (id) => tokens.get(id), set: (id, token) => { tokens.set(id, token) }, delete: (id) => { tokens.delete(id) }, discard: (id) => { discarded.push(id); tokens.delete(id) } },
+    })
+    await openPrimary(hub, mac)
+    for (let i = 0; i < 200 && hub.set.connection('pc-1')?.status !== 'needs-update' && hub.set.connection('pc-1')?.status !== 'online'; i++) await Bun.sleep(25)
+    expect(upgrades[0]).toBe('Bearer old')
+    expect(upgrades.at(-1)).toBe('Bearer new')
+    expect(discarded).toEqual(['pc-1'])
+    expect(tokens.get('pc-1')).toBe('new')
+    expect(mac.calls).toContain('network.client_grant')
+    expect(['online', 'needs-update']).toContain(hub.set.connection('pc-1')!.status)
+  } finally { server.stop(true) }
+})
+
+test('reachMachine dials a machine that is not connected and hands back its client once it answers', async () => {
+  const pc = new FakeDaemon('pc-1', { 'projects.list': () => ({ projects: [] }), 'threads.list': () => ({ threads: [] }) })
+  pc.online = false
+  // Down: each connection fails at once (the set then waits out its backoff).
+  pc.connect = () => { queueMicrotask(() => pc.setStatus(pc.online ? 'open' : 'failed')) }
+  const { hub } = makeHub([saved('pc', { environment_id: 'pc-1' })], { transport: { createClient: () => pc as never } })
+  await openPrimary(hub, new FakeDaemon('mac-1'))
+  void hub.connectOthers()
+  await settle()
+  expect(() => hub.clientFor('pc-1')).toThrow(OfflineError)
+  pc.online = true
+  const client = await hub.reachMachine('pc-1', 2_000)
+  expect(client).toBe(hub.clientFor('pc-1'))
+})
+
+test('the clients the hub dials can tell a refused token from a machine that is down', () => {
+  const record = { machineId: 'pc-1', name: 'PC', routes: [], member: true }
+  const direct = machineClientOptions({ record, route: { kind: 'direct_tailnet', url: 'http://100.64.0.9:4173' }, token: 'tok' })
+  expect(direct.url).toBe('ws://100.64.0.9:4173/ws')
+  expect(typeof direct.options.probeAuth).toBe('function')
+  const relay = machineClientOptions({ record, route: { kind: 'relay', url: 'http://100.64.0.1:4173/relay/pc-1', via: 'mac' }, token: 'tok', relayToken: 'tok-mac' })
+  expect(typeof relay.options.probeAuth).toBe('function')
+  expect(relay.options.http).toEqual({ base: 'http://100.64.0.1:4173/relay/pc-1/http', headers: { 'X-Kybern-Relay-Auth': 'Bearer tok-mac' } })
 })

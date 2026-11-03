@@ -2,7 +2,7 @@
 // status and version, then icon chips for the OS, processor, memory, graphics and installed harnesses (the Tailscale name is a tooltip); Pause and Remove; machines found on the tailnet; Add by
 // code; Update all machines. Everything goes through the `network.*` RPCs of the machine the user is at, which any member
 // answers for the rest. Words come from `machinesModel.ts`.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { DoctorReport, FoundMachine, NetworkStatus, NetworkUpdateAllResult, OutboxItem } from '../../../../packages/kybern-client/src/types.ts'
 import { Dialog, Tip } from '../nav/overlay.tsx'
 import { N } from '../nav/glyphs.ts'
@@ -42,11 +42,23 @@ export function Machines() {
   const machines = useMachines()
   const [removing, setRemoving] = useState<MachineCardModel | null>(null)
   const status = net.status
-  // Each online machine says what it has; the page asks once per machine that answers.
+  // Each connected machine says what it has; the page asks once per machine each time it connects (one that could not
+  // answer before is asked again when it comes back).
   const online = machines.filter((machine) => !machine.offline).map((machine) => machine.machineId).join(',')
-  useEffect(() => { for (const id of online.split(',').filter(Boolean)) if (net.infos[id] === undefined) void loadMachineInfo(id) }, [online])
+  useEffect(() => { for (const id of online.split(',').filter(Boolean)) if (!net.infos[id]) void loadMachineInfo(id) }, [online])
   const latest = machines.find((machine) => machine.isLocal)?.version
   const cards = useMemo(() => buildCards({ rows: machines, members: status?.members ?? [], infos: net.infos, latest }), [machines, status, net.infos, latest])
+  // A machine the daemon reports online and this app has not reached: open the page, and it is dialed now instead of
+  // after its backoff, once per visit (ADE-124).
+  const reaching = cards.filter((card) => card.reaching && !card.row.connecting).map((card) => card.machineId).join(',')
+  const dialed = useRef(new Set<string>())
+  useEffect(() => {
+    for (const id of reaching.split(',').filter(Boolean)) {
+      if (dialed.current.has(id)) continue
+      dialed.current.add(id)
+      void machineHub().set.reach(id).catch(() => {})
+    }
+  }, [reaching])
   const found = (status?.found ?? []).filter((item) => !item.machine_id || !machines.some((machine) => machine.machineId === item.machine_id))
   const waiting = status?.outbox.queued ?? 0
   // Off (the default): say what it is and offer to turn it on, instead of an empty list. Saved machines still show.
@@ -60,7 +72,7 @@ export function Machines() {
   </>
   return <>
     <NameYourMachines cards={cards} />
-    <Section title="Machines" accessory={machines.length > 1 ? <Label color={t.textSecondary} size={13} lineHeight={19.5}>{footerText(machines, waiting)}</Label> : undefined}>
+    <Section title="Machines" accessory={machines.length > 1 ? <Label color={t.textSecondary} size={13} lineHeight={19.5}>{footerText(cards.map((card) => card.row), waiting)}</Label> : undefined}>
       {cards.map((card) => <MachineCardRow key={card.machineId} card={card} busy={net.busy === card.machineId} onRemove={() => setRemoving(card)} />)}
       {machines.length < 2 && <Row title="" description={<Hint>This is your only machine. Machines on your Tailscale network show up below, and you can add one with a code.</Hint>} />}
     </Section>
@@ -288,7 +300,7 @@ function Updates({ busy, following, machines, result }: { busy: boolean; followi
         <Label color={t.textSecondary} size={13} lineHeight={20} truncate style={{ flexGrow: 1 }}>{row.text}</Label>
       </div>)}
     </div>}
-    <Row title="Keep all machines on the same version" description="A machine updates itself, once it is idle, when another one runs a newer version. A machine managed by the desktop app is left out."><Switch aria-label="Keep all machines on the same version" testId="machines-follow-updates" checked={!!following} disabled={following === undefined || net.busy === 'follow'} onCheckedChange={(enabled) => void setFollowUpdates(enabled).catch((e) => toast.error('Unable to change the setting', { description: errorText(e) }))} /></Row>
+    <Row title="Keep all machines on the same version" description="A machine updates itself, once it is idle, when another one runs a newer version. A deb or rpm install shows the command to run instead."><Switch aria-label="Keep all machines on the same version" testId="machines-follow-updates" checked={!!following} disabled={following === undefined || net.busy === 'follow'} onCheckedChange={(enabled) => void setFollowUpdates(enabled).catch((e) => toast.error('Unable to change the setting', { description: errorText(e) }))} /></Row>
   </Section>
 }
 

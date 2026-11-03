@@ -377,6 +377,10 @@ struct PeersInner {
     awaited: HashMap<String, (Instant, u32)>,
     /// When this machine last nudged a member that dials it.
     nudged_out: HashMap<String, Instant>,
+    /// Cancelled to give up every dial in flight: they started on a network that changed since.
+    attempts: CancellationToken,
+    /// When the worker's pass that runs now started.
+    pass_started: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -534,6 +538,36 @@ impl Peers {
         inner.next_attempt.insert(machine_id.to_string(), Instant::now() + wait);
     }
 
+    /// How long until a member that failed is dialed again, and how many attempts failed: `None` when it is due.
+    fn waiting(&self, machine_id: &str) -> Option<(Duration, u32)> {
+        let inner = self.lock();
+        let at = inner.next_attempt.get(machine_id)?;
+        let left = at.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then(|| (left, inner.status.get(machine_id).map_or(0, |status| status.failures)))
+    }
+
+    /// What gives up the dials that start now.
+    fn attempts(&self) -> CancellationToken {
+        self.lock().attempts.clone()
+    }
+
+    /// Give up every dial in flight: it started on a network that changed (a wake, a tailnet change, the switch). The
+    /// pass waiting for it goes on at once, and the next one dials again. True when a pass was running.
+    pub(super) fn give_up_attempts(&self) -> bool {
+        let mut inner = self.lock();
+        std::mem::take(&mut inner.attempts).cancel();
+        inner.pass_started.is_some()
+    }
+
+    /// How long the worker's current pass has run, if one runs.
+    pub(super) fn pass_running_for(&self) -> Option<Duration> {
+        self.lock().pass_started.map(|at| at.elapsed())
+    }
+
+    fn set_pass_started(&self, at: Option<Instant>) {
+        self.lock().pass_started = at;
+    }
+
     fn due(&self, machine_id: &str) -> bool {
         self.lock().next_attempt.get(machine_id).is_none_or(|at| Instant::now() >= *at)
     }
@@ -663,6 +697,9 @@ impl Peers {
         inner.nudged_out.clear();
         inner.probed.clear();
         inner.awaited.clear();
+        // A dial that began before the sleep runs on a network that is gone; a timer does not run while the machine
+        // sleeps, so it would otherwise hold the pass for its whole deadline after the wake.
+        std::mem::take(&mut inner.attempts).cancel();
     }
 
     /// Whether `signature` (of a fresh Tailscale status) differs from the one the last pass saw.
@@ -702,6 +739,7 @@ impl Network {
     /// that turned relaying or ports off. Opening is refused at use time; this ends what was already open.
     pub(crate) fn close_unpermitted_streams(&self) {
         self.ports.direct.close_unpermitted(self);
+        self.ports.hops.close_unpermitted(self);
         for link in self.peers.links() {
             let ended = link.relays.close_unpermitted(&effective_scopes(self, &link));
             if ended > 0 {
@@ -752,7 +790,8 @@ impl Network {
     /// operations go once more on the link being closed, and the accepting side's membership check hands a removed
     /// machine's socket here instead of closing it. Its streams end now and its requests are refused (a removed machine
     /// has no scopes); it closes once the machine answers, or after [`FAREWELL_TIMEOUT`]. Saying it again on the same
-    /// link does nothing.
+    /// link does nothing. Only the operations that removed it go, with their signers' chain
+    /// ([`super::Membership::removal_proof`]); a machine that was never a member is told nothing.
     pub fn say_farewell(&self, link: Arc<PeerLink>) {
         if link.farewell.swap(true, Ordering::SeqCst) {
             return;
@@ -760,7 +799,7 @@ impl Network {
         let ops = self
             .membership()
             .filter(|membership| !membership.is_member(&link.machine_id))
-            .map(|membership| membership.all_ops())
+            .map(|membership| membership.removal_proof(&link.machine_id))
             .unwrap_or_default();
         let runtime = tokio::runtime::Handle::try_current();
         let (Ok(runtime), false, false) = (runtime, ops.is_empty(), link.is_closed()) else {
@@ -874,9 +913,13 @@ pub async fn dispatch(state: &AppState, link: &Arc<PeerLink>, method: &str, para
             ok(Empty {})
         }
         PeerPortsPrepare::NAME => ok(super::ports::direct::prepare(state, link, parse(params)?).await?),
+        PeerPortsVia::NAME => ok(super::ports::hop::handle_via(state, link, parse(params)?)?),
+        PeerPortsHop::NAME => ok(super::ports::hop::handle_hop(state, link, parse(params)?).await?),
+        PeerPortsHopCheck::NAME => ok(super::ports::hop::handle_hop_check(state, link, parse(params)?)?),
         PeerPortsRelease::NAME => {
             let request: PeerPortsReleaseParams = parse(params)?;
             network.ports.direct.release(&link.machine_id, request.forward_id);
+            network.ports.hops.release(&link.machine_id, request.forward_id);
             ok(Empty {})
         }
         PeerPortsOpen::NAME => super::ports::handle_open(state, link, parse(params)?).await,
@@ -1138,6 +1181,12 @@ pub(super) async fn tcp_connect(network: &Network, addr: SocketAddr) -> std::io:
     Ok(stream)
 }
 
+/// How long a session socket's WebSocket upgrade may wait for its answer. A path that dies after the request left (the
+/// machine slept, the NAT mapping went away) never answers, and the socket has no keepalive to notice.
+pub(super) fn upgrade_timeout(timing: &super::Timing) -> Duration {
+    timing.dial_deadline.min(Duration::from_secs(15))
+}
+
 /// Open the WebSocket of an established session.
 async fn connect_socket(
     network: &Network,
@@ -1150,9 +1199,29 @@ async fn connect_socket(
     let mut request = target.ws_url(network).into_client_request().map_err(|error| error.to_string())?;
     let header = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|error| error.to_string())?;
     request.headers_mut().insert(AUTHORIZATION, header);
-    let (socket, _) =
-        tokio_tungstenite::client_async(request, stream).await.map_err(|error| format!("the session socket was refused: {error}"))?;
+    let wait = upgrade_timeout(&network.timing);
+    let (socket, _) = tokio::time::timeout(wait, tokio_tungstenite::client_async(request, stream))
+        .await
+        .map_err(|_| format!("the session socket did not answer within {} s", wait.as_secs_f32()))?
+        .map_err(|error| format!("the session socket was refused: {error}"))?;
     Ok(socket)
+}
+
+/// How one dial of the pass ended.
+enum Attempt {
+    Done(Result<(), String>),
+    /// Given up because the network changed while it ran: not a failure of the member, tried again at once.
+    GivenUp,
+}
+
+/// Run one dial within the timing's deadline, giving it up when `attempts` is cancelled.
+async fn bounded(attempts: &CancellationToken, deadline: Duration, dial: impl std::future::Future<Output = Result<(), String>>) -> Attempt {
+    tokio::select! {
+        result = tokio::time::timeout(deadline, dial) => Attempt::Done(
+            result.unwrap_or_else(|_| Err(format!("no answer within {} s; the attempt was given up", deadline.as_secs_f32())))
+        ),
+        _ = attempts.cancelled() => Attempt::GivenUp,
+    }
 }
 
 /// Dial a member: verify it, open a session, connect and run the link until it ends. Returns when
@@ -1354,6 +1423,12 @@ pub(super) fn signature(status: &TsStatus) -> String {
 /// How soon a network listener that failed to open is tried again.
 const LISTEN_RETRY: Duration = Duration::from_secs(10);
 
+/// The longest one pass of the worker may take, dials, discovery and joining together. Each step is bounded on its own;
+/// this is the last line, so nothing that hangs can stop the worker for good.
+const PASS_LIMIT: Duration = Duration::from_secs(180);
+/// The longest the worker waits on the shared spaces of the links after a pass.
+const SPACES_LIMIT: Duration = Duration::from_secs(60);
+
 /// The background worker: runs a pass, then waits for the next tick, a retry that is due, or a
 /// wake-up. It ends with the daemon.
 pub async fn run(state: AppState) {
@@ -1361,10 +1436,24 @@ pub async fn run(state: AppState) {
     // Sleep and tailnet changes cut the backoff short; it ends with the daemon too.
     tokio::spawn(super::wake_watch::run(state.clone()));
     loop {
-        let retry = pass(&state).await;
-        super::spaces::reconcile(&state).await;
-        for link in network.peers.links() {
-            super::spaces::sync(&state, &link, false).await;
+        network.peers.set_pass_started(Some(Instant::now()));
+        let retry = match tokio::time::timeout(PASS_LIMIT, pass(&state)).await {
+            Ok(retry) => retry,
+            Err(_) => {
+                tracing::warn!(target: SESSION_TARGET, limit_s = PASS_LIMIT.as_secs(), "a pass of the machine network ran past its limit; giving it up and starting over");
+                network.peers.give_up_attempts();
+                Some(network.timing.backoff_min)
+            }
+        };
+        network.peers.set_pass_started(None);
+        let spaces = async {
+            super::spaces::reconcile(&state).await;
+            for link in network.peers.links() {
+                super::spaces::sync(&state, &link, false).await;
+            }
+        };
+        if tokio::time::timeout(SPACES_LIMIT, spaces).await.is_err() {
+            tracing::warn!(target: SESSION_TARGET, "syncing spaces with the other machines ran past its limit; going on");
         }
         let tick = if network.is_watching() { network.timing.tick_watching } else { network.timing.tick_idle };
         let mut wait = retry.map_or(tick, |retry| retry.min(tick)).max(Duration::from_millis(20));
@@ -1422,8 +1511,18 @@ pub async fn pass(state: &AppState) -> Option<Duration> {
         let mut dials = Vec::new();
         let mut url_dials = Vec::new();
         for (id, entry) in projection.members() {
+            if *id == me || network.peers.link(id).is_some() {
+                continue;
+            }
             // A paused member gets no session.
-            if *id == me || entry.paused || network.peers.link(id).is_some() || !network.peers.due(id) {
+            if entry.paused {
+                tracing::debug!(target: SESSION_TARGET, machine = %id, "not dialing: the member is paused");
+                continue;
+            }
+            if !network.peers.due(id) {
+                if let Some((left, failures)) = network.peers.waiting(id) {
+                    tracing::debug!(target: SESSION_TARGET, machine = %id, failures, wait_s = left.as_secs_f32(), "not dialing yet: waiting after failed attempts");
+                }
                 continue;
             }
             let node = dial_status.as_ref().zip(entry.descriptor.ts_node_id.as_deref()).and_then(|(status, node_id)| status.peer(node_id));
@@ -1451,23 +1550,44 @@ pub async fn pass(state: &AppState) -> Option<Duration> {
                 network.peers.fail_quiet(id, "not online on the tailnet");
             }
         }
+        // Every dial is bounded by the deadline, and all of them are given up when the network changes meanwhile, so one
+        // that never answers cannot hold the worker (and every other member with it).
+        let attempts = network.peers.attempts();
+        let deadline = network.timing.dial_deadline;
         let results = futures::stream::iter(dials)
-            .map(|(id, node, url)| async move {
-                let result = if node.online { dial(state, &id, &node).await } else { dial_listed_offline(state, &id, &node, url).await };
-                (id, !node.online, result)
+            .map(|(id, node, url)| {
+                let attempts = attempts.clone();
+                async move {
+                    let dialing = async {
+                        if node.online { dial(state, &id, &node).await } else { dial_listed_offline(state, &id, &node, url).await }
+                    };
+                    let result = bounded(&attempts, deadline, dialing).await;
+                    (id, !node.online, result)
+                }
             })
             .buffer_unordered(MAX_CONCURRENT_PROBES)
             .collect::<Vec<_>>()
             .await;
         let url_results = futures::stream::iter(url_dials)
-            .map(|(id, url)| async move {
-                let result = super::dial_out::dial(state, &id, &url).await;
-                (id, false, result)
+            .map(|(id, url)| {
+                let attempts = attempts.clone();
+                async move {
+                    let result = bounded(&attempts, deadline, super::dial_out::dial(state, &id, &url)).await;
+                    (id, false, result)
+                }
             })
             .buffer_unordered(MAX_CONCURRENT_PROBES)
             .collect::<Vec<_>>()
             .await;
-        for (id, listed_offline, result) in results.into_iter().chain(url_results) {
+        for (id, listed_offline, attempt) in results.into_iter().chain(url_results) {
+            let result = match attempt {
+                Attempt::Done(result) => result,
+                Attempt::GivenUp => {
+                    tracing::info!(target: SESSION_TARGET, machine = %id, "gave up a dial: the network changed while it ran; dialing again now");
+                    network.wake();
+                    continue;
+                }
+            };
             match result {
                 Ok(()) if listed_offline => {
                     tracing::info!(target: SESSION_TARGET, machine = %id, "Tailscale lists this machine offline, but it answered; opened a session");
@@ -1607,10 +1727,12 @@ async fn discover(state: &AppState, status: &TsStatus) {
             });
         }
     }
+    let found: Vec<FoundEntry> = found.into_iter().flatten().collect();
+    tell_removed_machines(state, &found);
     let mut changed = false;
     {
         let mut inner = network.peers.lock();
-        for entry in found.into_iter().flatten() {
+        for entry in found {
             tracing::debug!(target: DISCOVERY_TARGET, machine = %entry.descriptor.machine_id, node = %entry.node.node_id, "found a machine on the tailnet");
             changed |= inner.found.insert(entry.node.node_id.clone(), entry).is_none();
         }
@@ -1618,6 +1740,65 @@ async fn discover(state: &AppState, status: &TsStatus) {
     if changed {
         network.notify_changed();
     }
+}
+
+/// A machine that was removed while it was offline, with the larger id, never dials: it nudges the member that should
+/// dial it, and members do not dial removed machines. When a removed machine nudged this one (so it does not know)
+/// and discovery then finds it answering with the very key the set recorded for it (its well-known proof verified),
+/// this member dials it once to say farewell (ADE-120): the removed machine still takes it for a member and grants
+/// the session, and the link that opens is handed to [`Network::say_farewell`] by `removed_while_opening`, which
+/// pushes the operations that removed it. Once per nudge, and at most once per
+/// [`super::Timing::removal_notice_every`] for each machine; a removed machine that knows nudges no one.
+fn tell_removed_machines(state: &AppState, found: &[FoundEntry]) {
+    let network = &state.network;
+    let Some(membership) = network.membership().filter(|membership| membership.self_is_member()) else { return };
+    let projection = membership.projection();
+    for entry in found {
+        let answered = &entry.descriptor;
+        let removed = projection
+            .entry(&answered.machine_id)
+            .is_some_and(|recorded| recorded.removed.is_some() && recorded.descriptor.signing_key == answered.signing_key);
+        if !removed
+            || network.peers.link(&answered.machine_id).is_some()
+            || !network.take_farewell_wanted(&answered.machine_id)
+            || !network.removal_notice_due(&answered.machine_id)
+        {
+            continue;
+        }
+        let state = state.clone();
+        let entry = entry.clone();
+        tokio::spawn(async move {
+            let machine = entry.descriptor.machine_id.clone();
+            match farewell_dial(&state, &entry).await {
+                Ok(()) => tracing::info!(target: SESSION_TARGET, %machine, "told a removed machine that it was removed"),
+                Err(error) => {
+                    tracing::debug!(target: SESSION_TARGET, %machine, %error, "could not tell a removed machine that it was removed")
+                }
+            }
+        });
+    }
+}
+
+/// Open a session to a removed machine only to close it with the operations that removed it.
+async fn farewell_dial(state: &AppState, found: &FoundEntry) -> Result<(), String> {
+    let network = &state.network;
+    let membership = network.membership().ok_or("the network is unavailable")?;
+    let projection = membership.projection();
+    let machine_id = found.descriptor.machine_id.as_str();
+    let entry = projection.entry(machine_id).filter(|entry| entry.removed.is_some()).ok_or("not a removed machine")?;
+    let ip = found.node.ip().ok_or("the node has no tailnet address")?;
+    let target = Target {
+        machine_id: machine_id.to_string(),
+        signing_key: entry.descriptor.signing_key.clone(),
+        ts_ip: ip,
+        port: found.port,
+        url: None,
+    };
+    let established = session::open(network, membership, &target, &[Scope::MachinePeer], None).await.map_err(|error| error.to_string())?;
+    let socket = connect_socket(network, &target, &established.token).await?;
+    // Registered, found removed, told and closed: `run_dialed` never treats it as a member's session.
+    run_dialed(state.clone(), target, established, socket);
+    Ok(())
 }
 
 pub(super) async fn probe_node(state: &AppState, node: TsNode) -> Option<FoundEntry> {
@@ -1665,6 +1846,56 @@ mod tests {
         // The plain schedule would have retried after 2 s.
         peers.fail("n", &timing, "nothing answered".into());
         assert!(peers.soonest_retry().unwrap() <= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_dial_is_bounded_by_its_deadline_and_given_up_when_the_network_changes() {
+        tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(async {
+            let attempts = CancellationToken::new();
+            let hung = std::future::pending::<Result<(), String>>();
+            let started = Instant::now();
+            let Attempt::Done(Err(error)) = bounded(&attempts, Duration::from_millis(100), hung).await else { panic!("a failure") };
+            assert!(error.contains("no answer"), "{error}");
+            assert!(started.elapsed() < Duration::from_secs(2));
+
+            let peers = Peers::default();
+            let attempts = peers.attempts();
+            let waiting = tokio::spawn(async move { bounded(&attempts, Duration::from_secs(60), std::future::pending()).await });
+            tokio::task::yield_now().await;
+            peers.after_resume();
+            let given_up = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("given up at once").unwrap();
+            assert!(matches!(given_up, Attempt::GivenUp), "a wake is not a failure of the member");
+            assert!(!peers.attempts().is_cancelled(), "the next pass dials with a fresh token");
+        });
+    }
+
+    #[test]
+    fn a_session_socket_that_never_answers_its_upgrade_is_given_up() {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap().block_on(async {
+            let dir = crate::network::testutil::TempDir::new("hung-upgrade");
+            let store = kybern_store::Store::open_in_memory().unwrap();
+            let tailscale = Arc::new(crate::network::tailscale::Fake::new(dir.path().join("no-tailnet.json")));
+            let network = Network::new(dir.path(), &store, "00000000-0000-7000-8000-000000000001", tailscale, Timing::fast());
+            // Accepts the connection and reads the upgrade request, then never answers.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let holder = tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((socket, _)) = listener.accept().await {
+                    held.push(socket);
+                }
+            });
+            let target =
+                Target { machine_id: "m".into(), signing_key: String::new(), ts_ip: "127.0.0.1".parse().unwrap(), port, url: None };
+            let started = Instant::now();
+            let error = tokio::time::timeout(Duration::from_secs(10), connect_socket(&network, &target, "token"))
+                .await
+                .expect("the upgrade is bounded")
+                .expect_err("nothing answered");
+            assert!(error.contains("did not answer"), "{error}");
+            assert!(started.elapsed() <= upgrade_timeout(&Timing::fast()) + Duration::from_secs(2));
+            holder.abort();
+        });
     }
 
     struct NoSink;

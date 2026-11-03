@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "kybern"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "anyhow",
  "kybern-cli",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "kybern-cli"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "kybern-client"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2076,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "kybern-daemon"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2099,6 +2099,7 @@ dependencies = [
  "kybern-protocol",
  "kybern-store",
  "libc",
+ "minisign-verify",
  "portable-pty",
  "rand 0.10.2",
  "rcgen",
@@ -2126,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "kybern-drivers"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2151,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "kybern-git"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "anyhow",
  "kybern-protocol",
@@ -2163,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "kybern-protocol"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "chrono",
  "insta",
@@ -2176,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "kybern-store"
-version = "0.21.3"
+version = "0.21.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2307,6 +2308,12 @@ name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
 
 [[package]]
 name = "miniz_oxide"

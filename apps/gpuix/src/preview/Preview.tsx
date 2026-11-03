@@ -39,6 +39,7 @@ import { MiniResize, type MiniCorner } from './MiniResize.tsx'
 import { MiniChrome } from './MiniChrome.tsx'
 import { PreviewChrome } from './Chrome.tsx'
 import { PortForwardBar } from './PortForwardBar.tsx'
+import { SlowLoadStrip } from './SlowLoad.tsx'
 import { addressPath } from './remote.ts'
 import { shortMachineName } from '../../../../packages/kybern-client/src/forkMachine.ts'
 import { PreviewStateView } from './States.tsx'
@@ -98,6 +99,7 @@ export function PreviewPane({ threadId }: { threadId: string }) {
     {entry && s.device && <DeviceToolbar threadId={threadId} />}
     <ErrorLine error={s.error} />
     {s.forwardOpen && <PortForwardBar threadId={threadId} />}
+    {entry?.machine && <SlowLoadStrip threadId={threadId} />}
     {!entry && <ServersBar threadId={threadId} chosenId={s.serversOn} />}
     {s.wsFailed && !s.wsNoticeDismissed && entry?.proxy && <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 12, height: 28 }}><Label color={t.textSecondary} size={11} truncate>{`Live reload isn't connected through ${environment.name}. Reload to see changes.`}</Label><Button variant="ghost" size="sm" onClick={() => previewCommand(threadId, 'reload')}>Reload</Button><IconButton icon={N.x} label="Dismiss" size="sm" onClick={() => setPreview(threadId, { wsNoticeDismissed: true })} /></div>}
     {s.permission ? <PreviewStateView threadId={threadId} />

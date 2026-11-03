@@ -12,6 +12,11 @@
 //!   [`Timing::status_poll`] (three times that on battery). When who is online changed since the
 //!   last pass, the worker runs now, and the pass resets the backoff as before. A member that is
 //!   really off costs one status read per poll and no connection attempts beyond the usual backoff.
+//!
+//! Both also give up the dials in flight ([`peers::Peers::give_up_attempts`]): they started on a network that is gone,
+//! and a dial whose answer never comes (the path died after its request left) would otherwise hold the worker's pass,
+//! and every member with it, for its whole deadline. Timers do not run while the machine sleeps, so that deadline
+//! counts only awake time.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -41,6 +46,9 @@ pub fn status_poll(timing: &Timing, on_battery: bool) -> Duration {
 impl super::Network {
     /// This machine woke from sleep: retry everyone now and a few times more while Tailscale reconnects.
     pub fn after_resume(self: &std::sync::Arc<Self>) {
+        if let Some(running) = self.peers.pass_running_for().filter(|running| *running > Duration::from_secs(60)) {
+            tracing::warn!(target: TARGET, running_s = running.as_secs(), "a pass of the machine network was still running at the wake; giving up its dials");
+        }
         self.peers.after_resume();
         self.wake();
         let network = self.clone();
@@ -74,7 +82,12 @@ async fn poll_tailnet(state: &AppState) {
     }
     let Ok(status) = network.tailscale.status().await else { return };
     if status.running && network.peers.signature_changed(&peers::signature(&status)) {
-        tracing::debug!(target: TARGET, "the tailnet changed while a member was away; looking now");
+        // A pass updates the signature before it dials, so this repeats only while no pass gets that far.
+        let running = network.peers.pass_running_for();
+        tracing::debug!(target: TARGET, pass_running_s = ?running.map(|running| running.as_secs()), "the tailnet changed while a member was away; looking now");
+        if running.is_some() {
+            network.peers.give_up_attempts();
+        }
         network.wake();
     }
 }

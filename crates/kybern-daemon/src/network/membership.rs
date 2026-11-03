@@ -309,6 +309,34 @@ impl Membership {
         self.apply_locked(&mut inner, &envelopes, false)
     }
 
+    /// The operations that prove `machine_id` was removed, for that machine alone ([`OpSet::removal_proof`]).
+    /// Empty unless the set says it was removed.
+    pub fn removal_proof(&self, machine_id: &str) -> Vec<OpEnvelope> {
+        let inner = self.lock();
+        if !inner.projection.is_removed(machine_id) {
+            return Vec::new();
+        }
+        inner.set.removal_proof(machine_id)
+    }
+
+    /// Take a member's word that this machine was removed (ADE-120): the operations are verified exactly as a
+    /// sync verifies them, and kept only when they make this machine removed. Anything else, a forgery from a
+    /// machine that is not a member among them, changes nothing and fails with
+    /// [`MembershipError::NotRemoved`].
+    pub fn apply_removal_proof(&self, envelopes: Vec<OpEnvelope>) -> Result<ApplyOutcome> {
+        let mut inner = self.lock();
+        if inner.set.network_id().is_none() {
+            return Err(MembershipError::NoNetwork);
+        }
+        let mut ignored = Vec::new();
+        let mut candidate = inner.set.clone();
+        candidate.apply(parse_batch(&envelopes, &mut ignored), false);
+        if !candidate.project().is_removed(&inner.machine_id) {
+            return Err(MembershipError::NotRemoved);
+        }
+        self.apply_locked(&mut inner, &envelopes, false)
+    }
+
     /// Adopt the operation set of a network this machine has been added to (§2.4 step 3). It must
     /// be a lone machine, and the set must make it a member with the key it holds; otherwise
     /// nothing is kept.

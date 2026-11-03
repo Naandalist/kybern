@@ -13,6 +13,9 @@
 #                               when cross-building
 #   CARGO_TARGET_DIR            honoured if set
 #   TAURI_SIGNING_PRIVATE_KEY   required unless SKIP_SIGN=1 (the updater key)
+#   MACOS_SIGNING_P12_BASE64,   the "Kybern Code Signing" identity (scripts/macos-signing.sh), which keeps the app's
+#   MACOS_SIGNING_P12_PASSWORD  designated requirement the same across versions; without them the app is signed ad hoc
+#                               and every update looks like a new app to the Keychain
 #
 # Requires: the patched native addon for that target (apps/gpuix/native/update.sh
 # with the same KYBERN_GPUIX_TARGET), release builds of kybern and kybernd for
@@ -42,6 +45,13 @@ BIN_DIR="$(cd "${KYBERN_BIN_DIR:-$DEFAULT_BIN_DIR}" && pwd)"
 DIST="$ROOT/dist"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
 TARBALL="$DIST/kybern-gpuix_${VERSION}_${ARCH}.app.tar.gz"
+
+if [[ -z "${KYBERN_CODESIGN_IDENTITY:-}" && -n "${MACOS_SIGNING_P12_BASE64:-}" ]]; then
+  trap '"$ROOT/scripts/macos-signing.sh" cleanup' EXIT
+  SIGNING="$("$ROOT/scripts/macos-signing.sh" setup)"
+  eval "$SIGNING"
+  [[ -n "${KYBERN_CODESIGN_IDENTITY:-}" ]] || { echo "the code-signing identity could not be set up" >&2; exit 1; }
+fi
 
 echo "==> packaging Kybern GPUIX $VERSION for $TARGET"
 rm -rf apps/gpuix/dist

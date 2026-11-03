@@ -15,6 +15,11 @@
 //! A grant is a random `kyb_m_…` token. Only its hash is kept, in memory, so grants never survive a
 //! restart. It is bound to the holder's machine id and source address, lasts an hour, and is
 //! renewed after half of that by a new signed request that names it.
+//!
+//! A machine that was removed while it was offline asks for a session as if it were still a member. Once its
+//! signature verifies against the key the set recorded for it, and if its request lists
+//! [`features::REMOVAL_PROOF_V1`], the refusal carries the signed operations that removed it
+//! ([`RemovalNotice`]); the caller verifies them like a sync and leaves the network (ADE-120).
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -28,7 +33,7 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use chrono::{DateTime, Utc};
-use kybern_protocol::Scope;
+use kybern_protocol::{OpEnvelope, Scope, features};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -65,6 +70,18 @@ pub struct SessionRequest {
     pub renews: Option<String>,
     /// `ed25519(from, request_message)`, standard base64.
     pub sig: String,
+    /// What the caller understands in an answer, such as [`features::REMOVAL_PROOF_V1`]. Not signed: it only asks
+    /// for more in a refusal, and an older target ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+/// The body of the 403 a removed machine gets for a session request (ADE-120): the operations that removed it
+/// and the chain that makes their signers valid ([`super::ops::OpSet::removal_proof`]), nothing else of the set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemovalNotice {
+    pub message: String,
+    pub removed: Vec<OpEnvelope>,
 }
 
 /// The target's answer.
@@ -257,6 +274,10 @@ pub async fn serve(State(state): State<AppState>, Peer(peer): Peer, Json(request
         return refuse(StatusCode::NOT_FOUND, "the machine network is turned off on this machine");
     }
     let Some(peer) = peer else { return refuse(StatusCode::BAD_REQUEST, "the source address is unknown") };
+    if let Some(notice) = removal_notice(network, membership, &request) {
+        tracing::info!(target: "kybern::network::session", machine = %request.from, source = %peer.ip(), "told a removed machine that it was removed");
+        return (StatusCode::FORBIDDEN, Json(notice)).into_response();
+    }
     match handle(&state, membership, peer.ip(), request).await {
         Ok(response) => Json(response).into_response(),
         Err((status, reason)) => {
@@ -264,6 +285,31 @@ pub async fn serve(State(state): State<AppState>, Peer(peer): Peer, Json(request
             refuse(status, reason)
         }
     }
+}
+
+/// The answer to a removed machine that asks for a session (ADE-120), when it may have one: it asked for it, it was
+/// removed (not merely unknown), its request is fresh and signed by the key the set recorded for it, the nonce is
+/// new, and it was not told within [`super::Timing::removal_notice_every`]. Otherwise `None`, and the request is
+/// refused plainly like any other non-member's. A stranger learns nothing: without the removed machine's key no
+/// signature verifies.
+fn removal_notice(network: &Network, membership: &Membership, request: &SessionRequest) -> Option<RemovalNotice> {
+    if !request.features.iter().any(|feature| feature == features::REMOVAL_PROOF_V1) || request.to != membership.machine_id() {
+        return None;
+    }
+    let projection = membership.projection();
+    let entry = projection.entry(&request.from).filter(|entry| entry.removed.is_some())?;
+    let window = network.timing.clock_window;
+    let at = DateTime::parse_from_rfc3339(&request.at).ok()?;
+    if (Utc::now() - at.with_timezone(&Utc)).abs() > chrono::Duration::from_std(window).unwrap_or(chrono::Duration::seconds(60)) {
+        return None;
+    }
+    let signature = B64.decode(&request.sig).ok()?;
+    keys::verify_signature(&entry.descriptor.signing_key, &request_message(request), &signature).ok()?;
+    if !network.replay.insert(&request.nonce_a, window) || !network.removal_notice_due(&request.from) {
+        return None;
+    }
+    let removed = membership.removal_proof(&request.from);
+    (!removed.is_empty()).then(|| RemovalNotice { message: "this machine was removed from the network".into(), removed })
 }
 
 async fn handle(
@@ -412,12 +458,35 @@ pub enum SessionError {
     Refused { status: u16, message: String },
     #[error("the machine answered with a session response that does not verify")]
     BadResponse,
+    /// The target said this machine was removed, with operations that prove it; they were applied.
+    #[error("this machine was removed from the network")]
+    Removed,
     #[error("{0}")]
     Transport(String),
 }
 
 fn probe_timeout(ip: IpAddr) -> Duration {
     if ip.is_loopback() { Duration::from_secs(3) } else { Duration::from_secs(10) }
+}
+
+/// A member refused a session because this machine was removed, and sent the operations that say so (ADE-120).
+/// They are verified exactly as a sync verifies them and kept only if they make this machine removed; then the
+/// removal runs as if it had been pushed. Anything else is a plain refusal.
+pub(super) fn take_removal_notice(network: &Network, from: &str, notice: RemovalNotice) -> SessionError {
+    let refused =
+        |message: &str| SessionError::Refused { status: StatusCode::FORBIDDEN.as_u16(), message: message.chars().take(200).collect() };
+    let Some(membership) = network.membership() else { return refused(&notice.message) };
+    match membership.apply_removal_proof(notice.removed) {
+        Ok(outcome) => {
+            tracing::warn!(target: "kybern::network::session", machine = %from, "a member says this machine was removed, and its operations prove it");
+            network.after_apply(Some(from), &outcome);
+            SessionError::Removed
+        }
+        Err(error) => {
+            tracing::warn!(target: "kybern::network::session", machine = %from, %error, "ignored a removal notice that does not prove this machine was removed");
+            refused("the machine refused the session")
+        }
+    }
 }
 
 /// Verify the target, then open (or renew) a session with it. The well-known check runs first and
@@ -470,6 +539,7 @@ pub async fn open(
         scopes: scopes.iter().map(|scope| scope.as_str().to_string()).collect(),
         renews: renews.map(str::to_string),
         sig: String::new(),
+        features: vec![features::REMOVAL_PROOF_V1.to_string()],
     };
     request.sig = B64.encode(membership.keys().sign(&request_message(&request)));
     let response = network
@@ -483,6 +553,11 @@ pub async fn open(
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let message = response.text().await.unwrap_or_default();
+        if status == StatusCode::FORBIDDEN.as_u16()
+            && let Ok(notice) = serde_json::from_str::<RemovalNotice>(&message)
+        {
+            return Err(take_removal_notice(network, &target.machine_id, notice));
+        }
         return Err(SessionError::Refused { status, message: message.chars().take(200).collect() });
     }
     let granted: SessionResponse = response.json().await.map_err(|_| SessionError::BadResponse)?;
@@ -516,6 +591,7 @@ mod tests {
             scopes: vec!["machine:relay".into(), "machine:peer".into()],
             renews: None,
             sig: String::new(),
+            features: vec![],
         };
         assert_eq!(request_message(&request), b"kybern-session-v1\0a\0b\0n\0t\0machine:peer,machine:relay\0");
         // Scope order does not matter; every other field does.

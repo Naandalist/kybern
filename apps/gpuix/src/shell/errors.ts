@@ -18,6 +18,12 @@ const toastError: Notify = (title, description) => { toast.error(title, { id: 'r
 
 function report(kind: 'exception' | 'rejection', thrown: unknown, notify: Notify) {
   const error = thrown instanceof Error ? thrown : new Error(String(thrown))
+  // A call on a machine that is not connected (`OfflineError`) is not a crash: the thread or row that made it already
+  // says the machine is offline, so a second "Something went wrong" toast only alarms (ADE-124).
+  if (error.name === 'OfflineError') {
+    console.warn(`[kybern] ${kind} from a machine that is not connected:`, error.message)
+    return
+  }
   console.error(`[kybern] uncaught ${kind} (window kept):`, error.stack ?? error.message)
   const now = Date.now()
   if (now - lastToast < TOAST_INTERVAL_MS) return

@@ -57,6 +57,10 @@ test('copies kybernd and kybern out of the image once per version', () => {
   stageAppImageCommands(app, '0.16.1', data)
   expect(readFileSync(staged.kybernd, 'utf8')).toBe('daemon 2')
   expect(statSync(staged.kybernd).ino).not.toBe(before)
+  // The copies name the image they came from, for the daemon to update while the app is closed.
+  const image = path.join(root, 'Kybern.AppImage')
+  stageAppImageCommands(app, '0.16.1', data, undefined, image)
+  expect(readFileSync(path.join(data, 'kybern-gpuix/bin/appimage'), 'utf8').trim()).toBe(image)
   // Neither folder writable: null, so the caller shows an error instead of running the mounted copies.
   writeFileSync(path.join(root, 'file'), '')
   expect(stageAppImageCommands(app, '0.16.1', path.join(root, 'file'), '')).toBeNull()

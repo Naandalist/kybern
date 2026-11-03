@@ -793,3 +793,441 @@ async fn run_handshake_cap() {
     }
     assert!(ready.is_some(), "an authorized connection after the idle ones closed");
 }
+
+// ---- ADE-126: slow links ----
+
+/// One HTTP/1.1 request on a new connection to a forward's plain listener.
+async fn plain_get(port: u16, path: &str, headers: &[(&str, &str)]) -> (hyper::StatusCode, hyper::HeaderMap, hyper::body::Bytes) {
+    use http_body_util::{BodyExt, Empty};
+    let socket = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(socket)).await.unwrap();
+    tokio::spawn(connection);
+    let mut request = hyper::Request::get(path).header("host", format!("127.0.0.1:{port}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = sender.send_request(request.body(Empty::<hyper::body::Bytes>::new()).unwrap()).await.unwrap();
+    let (parts, body) = response.into_parts();
+    (parts.status, parts.headers, body.collect().await.unwrap().to_bytes())
+}
+
+fn gunzip(bytes: &[u8]) -> String {
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(bytes), &mut text).unwrap();
+    text
+}
+
+/// A body as the browser reads it: gunzipped when it says it is gzip.
+fn decoded(headers: &hyper::HeaderMap, bytes: &[u8]) -> String {
+    if headers.get("content-encoding").is_some_and(|value| value == "gzip") {
+        gunzip(bytes)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+#[test]
+fn a_plain_forward_speaks_http_over_the_tunnel_compressing_counting_and_caching_pages() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(crate::RUNTIME_THREAD_STACK)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_plain_http());
+}
+
+async fn run_plain_http() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (a, b) = direct_pair().await;
+    let version = Arc::new(AtomicUsize::new(1));
+    let full = Arc::new(AtomicUsize::new(0));
+    let unchanged = Arc::new(AtomicUsize::new(0));
+    let (hmr, _) = tokio::sync::broadcast::channel::<String>(4);
+    let module = {
+        let (version, full, unchanged) = (version.clone(), full.clone(), unchanged.clone());
+        move |axum::extract::Path(n): axum::extract::Path<usize>, headers: axum::http::HeaderMap| {
+            let (version, full, unchanged) = (version.clone(), full.clone(), unchanged.clone());
+            async move {
+                let v = if n == 3 { version.load(Ordering::SeqCst) } else { 1 };
+                let tag = format!("W/\"{n}-{v}\"");
+                if headers.get("if-none-match").and_then(|h| h.to_str().ok()) == Some(tag.as_str()) {
+                    unchanged.fetch_add(1, Ordering::SeqCst);
+                    return axum::http::Response::builder().status(304).header("etag", tag).body(axum::body::Body::empty()).unwrap();
+                }
+                full.fetch_add(1, Ordering::SeqCst);
+                axum::http::Response::builder()
+                    .header("content-type", "application/javascript")
+                    .header("cache-control", "no-cache")
+                    .header("etag", tag)
+                    .body(axum::body::Body::from(format!("export const m{n} = {v} // {}", "padding ".repeat(200))))
+                    .unwrap()
+            }
+        }
+    };
+    let app = Router::new()
+        .route("/", get(|| async { ([("content-type", "text/html")], "<script type=module src=/m/0></script>") }))
+        .route("/m/{n}", get(module))
+        .route(
+            "/slow",
+            get(|| async {
+                let chunks = futures::stream::iter(0..8).then(|i| async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    Ok::<_, std::convert::Infallible>(format!("chunk {i} {}\n", "x".repeat(4000)))
+                });
+                axum::body::Body::from_stream(chunks)
+            }),
+        )
+        .route(
+            "/hmr",
+            get({
+                let hmr = hmr.clone();
+                move |ws: WebSocketUpgrade| {
+                    let mut updates = hmr.subscribe();
+                    async move {
+                        ws.on_upgrade(|mut socket| async move {
+                            let _ = socket.send(AxumMessage::Text(r#"{"type":"connected"}"#.into())).await;
+                            while let Ok(update) = updates.recv().await {
+                                if socket.send(AxumMessage::Text(update.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_port = listener.local_addr().unwrap().port();
+    let dev = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // A protocol where the server speaks first stays byte-for-byte.
+    let greeter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let greeter_port = greeter.local_addr().unwrap().port();
+    let greeting = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        while let Ok((mut socket, _)) = greeter.accept().await {
+            let _ = socket.write_all(b"220 ready\r\n").await;
+            tokio::spawn(async move {
+                let (mut read, mut write) = socket.split();
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+            });
+        }
+    });
+
+    let (client, _) = a.client(&Scope::ALL).await;
+    let forward =
+        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let port = forward.local_port;
+    // What a page's module script sends: only such subresources are answered from what a page load's batch confirmed.
+    let gzip = [("accept-encoding", "gzip, deflate, br"), ("sec-fetch-dest", "script")];
+
+    // Text is compressed on the target for a plain forward too; Kybern's own header never reaches the browser.
+    let (status, headers, body) = plain_get(port, "/m/1", &gzip).await;
+    assert_eq!(status, 200);
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert_eq!(headers["etag"], "W/\"1-1\"");
+    assert!(!headers.contains_key("x-kybern-etag"));
+    assert!(gunzip(&body).starts_with("export const m1 = 1"));
+    assert!(body.len() < 400, "compressed to {} bytes", body.len());
+    let (_, plain, body) = plain_get(port, "/m/2", &[]).await;
+    assert!(!plain.contains_key("content-encoding"), "a browser that does not accept gzip gets the bytes as they are");
+    assert!(String::from_utf8_lossy(&body).starts_with("export const m2 = 1"));
+
+    // A cold page load: each module crosses once. /m/1 and /m/2 were just fetched and are answered here.
+    let navigate = [("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "document"), ("accept-encoding", "gzip, deflate, br")];
+    let page = |n: usize| async move { plain_get(port, &format!("/m/{n}"), &gzip).await };
+    assert_eq!(plain_get(port, "/", &navigate).await.0, 200);
+    for (n, (status, headers, body)) in futures::future::join_all((0..20).map(page)).await.into_iter().enumerate() {
+        assert_eq!(status, 200);
+        assert!(decoded(&headers, &body).starts_with(&format!("export const m{n} = 1")), "module {n}");
+    }
+    // /m/2 was kept as the dev server sent it (it does not vary on encoding): it is answered here as well.
+    assert_eq!(full.load(Ordering::SeqCst), 20, "every module crossed once");
+    // The navigation revalidated what was already kept, in one batch: /m/1 and plain /m/2.
+    crate::network::harness::eventually("the first batch", Duration::from_secs(5), || unchanged.load(Ordering::SeqCst) == 2).await;
+
+    // A reload: one batch checks every kept module on the target; only the changed one comes back.
+    version.store(2, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(plain_get(port, "/", &navigate).await.0, 200);
+    for (n, (status, headers, body)) in futures::future::join_all((0..20).map(page)).await.into_iter().enumerate() {
+        assert_eq!(status, 200);
+        let expected = if n == 3 { 2 } else { 1 };
+        assert!(decoded(&headers, &body).starts_with(&format!("export const m{n} = {expected}")), "module {n}");
+    }
+    assert_eq!(full.load(Ordering::SeqCst), 21, "only the changed module's body crossed again");
+    assert_eq!(unchanged.load(Ordering::SeqCst), 2 + 19, "the other 19 kept modules were confirmed by the batch");
+    // The browser's own conditional request is answered here.
+    let (status, _, _) =
+        plain_get(port, "/m/4", &[("accept-encoding", "gzip, deflate, br"), ("sec-fetch-dest", "script"), ("if-none-match", "W/\"4-1\"")])
+            .await;
+    assert_eq!(status, 304);
+    assert_eq!(unchanged.load(Ordering::SeqCst), 21, "answered here");
+    // The same module fetched as data (a `fetch`, destination empty) is asked about: the target confirms it with a 304.
+    let (status, _, _) = plain_get(port, "/m/4", &[("accept-encoding", "gzip, deflate, br"), ("sec-fetch-dest", "empty")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(unchanged.load(Ordering::SeqCst), 22, "a fetch is never answered without asking");
+
+    // Hot reload works through the forward, and an update makes kept responses ask again.
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/hmr")).await.unwrap();
+    assert!(socket.next().await.unwrap().unwrap().to_text().unwrap().contains("connected"));
+    hmr.send(r#"{"type":"update"}"#.into()).unwrap();
+    assert!(socket.next().await.unwrap().unwrap().to_text().unwrap().contains("update"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (status, _, body) = plain_get(port, "/m/5", &gzip).await;
+    assert_eq!(status, 200);
+    assert!(gunzip(&body).starts_with("export const m5 = 1"));
+    assert_eq!(unchanged.load(Ordering::SeqCst), 23, "revalidated after the hot update, with no body");
+    assert_eq!(full.load(Ordering::SeqCst), 21);
+
+    // A slow response shows as a load in progress, then goes away.
+    let slow = tokio::spawn(async move { plain_get(port, "/slow", &[]).await });
+    let views = || a.state.network.ports.views().into_iter().find(|f| f.id == forward.id).unwrap();
+    crate::network::harness::eventually("a load in progress", Duration::from_secs(5), || {
+        views().loading.is_some_and(|load| load.received_bytes > 0 && load.open_requests == 1)
+    })
+    .await;
+    assert_eq!(slow.await.unwrap().2.len(), 8 * 4009);
+    crate::network::harness::eventually("the load ends", Duration::from_secs(5), || views().loading.is_none()).await;
+
+    // Nothing went over the session's WebSocket.
+    assert_eq!(a.state.network.peers.link(&b.id()).unwrap().relays.len(), 0);
+
+    let greeted = client
+        .call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: greeter_port, local_port: None, https: false })
+        .await
+        .unwrap();
+    let mut raw = tokio::net::TcpStream::connect(("127.0.0.1", greeted.local_port)).await.unwrap();
+    let mut line = [0u8; 11];
+    tokio::time::timeout(Duration::from_secs(3), tokio::io::AsyncReadExt::read_exact(&mut raw, &mut line)).await.unwrap().unwrap();
+    assert_eq!(&line, b"220 ready\r\n");
+    tokio::io::AsyncWriteExt::write_all(&mut raw, b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+    let mut echo = [0u8; 18];
+    tokio::io::AsyncReadExt::read_exact(&mut raw, &mut echo).await.unwrap();
+    assert_eq!(&echo, b"GET / HTTP/1.1\r\n\r\n", "after the server spoke first, even HTTP-looking bytes pass as they are");
+    dev.abort();
+    greeting.abort();
+}
+
+#[test]
+fn a_cached_api_answer_never_hides_a_write() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(crate::RUNTIME_THREAD_STACK)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_api_after_write());
+}
+
+/// One request with a body on a new connection to a forward's plain listener.
+async fn plain_send(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> (hyper::StatusCode, hyper::body::Bytes) {
+    use http_body_util::{BodyExt, Full};
+    let socket = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(socket)).await.unwrap();
+    tokio::spawn(connection);
+    let mut request = hyper::Request::builder().method(method).uri(path).header("host", format!("127.0.0.1:{port}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = sender.send_request(request.body(Full::new(hyper::body::Bytes::from(body.to_string()))).unwrap()).await.unwrap();
+    let (parts, body) = response.into_parts();
+    (parts.status, body.collect().await.unwrap().to_bytes())
+}
+
+/// Express's default for `res.json()`: a weak ETag of the body and no `Cache-Control`. A list read, written and read
+/// again through the forward must show the write, during a page load whose batch confirmed the old list as well.
+async fn run_api_after_write() {
+    use std::sync::Mutex;
+    let (a, b) = direct_pair().await;
+    let items = Arc::new(Mutex::new(vec!["one".to_string()]));
+    let list = {
+        let items = items.clone();
+        move |headers: axum::http::HeaderMap| {
+            let items = items.clone();
+            async move {
+                let body = serde_json::to_string(&*items.lock().unwrap()).unwrap();
+                let tag = format!("W/\"{}-{}\"", body.len(), body.bytes().map(u32::from).sum::<u32>());
+                if headers.get("if-none-match").and_then(|h| h.to_str().ok()) == Some(tag.as_str()) {
+                    return axum::http::Response::builder().status(304).header("etag", tag).body(axum::body::Body::empty()).unwrap();
+                }
+                axum::http::Response::builder()
+                    .header("content-type", "application/json; charset=utf-8")
+                    .header("etag", tag)
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }
+        }
+    };
+    let add = {
+        let items = items.clone();
+        move |body: String| {
+            let items = items.clone();
+            async move {
+                items.lock().unwrap().push(body);
+                axum::http::StatusCode::CREATED
+            }
+        }
+    };
+    let app = Router::new()
+        .route("/", get(|| async { ([("content-type", "text/html")], "<script type=module src=/app.js></script>") }))
+        .route("/api/items", get(list).post(add));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_port = listener.local_addr().unwrap().port();
+    let dev = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (client, _) = a.client(&Scope::ALL).await;
+    let forward =
+        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let port = forward.local_port;
+    let fetch = [("sec-fetch-dest", "empty"), ("sec-fetch-mode", "cors"), ("accept", "application/json")];
+    let navigate = [("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "document")];
+
+    assert_eq!(&plain_get(port, "/api/items", &fetch).await.2[..], br#"["one"]"#);
+    // A page load: its batch confirms the kept list.
+    assert_eq!(plain_get(port, "/", &navigate).await.0, 200);
+    assert_eq!(&plain_get(port, "/api/items", &fetch).await.2[..], br#"["one"]"#);
+    let (status, _) = plain_send(port, "POST", "/api/items", &[("content-type", "text/plain")], "two").await;
+    assert_eq!(status, 201);
+    assert_eq!(&plain_get(port, "/api/items", &fetch).await.2[..], br#"["one","two"]"#, "the write shows at once");
+    // Written behind the forward's back (another client of the dev server): still seen, since data is always asked about.
+    items.lock().unwrap().push("three".into());
+    assert_eq!(&plain_get(port, "/api/items", &fetch).await.2[..], br#"["one","two","three"]"#);
+    dev.abort();
+}
+
+/// A three-machine tailnet where each node has its own loopback address (Linux and Windows route all of 127/8).
+#[cfg(not(target_os = "macos"))]
+fn write_three(path: &std::path::Path, me: &str, order: [&str; 3], distinct: bool) {
+    use crate::network::tailscale::{FakeFixture, FakeNode};
+    let index = |name: &str| ["v", "m", "t"].iter().position(|n| *n == name).unwrap() as u8 + 1;
+    let nodes = order
+        .into_iter()
+        .map(|name| FakeNode {
+            name: name.into(),
+            node_id: format!("n{name}"),
+            ip: format!("100.64.0.{}", index(name)).parse().unwrap(),
+            listen: if distinct { format!("127.0.0.{}", index(name)) } else { "127.0.0.1".into() }.parse().unwrap(),
+            login: "owner@example.test".into(),
+            user_id: 1,
+            tags: vec![],
+            shared_in: false,
+            online: true,
+        })
+        .collect();
+    let fixture = FakeFixture { self_name: me.into(), tailnet: "test".into(), nodes };
+    std::fs::write(path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_forward_can_go_through_another_member_and_falls_back_when_it_stops_answering() {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(crate::RUNTIME_THREAD_STACK)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_hop());
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn run_hop() {
+    use crate::network::ports::{hop, take_route};
+    let fixture = |node: &Node| node.dir.path().join("no-tailnet.json");
+    let (v, m, t) = (Node::start_tailnet("v", None).await, Node::start_tailnet("m", None).await, Node::start_tailnet("t", None).await);
+    // While the sessions open every node listens on 127.0.0.1, so `whois` names whoever is listed first: the dialer.
+    write_three(&fixture(&v), "v", ["v", "m", "t"], false);
+    write_three(&fixture(&m), "m", ["v", "t", "m"], false);
+    write_three(&fixture(&t), "t", ["v", "m", "t"], false);
+    let members = v.state.network.membership().unwrap();
+    members.genesis("owner@example.test", "test", &v.state.network.self_info().await).unwrap();
+    for other in [&m, &t] {
+        let descriptor = other.state.network.membership().unwrap().self_descriptor(&other.state.network.self_info().await);
+        members.add(descriptor, JoinVia::Code).unwrap();
+    }
+    for other in [&m, &t] {
+        other.state.network.membership().unwrap().join(members.all_ops()).unwrap();
+    }
+    v.link(&m).await;
+    v.link(&t).await;
+    write_three(&fixture(&t), "t", ["m", "v", "t"], false);
+    m.link(&t).await;
+    // From here each node has its own address, and `whois` tells them apart.
+    for (node, name) in [(&v, "v"), (&m, "m"), (&t, "t")] {
+        write_three(&fixture(node), name, ["v", "m", "t"], true);
+    }
+    for (node, others) in [(&v, [&m, &t]), (&m, [&v, &t])] {
+        for other in others {
+            node.state.network.peers.set_presence(&other.id(), other.state.network.presence());
+        }
+    }
+
+    let app = Router::new().route("/", get(|| async { "through a member" }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_port = listener.local_addr().unwrap().port();
+    let dev = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // The background choice is settled (nothing faster) so the test sets the route itself.
+    v.state.network.ports.book.set(&t.id(), None);
+    let (client, _) = v.client(&Scope::ALL).await;
+    let opened =
+        client.call::<PortsForward>(PortsForwardParams { machine: t.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    assert!(opened.route_via.is_none());
+    let forward = v.state.network.ports.lock().iter().find(|f| f.id == opened.id).unwrap().clone();
+    let straight = forward.route_now().unwrap();
+
+    // The target accepts a member only for a forward it holds; a member relays only to a third machine.
+    let to_t = v.state.network.peers.link(&t.id()).unwrap();
+    let to_m = v.state.network.peers.link(&m.id()).unwrap();
+    let via = |forward_id| PeerPortsViaParams { forward_id, via: m.id(), drop: false };
+    assert_eq!(to_t.call::<PeerPortsVia>(via(Uuid::now_v7())).await.unwrap_err().code, codes::NOT_FOUND);
+    let hop = |target: String, port| PeerPortsHopParams { forward_id: forward.id, target, port };
+    assert_eq!(to_m.call::<PeerPortsHop>(hop(m.id(), 1)).await.unwrap_err().code, codes::INVALID_PARAMS);
+    // Until the caller names the member at the target, the target does not confirm the hop.
+    assert_eq!(to_m.call::<PeerPortsHop>(hop(t.id(), straight.endpoint.port)).await.unwrap_err().code, codes::FORBIDDEN);
+    // Named, the member still relays only to that forward's listener, never to another port of the target.
+    assert!(to_t.call::<PeerPortsVia>(via(forward.id)).await.unwrap().token.is_some());
+    assert_eq!(to_m.call::<PeerPortsHop>(hop(t.id(), remote_port)).await.unwrap_err().code, codes::FORBIDDEN, "the dev server's own port");
+    assert_eq!(to_m.call::<PeerPortsHop>(hop(t.id(), 22)).await.unwrap_err().code, codes::FORBIDDEN);
+    to_t.call::<PeerPortsVia>(PeerPortsViaParams { drop: true, ..via(forward.id) }).await.unwrap();
+    assert!(!t.state.network.ports.direct.relays_through(&v.id(), forward.id, straight.endpoint.port, &m.id()));
+
+    let route = hop::through(&v.state.network, &forward, &straight, &m.id(), "m").await.expect("a route through m");
+    assert!(route.probe(&v.state.network, Duration::from_millis(100)).await.unwrap() > 0);
+    assert!(straight.probe(&v.state.network, Duration::from_millis(100)).await.unwrap() > 0);
+    take_route(&v.state.network, &forward, &straight, route);
+    let view = v.state.network.ports.views().into_iter().find(|f| f.id == forward.id).unwrap();
+    assert_eq!(view.route_via.map(|via| via.machine_id), Some(m.id()));
+    let before = m.state.network.ports.hops.relayed();
+    let (status, _, body) = plain_get(opened.local_port, "/", &[]).await;
+    assert_eq!((status, &body[..]), (hyper::StatusCode::OK, &b"through a member"[..]));
+    assert!(m.state.network.ports.hops.relayed() > before, "the page went through m");
+
+    // The member stops relaying: the forward goes back to the direct route by itself.
+    m.state.network.ports.hops.close_all();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, _, body) = plain_get(opened.local_port, "/", &[]).await;
+    assert_eq!((status, &body[..]), (hyper::StatusCode::OK, &b"through a member"[..]));
+    let view = v.state.network.ports.views().into_iter().find(|f| f.id == forward.id).unwrap();
+    assert!(view.route_via.is_none(), "back on the direct route");
+    crate::network::harness::eventually("the target stops accepting the member", Duration::from_secs(5), || {
+        !t.state.network.ports.direct.relays_through(&v.id(), forward.id, straight.endpoint.port, &m.id())
+    })
+    .await;
+
+    // Dropping the member at the target ends a connection it relays at once, not when the browser lets go. The route
+    // works only because the target proved itself through the member (a signed nonce), which `open` checks.
+    let route = hop::through(&v.state.network, &forward, &straight, &m.id(), "m").await.expect("a second route through m");
+    let mut relayed = route.open(&v.state.network, crate::network::ports::direct::MODE_RAW).await.expect("a relayed socket");
+    tokio::io::AsyncWriteExt::write_all(&mut relayed, b"GET / HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();
+    let mut answer = [0u8; 12];
+    tokio::io::AsyncReadExt::read_exact(&mut relayed, &mut answer).await.unwrap();
+    assert_eq!(&answer, b"HTTP/1.1 200");
+    t.state.network.ports.direct.drop_via(&v.id(), forward.id, &m.id());
+    let mut rest = Vec::new();
+    let ended = tokio::time::timeout(Duration::from_secs(3), tokio::io::AsyncReadExt::read_to_end(&mut relayed, &mut rest)).await;
+    assert!(ended.is_ok(), "the relayed connection ended when the member was dropped");
+    assert!(route.open(&v.state.network, crate::network::ports::direct::MODE_RAW).await.is_none(), "and no new one is let in");
+    route.stop();
+    dev.abort();
+}

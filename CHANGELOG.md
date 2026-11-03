@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.21.4
+
+<!-- kybern-release-title: Fewer password prompts, every machine up to date -->
+<!-- kybern-release-summary: macOS stops asking for your keychain password after every update, Update all machines now covers computers running the desktop app, and your other machines reconnect on their own, and previews from other machines cope with slow connections. -->
+
+- On macOS, updating Kybern no longer asks for your login keychain password every time. Your machine logins now live in one Keychain item, read by a small helper that stays the same from release to release. The first time 0.21.4 opens, macOS may ask a few times, once for each machine login you had saved, naming "kybern-keychain"; choose Always Allow each time. After that it stops asking. macOS may also ask once more for notification permission. If you go back to 0.21.3 after this update, pair your machines again.
+- Update all machines and Keep all machines on the same version now update computers that run the desktop app, not only the ones that run just the daemon. When Kybern is open there, it installs the update and restarts by itself once nothing is running. If someone used that window in the last couple of minutes, it asks first: Restart now or Later. An update that follows another machine also waits until that computer's Kybern terminals are closed. When only the daemon runs, it updates the installed app itself. A Linux .deb or .rpm install shows what to run instead.
+- When another machine stops accepting this computer's saved login, Kybern asks for a new one by itself. Before, the machine stayed offline in Settings, its threads failed to open, and only pairing again helped.
+- Opening a thread on another machine connects to it first instead of saying "This machine is offline", and Settings → Machines shows a machine the network reports online as Online, with "connecting…" while this computer reaches it.
+- An old saved entry for this same computer no longer shows up as a second, unpaired "This Mac".
+- A machine removed from your network while it was offline learns of it the next time it reaches another machine, then leaves the network and stops starting Kybern at login.
+- A computer that wakes from sleep reconnects to your other machines again. Before, one connection attempt cut off by sleep or a network change could stop it from reconnecting to any machine until Kybern's daemon restarted. Settings → Machines and the machine picker now say "this computer's link is reconnecting" when the app reaches a machine but this computer's daemon does not yet.
+- Previews of a dev server on another machine handle slow connections better. A page that is still loading over a slow link says so, with how much is left, instead of staying blank. Text is compressed on every forwarded page, not only in Fast mode. A reload asks the other machine in one round which files changed and fetches only those. When another of your machines reaches both ends much faster than the direct route, the preview goes through it and the address bar says which one; that machine has to prove who it relays for before any page data passes.
+
 ## 0.21.3
 
 <!-- kybern-release-title: Up-to-date status for your other machines -->

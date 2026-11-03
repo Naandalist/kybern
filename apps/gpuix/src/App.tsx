@@ -50,6 +50,7 @@ import { NavRail } from './nav/NavRail.tsx'
 import { Palette } from './nav/Palette.tsx'
 import { SessionsDialog } from './nav/Sessions.tsx'
 import { getNav, pointerNav, useNav, type Page } from './nav/store.ts'
+import { markUserInput } from './platform/userInput.ts'
 import { EASE, HOVER_FADE_ROOT, Rise } from './motion/kit.tsx'
 import { drawerSlide } from './shell/motion.ts'
 import { EXIT, Presence } from './motion/Presence.tsx'
@@ -103,6 +104,12 @@ function FrameFill({ color }: { color: string }) {
 }
 
 // The thread panel slides as a drawer (`drawerSlide`); Reduce Motion, and toggles from the keyboard, change without movement.
+
+/** Any press makes later navigation pointer-driven again, and counts as the user being here (`platform/userInput.ts`). */
+function onAppMouseDown() {
+  markUserInput()
+  pointerNav()
+}
 
 export function App() {
   const env = useEnvironment()
@@ -167,7 +174,7 @@ function Workspace() {
       {...HOVER_FADE_ROOT}
       // kybern.css:26–35: chrome inherits select-none; document bodies opt in.
       // Any press makes later navigation pointer-driven again (`keyboardNav`).
-      onMouseDown={pointerNav}
+      onMouseDown={onAppMouseDown}
       onMouseMove={taskDragging || splitDragging || tabsDragging ? (event) => { if (taskDragging) trackTaskDrag(event); if (splitDragging) trackThreadDrag(event); if (tabsDragging) moveTabsDrag(event) } : undefined}
       onMouseUp={splitDragging || tabsDragging ? (event) => { if (splitDragging) finishSplitDrag(event); if (tabsDragging) finishTabsDrag(event) } : undefined}
       style={{ userSelect: 'none', display: 'flex', flexDirection: 'column', width: '100%', height: '100%', backgroundColor: singleFill ? undefined : fills.frame, position: 'relative' }}

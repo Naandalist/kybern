@@ -97,6 +97,8 @@ fn mint_local(
     let token = crate::auth::generate();
     let id = Uuid::now_v7();
     let scopes = crate::access::paired_scopes();
+    // A peer names the device; the bootstrap token's name is never given to another token.
+    let label = if crate::auth::is_reserved_label(label) { "paired device" } else { label };
     store.token_insert(id, &crate::auth::hash(&token), &clip(label, MAX_LABEL), &scopes).map_err(internal)?;
     store.token_set_device(id, device_id, via, lineage).map_err(internal)?;
     Ok((token, scopes))

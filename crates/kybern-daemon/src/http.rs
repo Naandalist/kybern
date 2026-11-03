@@ -44,6 +44,7 @@ async fn pair(State(state): State<AppState>, headers: HeaderMap, Json(req): Json
     let response = match state.pairing.redeem(&state.store, &req.code, req.device_name) {
         Ok((token, scopes)) => Json(PairResponse { token, scopes, environment_id: state.environment_id.clone() }).into_response(),
         Err(e) if e.is::<crate::access::PairingRateLimited>() => (StatusCode::TOO_MANY_REQUESTS, e.to_string()).into_response(),
+        Err(e) if e.is::<crate::access::ReservedDeviceName>() => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Err(e) => (StatusCode::UNAUTHORIZED, e.to_string()).into_response(),
     };
     let mut response = with_asset_cors(response, origin);

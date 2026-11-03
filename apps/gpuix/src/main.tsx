@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import { render, useGpuixRequired } from '@gpuix/react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { onWindowKeyDown } from './nav/keys.ts'
+import { markUserInput } from './platform/userInput.ts'
 import { appearance } from './settings/appearance.ts'
 import { connect } from './state.ts'
 import { startSplitView } from './split/store.ts'
@@ -152,7 +153,7 @@ render(
     // A saved frame is restored before the window is shown (`shell/window.ts`).
     show: !hasSavedFrame(),
     // Window shortcuts (⌘N, ⌘B, ⌘K, ⌘[ ⌘], ⌘↑, ⌘,): `nav/keys.ts`.
-    onKeyDown: onWindowKeyDown,
+    onKeyDown: (event) => { markUserInput(); onWindowKeyDown(event) },
     onEvent: handbackOnFocus,
   },
 )

@@ -53,13 +53,29 @@ function detectLinuxInstall(env: NodeJS.ProcessEnv = process.env, execPath = pro
  * refreshed by rename when the version stamp changes, so a running daemon keeps its file. Returns null when neither
  * folder can be written; the caller then shows an error, because the daemon must never run from the mount.
  */
-export function stageAppImageCommands(appDir: string, version: string, dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), '.local/share'), runtimeDir = process.env.XDG_RUNTIME_DIR): { kybernd: string; kybern: string } | null {
+export function stageAppImageCommands(appDir: string, version: string, dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), '.local/share'), runtimeDir = process.env.XDG_RUNTIME_DIR, image = process.env.APPIMAGE): { kybernd: string; kybern: string } | null {
   const folders = [path.join(dataHome, 'kybern-gpuix/bin'), ...(runtimeDir ? [path.join(runtimeDir, 'kybern-gpuix/bin')] : [])]
   for (const dir of folders) {
     const staged = stageInto(dir, appDir, version)
-    if (staged) return staged
+    if (staged) { if (image) nameImage(dir, image); return staged }
   }
   return null
+}
+
+/**
+ * Write the image these copies came from to `appimage` beside them. The daemon outlives the app, and while the app is
+ * closed it updates this image itself (`crates/kybern-daemon/src/app_update`); its own environment no longer names it.
+ */
+function nameImage(dir: string, image: string) {
+  const file = path.join(dir, 'appimage')
+  try {
+    if (readFileSync(file, 'utf8').trim() === image) return
+  } catch { /* First launch, or an older version staged these. */ }
+  try {
+    const temp = path.join(dir, `.appimage.${process.pid}.new`)
+    writeFileSync(temp, `${image}\n`)
+    renameSync(temp, file)
+  } catch { /* The daemon then leaves the image for the app to update. */ }
 }
 
 function stageInto(dir: string, appDir: string, version: string): { kybernd: string; kybern: string } | null {

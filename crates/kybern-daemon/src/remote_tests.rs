@@ -103,6 +103,54 @@ async fn a_device_token_that_starts_like_a_machine_grant_still_connects() {
 }
 
 #[tokio::test]
+async fn a_device_named_bootstrap_cannot_pair_or_act_as_the_local_app() {
+    let host = Host::start().await;
+    let http = reqwest::Client::new();
+    // Pairing refuses the bootstrap token's name in any case, and leaves the code for a retry.
+    let (code, _) = host.state.pairing.create(None).unwrap();
+    for name in ["bootstrap", " BootStrap "] {
+        let response = http
+            .post(format!("{}/pair", host.url))
+            .json(&PairRequest { code: code.clone(), device_name: Some(name.into()) })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST, "{name}");
+    }
+    assert!(host.state.pairing.create(Some("Bootstrap".into())).is_err());
+    let paired: PairResponse = http
+        .post(format!("{}/pair", host.url))
+        .json(&PairRequest { code, device_name: Some("Phone".into()) })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!paired.token.is_empty());
+
+    // A token that is labelled "bootstrap" (paired before names were checked) with every scope is
+    // still not the local app: the check is by the bootstrap token's id.
+    let token = crate::auth::generate();
+    host.state.store.token_insert(Uuid::now_v7(), &crate::auth::hash(&token), "bootstrap", &Scope::ALL).unwrap();
+    let impostor = Client::connect(&Endpoint { url: format!("{}/ws", host.url.replace("http:", "ws:")), token }).await.unwrap();
+    let attach = AppUpdaterAttachParams { version: "0.0.1".into(), can_install: true, reason: None };
+    let refused = impostor.call::<AppUpdaterAttach>(attach.clone()).await.unwrap_err().to_string();
+    assert!(refused.contains("Only the Kybern app on this machine"), "{refused}");
+    let report = AppUpdaterReportParams { phase: AppUpdatePhase::Restarting, version: Some("0.0.1".into()), message: None };
+    let refused = impostor.call::<AppUpdaterReport>(report).await.unwrap_err().to_string();
+    assert!(refused.contains("Only the Kybern app on this machine"), "{refused}");
+    let refused = impostor.call::<DaemonShutdown>(Empty {}).await.unwrap_err().to_string();
+    assert!(refused.contains("bootstrap client"), "{refused}");
+    assert!(!host.state.shutdown.is_cancelled());
+
+    // The real bootstrap token may attach.
+    host.client().await.call::<AppUpdaterAttach>(attach).await.unwrap();
+}
+
+#[tokio::test]
 async fn skill_picker_explicit_account_overrides_project_and_provider_defaults() {
     let host = Host::start().await;
     let thread = host.thread();

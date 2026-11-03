@@ -1,11 +1,14 @@
 /**
- * Local macOS app for this Mac's arch, or `--arch x64|arm64`; ad-hoc signing only, no installation. On Linux, see `package-linux.ts`.
+ * Local macOS app for this Mac's arch, or `--arch x64|arm64`; no installation. On Linux, see `package-linux.ts`.
+ * Signed with `KYBERN_CODESIGN_IDENTITY` (from `KYBERN_CODESIGN_KEYCHAIN`) when set — releases set both up with
+ * `scripts/macos-signing.sh` so every version has the same designated requirement — and ad hoc otherwise.
+ * The Keychain helper (`packaging/keychain`) is copied as committed and never re-signed: its cdhash must not change.
  * `--test` gives the bundle its own name and id (`Kybern GPUIX (x86_64 test)`, `dev.kybern.gpuix.test`),
  * so LaunchServices and system notifications never attribute a test build to the installed app.
  */
 import { cpSync, mkdirSync, readFileSync, existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { COMPANION_CFLAGS } from './companion-flags.ts'
 import { resourceUrlPlugin } from './resource-urls.ts'
 const root = path.resolve(import.meta.dir, '..')
@@ -26,6 +29,14 @@ const resources = path.join(app, 'Contents/Resources')
 const macos = path.join(app, 'Contents/MacOS')
 const addon = path.join(root, `native/build/gpuix-native.darwin-${arch}.node`)
 if (!existsSync(addon)) throw Error(`Build the patched native addon for ${arch} first (native/README.md)`)
+const identity = process.env.KYBERN_CODESIGN_IDENTITY
+const signingKeychain = process.env.KYBERN_CODESIGN_KEYCHAIN
+if (!identity) console.log('Signing ad hoc: KYBERN_CODESIGN_IDENTITY is not set. Each build then has its own designated requirement, so macOS treats it as a new app for Keychain and privacy permissions.')
+const sign = (file: string) => execFileSync('codesign', ['--force', '--timestamp=none', '--sign', identity ?? '-', ...(identity && signingKeychain ? ['--keychain', signingKeychain] : []), file], { stdio: 'inherit' })
+const keychainHelper = path.join(root, 'packaging/keychain/kybern-keychain')
+const keychainPin = JSON.parse(readFileSync(path.join(root, 'packaging/keychain/pin.json'), 'utf8')) as { cdhash: Record<string, string> }
+// codesign -d reports on stderr.
+const cdhashOf = (file: string) => /^CDHash=(\w+)$/m.exec(spawnSync('codesign', ['-d', '--verbose=3', '--arch', machArch, file], { encoding: 'utf8' }).stderr)?.[1]
 const archsOf = (file: string) => execFileSync('lipo', ['-archs', file], { encoding: 'utf8' }).trim().split(/\s+/)
 execFileSync('bun', [path.join(root, 'native/build-webview.ts')], { stdio: 'inherit' })
 // Local packaging takes the debug daemon and CLI; releases point KYBERN_BIN_DIR at dist's release binaries.
@@ -40,6 +51,7 @@ const version = /\[workspace\.package\]\s*\nversion\s*=\s*"([^"]+)"/.exec(readFi
 if (!version) throw Error('Missing workspace release version')
 mkdirSync(resources, {recursive:true}); mkdirSync(macos, {recursive:true})
 for (const { name, source } of binaries) cpSync(source, path.join(macos, name))
+cpSync(keychainHelper, path.join(macos, 'kybern-keychain'))
 writeFileSync(path.join(resources, 'version'), version)
 cpSync(path.join(root, 'packaging/Info.plist'), path.join(app, 'Contents/Info.plist'))
 execFileSync('/usr/libexec/PlistBuddy', ['-c', `Set :CFBundleShortVersionString ${version}`, path.join(app, 'Contents/Info.plist')])
@@ -76,9 +88,11 @@ for (const name of readdirSync(root)) if (name.endsWith('.bun-build') && !buildT
 }
 if (!result.success) throw new AggregateError(result.logs, 'App compilation failed')
 execFileSync('clang', ['-dynamiclib',...COMPANION_CFLAGS,'-framework','Cocoa','-framework','UserNotifications',path.join(root,'packaging/notifications.m'),'-o',path.join(resources,'notifications.dylib')], {stdio:'inherit'})
-for (const file of [path.basename(addon), 'notifications.dylib', 'kybern-webview.dylib']) execFileSync('codesign',['--force','--sign','-',path.join(resources,file)],{stdio:'inherit'})
-for (const { name } of binaries) execFileSync('codesign',['--force','--sign','-',path.join(macos,name)],{stdio:'inherit'})
-execFileSync('codesign',['--force','--sign','-',app],{stdio:'inherit'})
+for (const file of [path.basename(addon), 'notifications.dylib', 'kybern-webview.dylib']) sign(path.join(resources, file))
+for (const { name } of binaries) sign(path.join(macos, name))
+sign(app)
 execFileSync('codesign',['--verify','--deep','--strict',app],{stdio:'inherit'})
+const helperCdhash = cdhashOf(path.join(macos, 'kybern-keychain'))
+if (helperCdhash !== keychainPin.cdhash[machArch]) throw Error(`kybern-keychain's ${machArch} cdhash is ${helperCdhash}, not the pinned ${keychainPin.cdhash[machArch]}: every user would be asked for their keychain password again (packaging/keychain/README.md)`)
 if (!archsOf(path.join(macos, 'Kybern GPUIX')).includes(machArch)) throw Error(`The compiled app is not ${machArch}`)
 console.log(app)

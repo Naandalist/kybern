@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { footerText, lastSeen, shownStatus, statusText, statusTone } from './format.ts'
+import { daemonLinkDown, footerText, lastSeen, shownStatus, statusText, statusTone } from './format.ts'
 
 const now = Date.parse('2026-10-29T12:00:00Z')
 test('the footer counts machines, the ones that are away, and queued work', () => {
@@ -33,4 +33,15 @@ test('a machine the daemon reports online reads Online, whatever this connection
   expect(shownStatus('offline', undefined)).toBe('offline')
   expect(shownStatus('paused', 'online')).toBe('paused')
   expect(shownStatus('relaying', 'online')).toBe('relaying')
+})
+
+// 2026-11-03: the picker said "Online" for kdi-vps and SatyaMas because this app reached them, while the Mac daemon's
+// own sessions to both were down, so delegation, forwards and previews to them failed.
+test('a machine this app reaches is not plainly online when the daemon here has no session to it', () => {
+  expect(daemonLinkDown('online', 'offline')).toBe(true)
+  expect(daemonLinkDown('online', 'online')).toBe(false)
+  expect(daemonLinkDown('online', undefined)).toBe(false)
+  expect(daemonLinkDown('online', 'offline', true)).toBe(false)
+  expect(daemonLinkDown('paused', 'offline')).toBe(false)
+  expect(daemonLinkDown('offline', 'offline')).toBe(false)
 })

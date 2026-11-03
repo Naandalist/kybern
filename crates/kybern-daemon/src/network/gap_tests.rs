@@ -129,7 +129,19 @@ async fn update_all_starts_the_machines_that_can_update_and_says_why_the_others_
     // A test build is a development build, which never replaces itself; `a` and `c` may be updated here.
     a.state.daemon_updates.allow_development.store(true, Ordering::SeqCst);
     c.state.daemon_updates.allow_development.store(true, Ordering::SeqCst);
+    // `d` is the desktop app's daemon with the app open: the app takes the update (ADE-125).
     d.state.desktop_managed.store(true, Ordering::SeqCst);
+    *d.state.app_updates.test_install.lock().unwrap() =
+        Some(crate::app_update::Detected::Install(crate::app_update::DesktopInstall::MacApp {
+            bundle: "/nowhere/Kybern GPUIX.app".into(),
+        }));
+    let window = uuid::Uuid::now_v7();
+    d.state.app_updates.attach(crate::app_update::Attached {
+        connection: window,
+        version: "0.0.0".into(),
+        can_install: true,
+        reason: None,
+    });
     // As far as `a` knows, `b` already runs the newest version.
     heard_from(&a, &b).await;
     a.state.network.peers.set_presence(&b.id(), presence("99.0.0", &[features::UPDATE_V1]));
@@ -137,17 +149,17 @@ async fn update_all_starts_the_machines_that_can_update_and_says_why_the_others_
     let result = admin(&a).await.call::<NetworkUpdateAll>(Empty {}).await.unwrap();
     let mut started = result.started.clone();
     started.sort();
-    let mut expected = vec![a.id(), c.id()];
+    let mut expected = vec![a.id(), c.id(), d.id()];
     expected.sort();
-    assert_eq!(started, expected, "this machine and the member that can update start: {result:?}");
+    assert_eq!(started, expected, "this machine, the member that can update and the desktop app's machine start: {result:?}");
     assert_eq!(reason(&result, &b.id()), Some("Already up to date"));
-    assert_eq!(reason(&result, &d.id()), Some("Updates with the app"));
     assert_eq!(result.started.len() + result.skipped.len(), 4, "every member is listed once");
 
-    // The asked machine queued its own update; the desktop-managed one did not.
+    // The asked machines queued their updates; the desktop app's machine asks its open app once nothing runs.
     eventually("c queued its update", WAIT, || c.state.daemon_updates.get().status == DaemonUpdateStatus::Waiting).await;
     assert_eq!(a.state.daemon_updates.get().status, DaemonUpdateStatus::Waiting);
-    assert_ne!(d.state.daemon_updates.get().status, DaemonUpdateStatus::Waiting);
+    assert!(d.state.app_updates.pending().is_some(), "d's app update is queued");
+    assert_eq!(crate::app_update::tick(&d.state).await, crate::app_update::Step::Handed(window), "d asks its open app");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

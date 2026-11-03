@@ -8212,7 +8212,9 @@ mod tests {
         inner.store = fixture.store.clone();
         inner.orchestrator = fixture.orchestrator.clone();
         // Authentication uses the same in-memory store as the fixture.
-        inner.bootstrap_token = crate::auth::ensure_bootstrap(&inner.store, &paths.token_file).unwrap();
+        let bootstrap = crate::auth::ensure_bootstrap(&inner.store, &paths.token_file).unwrap();
+        inner.bootstrap_token = bootstrap.token;
+        inner.bootstrap_token_id = bootstrap.id;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = Endpoint { url: format!("ws://{}/ws", listener.local_addr().unwrap()), token: state.bootstrap_token.clone() };
         let app = Router::new().route("/ws", get(crate::ws::upgrade)).with_state(state);

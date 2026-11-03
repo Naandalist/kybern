@@ -75,6 +75,28 @@ expression: schema_for!(PortForward)
         "string",
         "null"
       ]
+    },
+    "route_via": {
+      "description": "The member new connections travel through when it reaches the machine much faster than the direct route\n(ADE-126). Absent on the direct route.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PortRouteVia"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "loading": {
+      "description": "A page load in progress over this forward, while it is still fetching. Absent when nothing is loading.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PortLoad"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -85,5 +107,75 @@ expression: schema_for!(PortForward)
     "local_port",
     "connections",
     "created_at"
-  ]
+  ],
+  "$defs": {
+    "PortRouteVia": {
+      "description": "The member a forward's connections are relayed through.",
+      "type": "object",
+      "properties": {
+        "machine_id": {
+          "type": "string"
+        },
+        "machine_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine_id",
+        "machine_name"
+      ]
+    },
+    "PortLoad": {
+      "description": "What a forward has fetched for the page that is loading now. A load starts with the first request after a quiet\nmoment and ends when no request has been open for a short while.",
+      "type": "object",
+      "properties": {
+        "received_bytes": {
+          "description": "Response bytes that crossed the network for this load so far (compressed, as they travelled).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cached_bytes": {
+          "description": "Response bytes answered from this machine's cache of the dev server's responses.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "expected_bytes": {
+          "description": "What the previous complete load of this forward transferred, as an estimate of the whole.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytes_per_second": {
+          "description": "The transfer rate over the last few seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "open_requests": {
+          "description": "Requests not yet answered in full.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "elapsed_ms": {
+          "description": "How long the load has run, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "received_bytes",
+        "bytes_per_second",
+        "open_requests",
+        "elapsed_ms"
+      ]
+    }
+  }
 }

@@ -20,7 +20,15 @@
 # Secrets: TAURI_SIGNING_PRIVATE_KEY (required, the minisign updater key; the
 # name dates from the retired Tauri app, and the Tauri CLI in apps/gpuix still
 # does the signing) and TAURI_SIGNING_PRIVATE_KEY_PASSWORD (empty when the key
-# has none).
+# has none); MACOS_SIGNING_P12_BASE64 and MACOS_SIGNING_P12_PASSWORD (required
+# for the macOS bundles: the self-signed "Kybern Code Signing" identity that
+# keeps the app's designated requirement the same from version to version;
+# apps/gpuix/packaging/keychain/README.md). Each secret reaches only the step
+# that signs with it.
+#
+# Variables: MACOS_KEYCHAIN_HELPER_CERT_SHA1 (required for the macOS bundles:
+# the SHA-1 of the certificate the committed kybern-keychain helper must be
+# signed with). A repository variable, so a pull request cannot change it.
 name: Desktop
 
 on:
@@ -92,6 +100,25 @@ jobs:
           path: target/distrib/kybern-${{ matrix.target }}.*
           if-no-files-found: error
 
+  keychain-helper:
+    # The committed Keychain helper (apps/gpuix/packaging/keychain) must be the
+    # build of its source and be signed by the release certificate, so a change
+    # cannot swap it for another binary. Rebuilding it needs the Xcode it was
+    # linked with (27.0), which the xcode-27 image carries.
+    name: keychain helper (reproduce, signer)
+    runs-on: xcode-27
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rebuild the helper and compare it with the committed one
+        run: apps/gpuix/packaging/keychain/reproduce.sh
+      - name: Check the helper's signing certificate
+        env:
+          EXPECTED: ${{ vars.MACOS_KEYCHAIN_HELPER_CERT_SHA1 }}
+        run: apps/gpuix/packaging/keychain/verify-signer.sh "$EXPECTED"
+
   gpuix:
     # Kybern GPUIX (apps/gpuix) for Apple Silicon and Intel Macs (Linux x64 and
     # Windows x64 are the
@@ -101,8 +128,8 @@ jobs:
     # on-screen native checks skipped (runners have no usable display). Intel's
     # addon is cross-built on the arm64 runner; its load check runs under
     # Rosetta.
-    needs: binaries
-    if: ${{ !cancelled() && (needs.binaries.result == 'success' || needs.binaries.result == 'skipped') }}
+    needs: [binaries, keychain-helper]
+    if: ${{ !cancelled() && (needs.binaries.result == 'success' || needs.binaries.result == 'skipped') && needs.keychain-helper.result == 'success' }}
     name: bundle (gpuix ${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -119,8 +146,6 @@ jobs:
         shell: bash
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       KYBERN_NATIVE_CHECKS: "0"
       KYBERN_GPUIX_TARGET: ${{ matrix.target }}
       # scripts/bundle-gpuix.sh packages these instead of target/release.
@@ -135,15 +160,26 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install the GPUIX Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --target "$KYBERN_GPUIX_TARGET"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
           # The Bun binary downloads in seconds; a cache entry saved under a tag could never be restored.
           no-cache: true
+      # Only whether each secret is set reaches these steps, never its value.
       - name: Require the updater signing key
+        env:
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+          if [ "$HAS_UPDATER_KEY" != "true" ]; then
             echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; add the repository secret before releasing" >&2
+            exit 1
+          fi
+      - name: Require the code-signing identity
+        env:
+          HAS_P12: ${{ secrets.MACOS_SIGNING_P12_BASE64 != '' && secrets.MACOS_SIGNING_P12_PASSWORD != '' }}
+        run: |
+          if [ "$HAS_P12" != "true" ]; then
+            echo "::error::MACOS_SIGNING_P12_BASE64 and MACOS_SIGNING_P12_PASSWORD are not set; an ad-hoc app would ask every user for their keychain password again" >&2
             exit 1
           fi
       - id: release
@@ -176,7 +212,17 @@ jobs:
         with:
           target: ${{ matrix.target }}
           save: ${{ github.event_name == 'workflow_dispatch' }}
+      # The `keychain-helper` job checked the helper too; this checks the very file this job packages.
+      - name: Check the Keychain helper's signing certificate
+        env:
+          EXPECTED: ${{ vars.MACOS_KEYCHAIN_HELPER_CERT_SHA1 }}
+        run: apps/gpuix/packaging/keychain/verify-signer.sh "$EXPECTED"
       - name: Package, tar and sign Kybern GPUIX
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          MACOS_SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
         run: scripts/bundle-gpuix.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -212,8 +258,6 @@ jobs:
         shell: bash
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       KYBERN_NATIVE_CHECKS: "0"
       KYBERN_GPUIX_TARGET: x86_64-unknown-linux-gnu
       # dist builds the Linux daemon and CLI as static musl binaries.
@@ -230,14 +274,16 @@ jobs:
           targets: x86_64-unknown-linux-gnu
       - name: Install the GPUIX Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --target "$KYBERN_GPUIX_TARGET"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
           # The Bun binary downloads in seconds; a cache entry saved under a tag could never be restored.
           no-cache: true
       - name: Require the updater signing key
+        env:
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+          if [ "$HAS_UPDATER_KEY" != "true" ]; then
             echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; add the repository secret before releasing" >&2
             exit 1
           fi
@@ -302,6 +348,8 @@ jobs:
         env:
           # Without the companion and WPE package-linux.ts would package the browser fallback.
           KYBERN_REQUIRE_WEBVIEW: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: scripts/bundle-gpuix-linux.sh
       # Blocking, and before the upload, like the Windows installer check:
       # checks that every package carries the web view (companion, WPE, the
@@ -337,8 +385,6 @@ jobs:
         shell: bash
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       KYBERN_NATIVE_CHECKS: "0"
       KYBERN_GPUIX_TARGET: x86_64-pc-windows-msvc
       # scripts/bundle-gpuix-windows.sh packages these instead of target/release.
@@ -359,7 +405,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Install the GPUIX Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --target "$KYBERN_GPUIX_TARGET"
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
           # The Bun binary downloads in seconds; a cache entry saved under a tag could never be restored.
@@ -375,8 +421,10 @@ jobs:
           fi
           echo 'C:\Program Files (x86)\NSIS' >> "$GITHUB_PATH"
       - name: Require the updater signing key
+        env:
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+          if [ "$HAS_UPDATER_KEY" != "true" ]; then
             echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; add the repository secret before releasing" >&2
             exit 1
           fi
@@ -410,6 +458,9 @@ jobs:
           target: x86_64-pc-windows-msvc
           save: ${{ github.event_name == 'workflow_dispatch' }}
       - name: Package and sign Kybern GPUIX (NSIS installer)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           makensis -VERSION
           scripts/bundle-gpuix-windows.sh

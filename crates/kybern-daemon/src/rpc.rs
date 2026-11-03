@@ -85,7 +85,7 @@ async fn dispatch_part_1(state: &AppState, ctx: &ConnectionCtx, method: &str, sl
         }
         DaemonActivityMethod::NAME => ok(crate::maintenance::activity(state).await.map_err(internal)?),
         DaemonShutdown::NAME => {
-            if ctx.principal.label != "bootstrap" {
+            if !crate::auth::is_bootstrap(state, &ctx.principal) {
                 return Err(RpcError::new(codes::FORBIDDEN, "daemon shutdown requires the local bootstrap client"));
             }
             let shutdown = state.shutdown.clone();
@@ -195,7 +195,7 @@ async fn dispatch_part_2(state: &AppState, ctx: &ConnectionCtx, method: &str, sl
     }
 }
 
-async fn dispatch_part_3(state: &AppState, _ctx: &ConnectionCtx, method: &str, slot: &mut Option<Value>) -> Result<Value, RpcError> {
+async fn dispatch_part_3(state: &AppState, ctx: &ConnectionCtx, method: &str, slot: &mut Option<Value>) -> Result<Value, RpcError> {
     let params = slot.take().unwrap_or_default();
     match method {
         AccountsLoginCancel::NAME => {
@@ -229,9 +229,35 @@ async fn dispatch_part_3(state: &AppState, _ctx: &ConnectionCtx, method: &str, s
         DaemonUpdateStatusMethod::NAME => ok(state.daemon_updates.get()),
         DaemonUpdateCheck::NAME => ok(crate::self_update::check(state).await),
         DaemonUpdateRun::NAME => {
+            // The desktop app's daemon updates by updating the app (ADE-125), the way "Update all machines" does.
+            if state.desktop_managed.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::network::updates::start_self(state, None).await;
+                return ok(state.daemon_updates.get());
+            }
             let record = state.daemon_updates.request(&state.store);
             tokio::spawn(crate::self_update::tick(state.clone()));
             ok(record)
+        }
+        AppUpdaterAttach::NAME => {
+            if !crate::auth::is_bootstrap(state, &ctx.principal) {
+                return Err(RpcError::new(codes::FORBIDDEN, "Only the Kybern app on this machine can update it"));
+            }
+            let p: AppUpdaterAttachParams = parse(params)?;
+            state.app_updates.attach(crate::app_update::Attached {
+                connection: ctx.id,
+                version: p.version,
+                can_install: p.can_install,
+                reason: p.reason,
+            });
+            ok(Empty {})
+        }
+        AppUpdaterReport::NAME => {
+            if !crate::auth::is_bootstrap(state, &ctx.principal) {
+                return Err(RpcError::new(codes::FORBIDDEN, "Only the Kybern app on this machine can update it"));
+            }
+            let p: AppUpdaterReportParams = parse(params)?;
+            crate::app_update::report(state, ctx.id, p);
+            ok(Empty {})
         }
         ProjectsList::NAME => {
             let p: ProjectsListParams = parse_or_default(params)?;

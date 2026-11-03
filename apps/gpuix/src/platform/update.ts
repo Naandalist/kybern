@@ -43,6 +43,18 @@
 // is remembered for checks made while it is unreachable or while this window
 // is at another machine.
 //
+// Updates this machine was asked for (ADE-125: "Update all machines", "Keep all
+// machines on the same version"): each window of the local daemon attaches as
+// its updater (`app_updater.attach`). Once nothing runs, the daemon sends one
+// window `app_update.requested`; it installs the newest release of its own track
+// with the steps above, without asking, waits again until no turn, agent or
+// queued message is running (and, for an update that follows another machine,
+// no terminal), shows a short notice and restarts (the new app restarts the
+// daemon). A window someone used in the last two minutes asks first (Restart
+// now / Later); Later waits until it has been left alone for five minutes. It
+// tells the daemon how far it got (`app_updater.report`).
+// While the app is closed the daemon updates it itself.
+//
 // Tests point the app at a local feed with KYBERN_UPDATE_FEED and
 // KYBERN_UPDATE_DEV_FEED (loopback only) and KYBERN_UPDATE_PUBKEY; nothing
 // else can change the key.
@@ -62,6 +74,9 @@ import { installerName } from '../../packaging/windows/lib.ts'
 import { quitOtherWindows } from '../windows/registry.ts'
 import { appImageName, imageDirWritable, linuxInstall, packageCommand } from './linuxPackage.ts'
 import { installedWindowsFolder } from './windowsInstall.ts'
+import type { KybernClient } from '../../../../packages/kybern-client/src/client.ts'
+import { APP_UPDATE_REQUESTED_NOTIFICATION, type AppUpdateRequestedNotification, type AppUpdaterReportParams, type DaemonActivity } from '../../../../packages/kybern-client/src/types.ts'
+import { sinceUserInput } from './userInput.ts'
 
 const run = promisify(execFile)
 
@@ -298,13 +313,29 @@ export async function download(url: string, onProgress: (progress: number | null
   return Buffer.concat(chunks)
 }
 
+/** What the `.app` in a macOS update must be: the release the feed offered, newer than `current`, on `track`. */
+export interface BundleExpectation { version: string; current: string; track: UpdateTrack }
+
+/**
+ * The macOS archive's signature names the same file in every release, so the unpacked bundle's own version
+ * (`CFBundleShortVersionString`, set by `scripts/package-app.ts`) must be the release's, newer than this one, and
+ * one this machine's track takes (Stable never takes a prerelease). An older signed archive is refused.
+ */
+export function assertBundleVersion(found: string, expected: BundleExpectation) {
+  const version = found.trim()
+  if (version !== expected.version) throw Error(`The update contains Kybern ${version || 'of an unknown version'}, not ${expected.version}. Download it from the release page.`)
+  if (compareVersions(version, expected.current) <= 0) throw Error('The update is not newer than this version. Download it from the release page.')
+  if (expected.track === 'stable' && version.includes('-')) throw Error('The update is a Dev build, and this machine takes Stable releases. Download it from the release page.')
+}
+
 /**
  * Replace `bundle` with the `.app` inside a verified `.app.tar.gz`. Everything
  * is staged beside the bundle (same volume, so both renames are atomic) and the
  * old bundle comes back if the swap fails. The new bundle must keep this app's
- * identifier, so a mislabelled artifact can never replace Kybern GPUIX.
+ * identifier, so a mislabelled artifact can never replace Kybern GPUIX, and be
+ * the expected release (`assertBundleVersion`), so an older one never does either.
  */
-export async function replaceBundle(bundle: string, archive: Uint8Array, identifier = 'dev.kybern.gpuix') {
+export async function replaceBundle(bundle: string, archive: Uint8Array, expected: BundleExpectation, identifier = 'dev.kybern.gpuix') {
   const parent = path.dirname(bundle)
   const staging = await mkdtemp(path.join(parent, '.kybern-update-'))
   try {
@@ -318,6 +349,8 @@ export async function replaceBundle(bundle: string, archive: Uint8Array, identif
     const next = path.join(unpacked, apps[0]!)
     const { stdout } = await run('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', path.join(next, 'Contents/Info.plist')])
     if (stdout.trim() !== identifier) throw Error(`The update is for ${stdout.trim() || 'another app'}, not this one`)
+    const found = await run('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', path.join(next, 'Contents/Info.plist')]).then(({ stdout }) => stdout, () => '')
+    assertBundleVersion(found, expected)
     const backup = path.join(staging, 'previous.app')
     await rename(bundle, backup)
     try { await rename(next, bundle) } catch (error) { await rename(backup, bundle); throw error }
@@ -361,28 +394,42 @@ export async function replaceAppImage(image: string, data: Uint8Array, signedNam
   }
 }
 
+/**
+ * Download and verify `update` for this install. Nothing is replaced yet: the returned step swaps it in and restarts
+ * the app, which ends this process.
+ */
+async function prepareInstall(update: Pending, onProgress: (progress: number | null) => void): Promise<() => Promise<void>> {
+  const install = process.platform === 'linux' ? linuxInstall() : null
+  if (install?.kind === 'appimage') {
+    const data = await download(update.entry.url, onProgress)
+    const { trustedComment } = verifyMinisign(data, update.entry.signature, feed().pubkey)
+    assertSignedRelease(trustedComment, appImageName(update.version), update.version, desktopVersion())
+    return async () => {
+      await replaceAppImage(install.image, data, signedFile(trustedComment) ?? '', update.version)
+      await relaunchAppImage(install.image)
+    }
+  }
+  const windows = process.platform === 'win32'
+  const bundle = windows ? windowsInstall() : appBundle()
+  if (!bundle) throw Error('Only the packaged app can update itself')
+  const archive = await download(update.entry.url, onProgress)
+  const { trustedComment } = verifyMinisign(archive, update.entry.signature, feed().pubkey)
+  if (windows) {
+    assertWindowsInstaller(trustedComment, update.version, desktopVersion())
+    return () => runWindowsInstaller(archive, bundle)
+  }
+  const expected: BundleExpectation = { version: update.version, current: desktopVersion(), track: await currentTrack() }
+  return async () => {
+    await replaceBundle(bundle, archive, expected)
+    await relaunch(bundle)
+  }
+}
+
 async function runUpdateInstall(update: Pending) {
   set({ phase: 'installing', progress: null, error: null, errorKind: null })
   try {
-    const install = process.platform === 'linux' ? linuxInstall() : null
-    if (install?.kind === 'appimage') {
-      const data = await download(update.entry.url, (progress) => set({ progress }))
-      const { trustedComment } = verifyMinisign(data, update.entry.signature, feed().pubkey)
-      assertSignedRelease(trustedComment, appImageName(update.version), update.version, desktopVersion())
-      await replaceAppImage(install.image, data, signedFile(trustedComment) ?? '', update.version)
-      return await relaunchAppImage(install.image)
-    }
-    const windows = process.platform === 'win32'
-    const bundle = windows ? windowsInstall() : appBundle()
-    if (!bundle) throw Error('Only the packaged app can update itself')
-    const archive = await download(update.entry.url, (progress) => set({ progress }))
-    const { trustedComment } = verifyMinisign(archive, update.entry.signature, feed().pubkey)
-    if (windows) {
-      assertWindowsInstaller(trustedComment, update.version, desktopVersion())
-      return await runWindowsInstaller(archive, bundle)
-    }
-    await replaceBundle(bundle, archive)
-    await relaunch(bundle)
+    const apply = await prepareInstall(update, (progress) => set({ progress }))
+    await apply()
   } catch (error) {
     set({ phase: 'available', progress: null, error: describe(error), errorKind: 'install' })
     void import('../shell/toasts.tsx').then(({ toast }) => toast.error('Unable to install the update', { description: describe(error) }))
@@ -396,7 +443,7 @@ export const signedFile = (trustedComment: string) => trustedComment.split('\t')
  * The trusted comment is covered by the signature, so it binds the download to a file name. The updater key also
  * signs Tauri's own `-setup.exe` and `.AppImage` and older GPUIX releases, so a swapped feed entry would otherwise
  * install a validly signed build of the wrong app or version. Windows and the Linux AppImage check it; the macOS
- * archive is checked by its bundle identifier instead (`replaceBundle`).
+ * archive is checked by its bundle identifier and version instead (`replaceBundle`, `assertBundleVersion`).
  */
 export function assertSignedRelease(trustedComment: string, expected: string, version: string, current: string) {
   if (signedFile(trustedComment) !== expected) throw Error('The update is not the build for this release. Download it from the release page.')
@@ -485,6 +532,185 @@ async function relaunchAppImage(image: string) {
   await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) })
   child.unref()
   process.exit(0)
+}
+
+// ---- updates this machine was asked for (ADE-125) ----
+
+/** How often a verified update looks again whether work finished. */
+export const IDLE_POLL_MS = 5000
+/** How long the notice shows before the app restarts. */
+export const RESTART_NOTICE_MS = 2500
+/** Input this recent means someone is using the window: it asks before restarting. */
+export const IN_USE_MS = 2 * 60_000
+/** After Later (or while the question is unanswered), how long the window must be left alone before it restarts. */
+export const LATER_QUIET_MS = 5 * 60_000
+const RESTART_TOAST = 'kybern-update-restart'
+
+/**
+ * Nothing a restart would interrupt: no turn or approval, no agent or background work, no queued message. An
+ * `automatic` update (following another machine) also waits for terminals, whose processes a restart ends.
+ */
+export const activityIdle = (activity: Pick<DaemonActivity, 'running_threads' | 'live_sessions' | 'idle_sessions' | 'queued_messages'> & Partial<Pick<DaemonActivity, 'terminals'>>, automatic = false) =>
+  activity.running_threads === 0 && activity.live_sessions === activity.idle_sessions && activity.queued_messages === 0 && (!automatic || !activity.terminals)
+
+/** The question a window in use is asked before it restarts. `hide` takes it away without answering. */
+export interface RestartPrompt { choice: Promise<'now' | 'later'>; hide: () => void }
+
+/** What a requested update needs; the app's own updater and daemon in use, a test's in tests. */
+export interface RequestedUpdateDeps {
+  /** The newest release of this app's update track, newer than this version; null when there is none. */
+  check: () => Promise<Pending | null>
+  /** Download and verify it; the step it returns installs it and restarts. */
+  prepare: (update: Pending) => Promise<() => Promise<void>>
+  /** Whether nothing is running on this machine's daemon. */
+  idle: () => Promise<boolean>
+  report: (params: AppUpdaterReportParams) => Promise<void>
+  /** Show the notice before the restart; the returned function takes it away again. */
+  notice: (version: string) => Promise<() => void>
+  /** Milliseconds since this window last had the user's input. */
+  sinceInput: () => number
+  /** Ask whether to restart now or later; closing the question counts as Later. */
+  ask: (version: string) => RestartPrompt
+  sleep: (ms: number) => Promise<void>
+}
+export type RequestedOutcome = 'current' | 'failed' | 'restarted' | 'busy'
+
+/**
+ * The daemon asked for an update. Install the newest release of this app's track, verified as always, then restart
+ * once nothing is running, and never in the middle of a turn: the machine is checked again after the notice shows.
+ * A window someone is using asks first: Restart now restarts as soon as nothing runs; Later (or no answer) waits
+ * until the window has been left alone for `LATER_QUIET_MS`, then restarts after the usual notice.
+ */
+export async function runRequestedUpdate(deps: RequestedUpdateDeps): Promise<RequestedOutcome> {
+  const fail = async (error: unknown) => { await deps.report({ phase: 'failed', message: describe(error) }); return 'failed' as const }
+  let update: Pending | null
+  try { update = await deps.check() } catch (error) { return fail(error) }
+  if (!update) { await deps.report({ phase: 'current' }); return 'current' }
+  const version = update.version
+  await deps.report({ phase: 'installing', version })
+  let apply: () => Promise<void>
+  try { apply = await deps.prepare(update) } catch (error) { return fail(error) }
+  let waiting = false
+  let prompt: RestartPrompt | null = null
+  let answer: 'now' | 'later' | null = null
+  let consented = false
+  let deferred = false
+  for (;;) {
+    if (answer === 'now') { consented = true; prompt = null; answer = null }
+    if (answer === 'later') { deferred = true; prompt = null; answer = null }
+    if (await deps.idle()) {
+      if (consented) break
+      const asked = prompt !== null || deferred
+      if (deps.sinceInput() >= (asked ? LATER_QUIET_MS : IN_USE_MS)) {
+        // Nobody is using the window: an unanswered question goes, and the notice shows before the restart.
+        const question: RestartPrompt | null = prompt
+        prompt = null
+        question?.hide()
+        const hide = await deps.notice(version)
+        await deps.sleep(RESTART_NOTICE_MS)
+        if (await deps.idle()) break
+        // Work started while the notice showed: take it away and wait again.
+        hide()
+      } else if (!asked) {
+        const question = deps.ask(version)
+        prompt = question
+        void question.choice.then(choice => { if (prompt === question) answer = choice })
+      }
+    }
+    if (!waiting) { waiting = true; await deps.report({ phase: 'waiting', version }) }
+    // An answer ends the wait at once.
+    await (prompt ? Promise.race([deps.sleep(IDLE_POLL_MS), prompt.choice.then(() => {})]) : deps.sleep(IDLE_POLL_MS))
+  }
+  await deps.report({ phase: 'restarting', version })
+  try { await apply() } catch (error) { return fail(error) }
+  return 'restarted'
+}
+
+/** Why this copy cannot install updates itself, for the machines page; null when it can. */
+export function cannotInstallReason(): string | null {
+  if (process.env.KYBERN_DISABLE_UPDATES === '1') return 'Updates are turned off for this copy of Kybern.'
+  if (canSelfUpdate()) return null
+  const runtime = path.basename(process.execPath).toLowerCase().replace(/\.exe$/, '')
+  if (runtime === 'bun' || runtime === 'node') return 'Development build; rebuild it instead.'
+  const install = linuxInstall()
+  if (install?.kind === 'appimage') return `Kybern can’t write to ${path.dirname(install.image)}. Move the AppImage to a folder you own.`
+  return 'This copy of Kybern can’t update itself. Update it the way it was installed.'
+}
+
+type UpdaterClient = Pick<KybernClient, 'call' | 'onNotification'>
+let requestedInFlight: Promise<RequestedOutcome> | null = null
+const listening = new WeakSet<object>()
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+/** Install what the daemon asked for, with this app's updater and state (the rail shows the progress). */
+export function applyRequestedUpdate(client: UpdaterClient, automatic = false): Promise<RequestedOutcome> {
+  if (requestedInFlight) return requestedInFlight
+  if (installInFlight || state.phase === 'installing') return Promise.resolve('busy')
+  requestedInFlight = runRequestedUpdate({
+    check: async () => {
+      const result = await readTrack(desktopVersion(), await currentTrack(), feed())
+      return result?.entry ? { version: result.version, notes: result.notes, entry: result.entry } : null
+    },
+    prepare: async (update) => {
+      pending = update
+      set({ phase: 'installing', version: update.version, notes: update.notes, progress: null, error: null, errorKind: null, announcementOpen: false, unpublished: null, manual: null })
+      try { return await prepareInstall(update, (progress) => set({ progress })) }
+      catch (error) { set({ phase: 'available', progress: null, error: describe(error), errorKind: 'install' }); throw error }
+    },
+    idle: async () => { try { return activityIdle(await client.call('daemon.activity', {}), automatic) } catch { return false } },
+    report: (params) => client.call('app_updater.report', params).then(() => {}, () => {}),
+    notice: async (version) => {
+      const { toast } = await import('../shell/toasts.tsx')
+      toast.info(`Updating Kybern to ${version} — restarting…`, { id: RESTART_TOAST, duration: Infinity })
+      return () => toast.dismiss(RESTART_TOAST)
+    },
+    sinceInput: () => sinceUserInput(),
+    ask: (version) => askToRestart(version),
+    sleep,
+  }).finally(() => { requestedInFlight = null })
+  return requestedInFlight
+}
+
+/** The kit toast as a prompt: Restart now or Later; its close button is Later too. */
+function askToRestart(version: string): RestartPrompt {
+  let settle: (choice: 'now' | 'later') => void = () => {}
+  const choice = new Promise<'now' | 'later'>(resolve => { settle = resolve })
+  let hidden = false
+  void import('../shell/toasts.tsx').then(({ toast }) => {
+    if (hidden) return
+    toast.info(`Kybern ${version} is ready`, {
+      id: RESTART_TOAST,
+      description: 'Restart Kybern to finish updating.',
+      duration: Infinity,
+      cancel: { label: 'Later', onClick: () => settle('later') },
+      action: { label: 'Restart now', onClick: () => settle('now') },
+      onClose: () => settle('later'),
+    })
+  })
+  return {
+    choice,
+    hide: () => {
+      hidden = true
+      void import('../shell/toasts.tsx').then(({ toast }) => toast.dismiss(RESTART_TOAST))
+    },
+  }
+}
+
+/**
+ * Take update requests from this machine's daemon on `client`, the window's local connection. Call it on every
+ * (re)connect: the daemon forgets a window when its connection closes. An older daemon has no such method.
+ */
+export function takeUpdateRequests(client: UpdaterClient) {
+  if (!listening.has(client)) {
+    listening.add(client)
+    client.onNotification(APP_UPDATE_REQUESTED_NOTIFICATION, (params) => {
+      void applyRequestedUpdate(client, (params as AppUpdateRequestedNotification | null)?.automatic === true)
+    })
+  }
+  let version: string
+  try { version = desktopVersion() } catch { return Promise.resolve() }
+  const reason = cannotInstallReason()
+  return client.call('app_updater.attach', { version, can_install: reason === null, ...(reason ? { reason } : {}) }).then(() => {}, () => {})
 }
 
 /** Hide this version's launch announcement across app restarts. */

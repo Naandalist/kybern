@@ -15,12 +15,14 @@
 // The set connects the other machines itself (`connectOthers`: saved machines
 // and the rest of the network, learned from the primary when the daemon is a
 // member). The app keeps opening its own socket to the machine the user is at.
-import { KybernClient, type Subscription } from '../../../../packages/kybern-client/src/client.ts'
+import { KybernClient, type ClientOptions, type Subscription } from '../../../../packages/kybern-client/src/client.ts'
 import { httpBase, normalizeDaemonUrl } from '../../../../packages/kybern-client/src/address.ts'
 import { MachineCache } from '../../../../packages/kybern-client/src/machineCache.ts'
 import {
   MachineSet,
+  OfflineError,
   UnknownMachineError,
+  probeAuth,
   routeHttp,
   type Clock,
   type CredentialStore,
@@ -40,6 +42,31 @@ import { openRelay } from '../preview/relay.ts'
 import { isLegacyMachineId } from './records.ts'
 
 export interface PrimaryProfile { id: string; name: string }
+
+/**
+ * The client of a machine the set dials, on the route it chose. A relay route sends the member's own token beside the
+ * target's, on the socket and on HTTP. `probeAuth` tells a refused token from a machine that is down: a native socket
+ * refused at the upgrade shows no status, and without the check a revoked token looked like an unreachable machine,
+ * so the set never minted a fresh one (ADE-124).
+ */
+export function machineClientOptions(args: Parameters<MachineTransport['createClient']>[0], socketFactory: SocketFactory = createGpuixSocket): { url: string; options: ClientOptions } {
+  const { record, route, token, relayToken } = args
+  const legacy = isLegacyMachineId(record.machineId)
+  const http = routeHttp(route, relayToken)
+  const socket: SocketFactory = http.headers ? (url, bearer) => socketFactory(url, bearer, http.headers) : socketFactory
+  const url = normalizeDaemonUrl(route.url)
+  return {
+    url,
+    options: {
+      createSocket: socket,
+      probeAuth: () => probeAuth(url, token, http.headers, route.kind === 'relay'),
+      http,
+      // Its pages (artifact previews, visual frames, Preview) load from a loopback relay that adds the member's token itself.
+      pageRelay: (upstream, options) => openRelay(upstream, httpBase(route.url), { ...options, relayAuth: relayToken }),
+      ...(legacy ? {} : { expectedEnvironmentId: record.machineId }),
+    },
+  }
+}
 
 export interface MachineHubOptions {
   /** The saved machines, as records. Read once, when the set loads. */
@@ -296,6 +323,16 @@ export class MachineHub {
   }
 
   /**
+   * A machine's client, connecting to it first when it is not up: for something the user just opened there. Dials at
+   * once (out of any backoff) and waits up to `timeoutMs`; rejects with `OfflineError` when it still cannot be reached.
+   */
+  async reachMachine(machineId: MachineId, timeoutMs?: number): Promise<KybernClient> {
+    try { return this.set.clientFor(machineId) } catch (error) { if (!(error instanceof OfflineError)) throw error }
+    await this.set.reach(machineId, timeoutMs)
+    return this.set.clientFor(machineId)
+  }
+
+  /**
    * The client of the machine that owns a thread. Thread ids are unique per
    * machine only, so pass `machineId` when the caller has it; an unlisted thread
    * (a new chat) belongs to the machine the user is at.
@@ -347,17 +384,10 @@ export class MachineHub {
   }
 
   private createClient(args: Parameters<MachineTransport['createClient']>[0]) {
-    const { record, route, token, relayToken } = args
     if (this.options.transport?.createClient) return this.options.transport.createClient(args)
-    const legacy = isLegacyMachineId(record.machineId)
-    // A relay route sends the member's own token beside the target's, on the socket and on HTTP.
-    const http = routeHttp(route, relayToken)
-    const socket: SocketFactory = http.headers ? (url, bearer) => createGpuixSocket(url, bearer, http.headers) : createGpuixSocket
-    return new KybernClient(
-      { url: normalizeDaemonUrl(route.url), token, ...(legacy ? {} : { environmentId: record.machineId }) },
-      // Its pages (artifact previews, visual frames, Preview) load from a loopback relay that adds the member's token itself.
-      { createSocket: socket, http, pageRelay: (upstream, options) => openRelay(upstream, httpBase(route.url), { ...options, relayAuth: relayToken }), ...(legacy ? {} : { expectedEnvironmentId: record.machineId }) },
-    )
+    const { record, token } = args
+    const { url, options } = machineClientOptions(args)
+    return new KybernClient({ url, token, ...(isLegacyMachineId(record.machineId) ? {} : { environmentId: record.machineId }) }, options)
   }
 
   private onSetChange(event: MachineSetEvent) {

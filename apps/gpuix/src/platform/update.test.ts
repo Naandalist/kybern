@@ -7,7 +7,7 @@ import path from 'node:path'
 import { appImageName } from './linuxPackage.ts'
 import { verifyMinisign } from './minisign.ts'
 import { relaunchEnv } from '../shell/daemon.ts'
-import { assertSignedRelease, assertWindowsInstaller, manualUpdate, PLATFORM_KEY, platformKey, readFeed, readTrack, removeStaleInstallers, replaceAppImage, replaceBundle, stageWindowsInstaller, windowsInstall, windowsInstallerCommand } from './update.ts'
+import { assertBundleVersion, assertSignedRelease, assertWindowsInstaller, manualUpdate, PLATFORM_KEY, platformKey, readFeed, readTrack, removeStaleInstallers, replaceAppImage, replaceBundle, stageWindowsInstaller, windowsInstall, windowsInstallerCommand } from './update.ts'
 import { archive, fakeBundle, testKey } from './verify.feed.ts'
 
 let root = ''
@@ -65,14 +65,32 @@ test.skipIf(process.platform !== 'darwin')('swaps the bundle in place and refuse
   root = mkdtempSync(path.join(tmpdir(), 'kybern-update-'))
   const installed = fakeBundle(path.join(root, 'Applications'), '0.9.1')
   const next = fakeBundle(path.join(root, 'next'), '0.9.2')
-  await replaceBundle(installed, archive(next, path.join(root, 'next.tar.gz')))
+  const expected = { version: '0.9.2', current: '0.9.1', track: 'stable' as const }
+  // An older signed build, or one that is not the release the feed named, never replaces the app.
+  const older = archive(fakeBundle(path.join(root, 'older'), '0.9.0'), path.join(root, 'older.tar.gz'))
+  await expect(replaceBundle(installed, older, { ...expected, version: '0.9.0' })).rejects.toThrow('not newer')
+  await expect(replaceBundle(installed, older, expected)).rejects.toThrow('contains Kybern 0.9.0, not 0.9.2')
+  expect(readFileSync(path.join(installed, 'Contents/Resources/version'), 'utf8')).toBe('0.9.1')
+  expect(readdirSync(path.join(root, 'Applications'))).toEqual(['Kybern GPUIX.app'])
+  await replaceBundle(installed, archive(next, path.join(root, 'next.tar.gz')), expected)
   expect(readFileSync(path.join(installed, 'Contents/Resources/version'), 'utf8')).toBe('0.9.2')
   // Nothing staged is left beside the app.
   expect(readdirSync(path.join(root, 'Applications'))).toEqual(['Kybern GPUIX.app'])
   const foreign = fakeBundle(path.join(root, 'foreign'), '9.9.9')
   writeFileSync(path.join(foreign, 'Contents/Info.plist'), readFileSync(path.join(foreign, 'Contents/Info.plist'), 'utf8').replace('dev.kybern.gpuix', 'dev.kybern.desktop'))
-  await expect(replaceBundle(installed, archive(foreign, path.join(root, 'foreign.tar.gz')))).rejects.toThrow('The update is for dev.kybern.desktop, not this one')
+  await expect(replaceBundle(installed, archive(foreign, path.join(root, 'foreign.tar.gz')), { ...expected, version: '9.9.9', current: '0.9.2' })).rejects.toThrow('The update is for dev.kybern.desktop, not this one')
   expect(readFileSync(path.join(installed, 'Contents/Resources/version'), 'utf8')).toBe('0.9.2')
+})
+
+test('a macOS bundle must be the release, newer than this one and on this track', () => {
+  const stable = { version: '0.21.4', current: '0.21.3', track: 'stable' as const }
+  expect(() => assertBundleVersion('0.21.4\n', stable)).not.toThrow()
+  expect(() => assertBundleVersion('0.21.5', stable)).toThrow('not 0.21.4')
+  expect(() => assertBundleVersion('', stable)).toThrow('unknown version')
+  expect(() => assertBundleVersion('0.21.4', { ...stable, current: '0.21.4' })).toThrow('not newer')
+  expect(() => assertBundleVersion('0.21.2', { ...stable, version: '0.21.2' })).toThrow('not newer')
+  expect(() => assertBundleVersion('0.21.5-dev.1', { ...stable, version: '0.21.5-dev.1' })).toThrow('Stable')
+  expect(() => assertBundleVersion('0.21.5-dev.1', { ...stable, version: '0.21.5-dev.1', track: 'dev' })).not.toThrow()
 })
 
 test('each platform reads its own feed entry', () => {

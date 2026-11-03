@@ -38,6 +38,8 @@ pub struct Inner {
     pub thread_projections: crate::thread_projection::ThreadProjectionCache,
     pub harness_updates: crate::harness_updates::HarnessUpdates,
     pub daemon_updates: crate::self_update::DaemonUpdates,
+    /// Updates of the desktop app that manages this daemon (ADE-125): its attached windows and a pending request.
+    pub app_updates: crate::app_update::AppUpdates,
     pub cursor_setup: crate::cursor_setup::CursorSetup,
     pub account_identities: crate::account_identity::AccountIdentities,
     pub account_logins: crate::account_login::AccountLogins,
@@ -55,6 +57,8 @@ pub struct Inner {
     pub process_owned: std::sync::atomic::AtomicBool,
     /// A newer binary is in place; hand over to it after the graceful shutdown.
     pub restart_pending: std::sync::atomic::AtomicBool,
+    /// The binary to start after that shutdown when it is not this process's own path (an updated install moved it).
+    pub restart_exe: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// "Keep this machine reachable when Kybern is closed": the login item that starts this daemon.
     pub login_service: crate::login_service::LoginService,
     pub pairing: Pairing,
@@ -68,6 +72,9 @@ pub struct Inner {
     pub advertised_urls: std::sync::RwLock<Vec<String>>,
     pub port: std::sync::atomic::AtomicU16,
     pub bootstrap_token: String,
+    /// The bootstrap token's id in the store: how the local desktop app is recognized
+    /// (`auth::is_bootstrap`).
+    pub bootstrap_token_id: uuid::Uuid,
     pub environment_id: String,
     pub started_at: DateTime<Utc>,
     pub shutdown: CancellationToken,
@@ -137,7 +144,8 @@ impl AppState {
         drivers: DriverRegistry,
         store: Store,
     ) -> Result<Self> {
-        let bootstrap_token = crate::auth::ensure_bootstrap(&store, &paths.token_file)?;
+        let crate::auth::Bootstrap { token: bootstrap_token, id: bootstrap_token_id } =
+            crate::auth::ensure_bootstrap(&store, &paths.token_file)?;
         let environment_id = match store.meta_get("environment_id")? {
             Some(id) => id,
             None => {
@@ -197,6 +205,7 @@ impl AppState {
                 thread_projections: crate::thread_projection::ThreadProjectionCache::default(),
                 harness_updates,
                 daemon_updates,
+                app_updates: Default::default(),
                 cursor_setup: Default::default(),
                 account_identities: Default::default(),
                 account_logins: Default::default(),
@@ -207,6 +216,7 @@ impl AppState {
                 desktop_managed: std::sync::atomic::AtomicBool::new(false),
                 process_owned: std::sync::atomic::AtomicBool::new(false),
                 restart_pending: std::sync::atomic::AtomicBool::new(false),
+                restart_exe: std::sync::Mutex::new(None),
                 login_service: Default::default(),
                 pairing: Pairing::default(),
                 tickets: crate::access::Tickets::default(),
@@ -217,6 +227,7 @@ impl AppState {
                 advertised_urls: std::sync::RwLock::new(vec![]),
                 port: std::sync::atomic::AtomicU16::new(0),
                 bootstrap_token,
+                bootstrap_token_id,
                 environment_id,
                 started_at: Utc::now(),
                 shutdown,

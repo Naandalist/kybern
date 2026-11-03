@@ -8,6 +8,7 @@ import { Menu, MenuItem, MenuLabel, MenuSeparator, Tip } from '../nav/overlay.ts
 import { Badge } from '../kit/Badge.tsx'
 import { portLabel } from '../../../../packages/kybern-client/src/machineUtilities.ts'
 import { usePorts } from './ports.ts'
+import { forwardOf, routeText } from './slow.ts'
 import { toast } from '../shell/toasts.tsx'
 import { errorText } from '../nav/actions.ts'
 import { IconButton } from '../kit/IconButton.tsx'
@@ -82,7 +83,7 @@ export function PreviewChrome({ threadId }: { threadId: string }) {
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} style={{ display: 'flex', alignItems: 'center', flexGrow: 1, minWidth: 0, height: 28, gap: 6, paddingLeft: 8, paddingRight: 8, borderRadius: 8, backgroundColor: editing ? t.v('--color-background-elevated-secondary') : undefined, borderWidth: editing ? 1 : 0, borderColor: t.variant === 'dark' ? 'rgba(115, 115, 115, 0.45)' : 'rgba(163, 163, 163, 0.45)', hover: { backgroundColor: t.buttonSecondary } }}>
       <Icon source={s.load.phase === 'blocked' ? ICONS.shield : s.load.phase === 'waiting' || s.load.phase === 'error' ? warningIcon : entry?.kind === 'file' ? ICONS.file : N.globe} size={14} color={t.textSecondary} />
       {!editing && entry?.kind === 'server' && !environment.local && <Label color={t.textSecondary} size={10}>{environment.name}</Label>}
-      {!editing && entry?.machine && <Label color={t.textSecondary} size={10}>{`on ${entry.machine.name}`}</Label>}
+      {!editing && entry?.machine && <Label color={t.textSecondary} size={10}>{[`on ${entry.machine.name}`, routeText(forwardOf(ports.forwards, entry.machine))].filter(Boolean).join(' ')}</Label>}
       {/* Fast mode (HTTP/2 over Kybern's own certificate): on, it says so here and one click goes back to plain HTTP. */}
       {!editing && entry?.fast?.on && <Tip label={`Loading over HTTP/2${entry.fast.rttMs !== undefined ? ` · ${entry.fast.rttMs} ms to ${entry.machine?.name ?? 'the machine'}` : ''}. Click to use plain HTTP.`}><div><Badge testId="preview-fast" variant="info" size="sm" icon={fastIcon} onClick={() => setPreviewFast(threadId, false)}>Fast</Badge></div></Tip>}
       {editing ? <input ref={input} testId="preview-address" aria-label="Address" value={draft} placeholder="Enter a URL or file path" onChange={e => setDraft(e.value ?? '')} onSubmit={() => void submit()} onBlur={() => { if (!s.busy) cancel() }} onKeyDown={e => { if (e.key === 'escape') cancel() }} style={{ flexGrow: 1, minWidth: 0, height: 26, fontSize: 12, fontFamily: 'JetBrains Mono', color: t.text, backgroundColor: 'transparent' }} />

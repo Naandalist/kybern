@@ -110,6 +110,16 @@ updater signing secret keeps its `TAURI_SIGNING_PRIVATE_KEY` name, and the
 `@tauri-apps/cli` dev dependency of `apps/gpuix` still signs the artifacts
 (`signer sign`).
 
+The macOS bundles are code-signed with the self-signed "Kybern Code Signing"
+certificate from the `MACOS_SIGNING_P12_BASE64` and `MACOS_SIGNING_P12_PASSWORD`
+secrets (`scripts/macos-signing.sh`), so every version keeps the designated
+requirement `identifier "dev.kybern.gpuix" and certificate leaf = H"…"`. The
+desktop workflow fails without them: an ad-hoc release would ask every user for
+their keychain password again. It is not an Apple Developer ID; nothing is
+notarized. Keychain access goes through the committed `kybern-keychain` helper
+(`apps/gpuix/packaging/keychain/README.md`), which must not change between
+releases.
+
 Before running `scripts/release.sh X.Y.Z`, add a matching `## X.Y.Z` entry near
 the top of `CHANGELOG.md` with concise, user-visible bullets. Cargo-dist copies
 that entry into the GitHub Release, and the desktop updater uses its first bullet

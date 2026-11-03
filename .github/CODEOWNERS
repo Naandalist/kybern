@@ -1,0 +1,3 @@
+# The macOS Keychain helper holds every device token; a change to it needs the owner's review
+# (apps/gpuix/packaging/keychain/README.md).
+apps/gpuix/packaging/keychain/** @Tresnanda

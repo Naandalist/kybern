@@ -477,7 +477,7 @@ fn an_older_daemon_info_and_project_still_parse_and_the_network_defaults_to_off(
     let saved: Settings = serde_json::from_value(serde_json::json!({ "network": { "enabled": true } })).unwrap();
     assert_eq!(saved.network, NetworkSettings { configured: true, enabled: true, port: DEFAULT_PORT, keep_reachable: true });
     assert_eq!(NETWORK_PROTOCOL, 1);
-    assert_eq!(features::ALL.len(), 23);
+    assert_eq!(features::ALL.len(), 27);
 }
 
 #[test]

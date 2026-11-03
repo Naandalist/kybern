@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { KeepReachableStatus, MachineCard } from '../../../../packages/kybern-client/src/types.ts'
 import type { MachineRow } from '../machines/index.ts'
+import { footerText } from '../machines/format.ts'
 import { buildCards, doctorRows, doctorSummary, isBehind, osName, outboxRows, reachableRow, unnamedMachines, updateResultRows, updateSummary } from './machinesModel.ts'
 
 const row = (over: Partial<MachineRow> & { machineId: string; name: string }): MachineRow => ({ status: 'online', offline: false, isLocal: false, glyph: { letter: over.name[0]!, hue: 10 }, showGlyph: true, member: true, paused: false, ...over })
@@ -24,7 +25,7 @@ test('OS names', () => {
 test('a card: status, facts, harnesses, relay name, and whether it is behind', () => {
   const cards = buildCards({
     rows: [row({ machineId: 'mac', name: 'This Mac', isLocal: true, version: '0.19.0' }), row({ machineId: 'vps', name: 'VPS', status: 'relaying', version: '0.18.0' }), row({ machineId: 'sat', name: 'satyamas', status: 'offline', offline: true, lastSeenAt: 0 })],
-    members: [member({ machine_id: 'mac', name: 'Mac', os: 'macos' }), member({ machine_id: 'vps', name: 'VPS', ts_name: 'vps.tail.ts.net', relay_via: 'mac', harnesses: [{ kind: 'claude-code', available: true, signed_in: false }] }), member({ machine_id: 'sat', name: 'satyamas', os: 'windows' })],
+    members: [member({ machine_id: 'mac', name: 'Mac', os: 'macos' }), member({ machine_id: 'vps', name: 'VPS', ts_name: 'vps.tail.ts.net', relay_via: 'mac', harnesses: [{ kind: 'claude-code', available: true, signed_in: false }] }), member({ machine_id: 'sat', name: 'satyamas', os: 'windows', status: 'offline' })],
     infos: { sat: { cpu: { model: 'Ryzen', logical_cores: 12 } } },
     latest: '0.19.0',
     now: 3 * 3600_000,
@@ -113,4 +114,58 @@ test('the reachable row explains the switch, shows a problem instead, and hides 
   expect(reachableRow({ ...on, external: 'The systemd user service kybernd.service already starts Kybern at login.' })?.locked).toBe(true)
   expect(reachableRow({ ...on, kind: null })).toBeNull()
   expect(reachableRow(undefined)).toBeNull()
+})
+
+// ADE-124: the daemon the user is at reached SatyaMas while this app's own connection to it was down, and the page
+// said "Offline · last seen 10h ago" while the picker said "Online".
+test('a machine the daemon reports online reads online, with a note while this computer is still reaching it', () => {
+  const now = Date.parse('2026-11-03T03:05:00Z')
+  const rows = [
+    row({ machineId: 'mac', name: 'Mac', isLocal: true }),
+    row({ machineId: 'sat', name: 'SatyaMas', status: 'offline', offline: true, lastSeenAt: now - 10 * 3600_000, version: '0.21.1' }),
+    row({ machineId: 'box', name: 'Box', status: 'offline', offline: true, connecting: true }),
+    row({ machineId: 'gone', name: 'Gone', status: 'offline', offline: true, lastSeenAt: now - 10 * 3600_000 }),
+  ]
+  const members = [
+    member({ machine_id: 'mac', name: 'Mac' }),
+    member({ machine_id: 'sat', name: 'SatyaMas', last_seen_at: '2026-11-03T03:04:00Z' }),
+    member({ machine_id: 'box', name: 'Box' }),
+    member({ machine_id: 'gone', name: 'Gone', status: 'offline', last_seen_at: '2026-11-03T02:05:00Z' }),
+  ]
+  const [, sat, box, gone] = buildCards({ rows, members, infos: {}, now })
+  expect([sat!.status, sat!.tone, sat!.reaching, sat!.row.offline]).toEqual(['Online · not reachable from this computer yet', 'warn', true, false])
+  expect(sat!.row.lastSeenAt).toBe(Date.parse('2026-11-03T03:04:00Z'))
+  expect(box!.status).toBe('Online · connecting…')
+  // Offline everywhere: last seen is the daemon's, which saw it an hour ago, not this app ten hours ago.
+  expect([gone!.status, gone!.reaching]).toEqual(['Offline · last seen 1h ago', false])
+})
+
+// 2026-11-03: this app reached kdi-vps and SatyaMas, but the Mac daemon had no session to either; both read "Online".
+test('a machine this app reaches while the daemon here has no session to it says the link is reconnecting', () => {
+  const rows = [
+    row({ machineId: 'mac', name: 'Mac', isLocal: true }),
+    row({ machineId: 'kdi', name: 'kdi-vps' }),
+    row({ machineId: 'sat', name: 'SatyaMas' }),
+  ]
+  const members = [
+    member({ machine_id: 'mac', name: 'Mac', status: 'offline' }),
+    member({ machine_id: 'kdi', name: 'kdi-vps', status: 'offline' }),
+    member({ machine_id: 'sat', name: 'SatyaMas' }),
+  ]
+  const [mac, kdi, sat] = buildCards({ rows, members, infos: {} })
+  expect([kdi!.status, kdi!.tone, kdi!.linkDown, kdi!.row.offline]).toEqual(["Online · this computer's link is reconnecting", 'warn', true, false])
+  expect([sat!.status, sat!.linkDown]).toEqual(['Online', false])
+  expect(mac!.linkDown).toBe(false)
+})
+
+test('the header counts offline machines of the network, not a saved one that is not in it', () => {
+  const rows = [
+    row({ machineId: 'mac', name: 'Mac', isLocal: true }),
+    row({ machineId: 'sat', name: 'SatyaMas', status: 'offline', offline: true }),
+    row({ machineId: 'old', name: 'This Mac', status: 'unpaired', offline: true, member: false }),
+    row({ machineId: 'kdi', name: 'kdi', status: 'paused', offline: true, paused: true }),
+  ]
+  const cards = buildCards({ rows, members: [member({ machine_id: 'mac', name: 'Mac' }), member({ machine_id: 'sat', name: 'SatyaMas' })], infos: {} })
+  expect(footerText(cards.map((card) => card.row))).toBe('4 machines · 1 paused')
+  expect(footerText(rows)).toBe('4 machines · 1 offline · 1 paused')
 })

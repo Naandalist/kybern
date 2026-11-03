@@ -463,6 +463,8 @@ async fn run(state: AppState, socket: WebSocket, principal: Principal) {
     let mut preview_requests = ctx.principal.has(Scope::OrchestrationRead).then(|| state.orchestrator.subscribe_preview_requests());
     let mut request_progress = ctx.principal.has(Scope::OrchestrationRead).then(|| state.orchestrator.requests().subscribe());
     let mut remote_children = ctx.principal.has(Scope::OrchestrationRead).then(|| state.orchestrator.subscribe_remote_children());
+    // Only the local desktop app attaches as the updater of this machine's app (ADE-125); the notice names one connection.
+    let mut app_update_notices = crate::auth::is_bootstrap(&state, &ctx.principal).then(|| state.app_updates.subscribe());
     if !principal_is_active(&state, &ctx.principal) {
         return;
     }
@@ -725,6 +727,21 @@ async fn run(state: AppState, socket: WebSocket, principal: Principal) {
                     Err(_) => usage = None,
                 }
             }
+            notice = async {
+                match app_update_notices.as_mut() {
+                    Some(notices) => notices.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match notice {
+                    Ok(notice) if notice.connection == ctx.id => {
+                        let params = kybern_protocol::methods::AppUpdateRequestedNotification { version: notice.version, automatic: notice.automatic };
+                        let _ = ctx.out.notify(kybern_protocol::methods::APP_UPDATE_REQUESTED_NOTIFICATION, params).await;
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => app_update_notices = None,
+                }
+            }
             ev = live.recv() => {
                 match ev {
                     Ok(ev) => ctx.deliver_live(&ev).await,
@@ -743,6 +760,7 @@ async fn run(state: AppState, socket: WebSocket, principal: Principal) {
     if let Some(forwarder) = network_changes {
         forwarder.abort();
     }
+    state.app_updates.detach(ctx.id);
     closed.cancel();
     drop(ctx);
     writer.abort();

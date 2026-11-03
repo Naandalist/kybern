@@ -8,8 +8,10 @@
 //!   a member that sees a newer version on another member updates itself, once per version and only
 //!   while nothing is running; it never interrupts a turn.
 //!
-//! A machine that cannot replace itself says so instead of failing: a daemon the desktop app started
-//! "updates with the app", and a development build is rebuilt rather than replaced.
+//! A machine whose daemon the desktop app manages updates the app (ADE-125, `crate::app_update`): through the open
+//! app, or by itself while the app is closed, always once nothing is running. A deb or rpm install says what to run
+//! instead, and a development build is rebuilt rather than replaced. Machines on older versions still answer
+//! "Updates with the app".
 //!
 //! Each machine keeps to its own `update_track`: a Stable machine asked to reach a dev build, or
 //! following a member that runs one, looks at its own (stable) feed instead.
@@ -36,7 +38,6 @@ const FOLLOW_EVERY: Duration = Duration::from_secs(30);
 /// The `meta` key that remembers the version a following machine already tried to reach.
 const ATTEMPT_KEY: &str = "network_follow_attempt";
 
-const UPDATES_WITH_THE_APP: &str = "Updates with the app";
 const ALREADY_CURRENT: &str = "Already up to date";
 
 /// What a machine does with a request to update.
@@ -46,30 +47,60 @@ pub enum Decision {
     Skip(String),
 }
 
-/// The pure part of the answer: whether a machine at `current` on `track` that is `desktop_managed` or
-/// `unsupported` for another reason starts for a request that wants `wanted`. A version off its track
-/// counts as no version: the machine checks its own feed.
-pub fn decide(desktop_managed: bool, unsupported: Option<&str>, current: &str, wanted: Option<&str>, track: UpdateTrack) -> Decision {
+/// Who replaces this machine's Kybern, and why it cannot when it cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Updater {
+    /// The daemon replaces its own binary.
+    Daemon { unsupported: Option<String> },
+    /// The daemon belongs to the desktop app, which is updated instead.
+    App { blocked: Option<String> },
+}
+
+/// The pure part of the answer: whether a machine at `current` on `track` starts for a request that wants `wanted`.
+/// A version off its track counts as no version: the machine checks its own feed. A daemon that cannot replace itself
+/// says so first, as before; a desktop app's machine already on the version says that first, so a deb or rpm install
+/// is not told to install what it runs.
+pub fn decide(updater: &Updater, current: &str, wanted: Option<&str>, track: UpdateTrack) -> Decision {
     let wanted = wanted.filter(|wanted| on_track(track, wanted));
-    if desktop_managed {
-        return Decision::Skip(UPDATES_WITH_THE_APP.into());
+    let current_already = wanted.is_some_and(|wanted| !newer(wanted, current));
+    match updater {
+        Updater::Daemon { unsupported: Some(reason) } => Decision::Skip(reason.clone()),
+        _ if current_already => Decision::Skip(ALREADY_CURRENT.into()),
+        Updater::App { blocked: Some(reason) } => Decision::Skip(reason.clone()),
+        Updater::Daemon { unsupported: None } | Updater::App { blocked: None } => Decision::Start,
     }
-    if let Some(reason) = unsupported {
-        return Decision::Skip(reason.to_string());
-    }
-    if wanted.is_some_and(|wanted| !newer(wanted, current)) {
-        return Decision::Skip(ALREADY_CURRENT.into());
-    }
-    Decision::Start
 }
 
 /// `peer.update.start`, and this machine's own part of `network.update_all`: queue the update. The
 /// updater itself waits for running work to finish and restarts the daemon when it is done.
 pub async fn start_self(state: &AppState, wanted: Option<&str>) -> PeerUpdateStartResult {
-    let desktop_managed = state.desktop_managed.load(Ordering::SeqCst);
-    let unsupported = self_update::unsupported(state);
+    start(state, wanted, false).await
+}
+
+/// Queue an update nobody asked for: this machine follows another one. It also waits for terminals to close.
+async fn start_following(state: &AppState, wanted: &str) -> PeerUpdateStartResult {
+    start(state, Some(wanted), true).await
+}
+
+async fn start(state: &AppState, wanted: Option<&str>, automatic: bool) -> PeerUpdateStartResult {
     let track = state.settings.get().update_track;
-    match decide(desktop_managed, unsupported.as_deref(), CURRENT_VERSION, wanted, track) {
+    if state.desktop_managed.load(Ordering::SeqCst) {
+        // A package install's answer names the release to install, so it needs a version even when none was asked for.
+        let mut wanted = wanted.filter(|wanted| on_track(track, wanted)).map(str::to_string);
+        if wanted.is_none() && matches!(crate::app_update::current_route(state), crate::app_update::Route::Package(_)) {
+            wanted = self_update::feed_latest(state).await;
+        }
+        let updater = Updater::App { blocked: crate::app_update::blocked(state, wanted.as_deref()) };
+        return match decide(&updater, CURRENT_VERSION, wanted.as_deref(), track) {
+            Decision::Skip(reason) => PeerUpdateStartResult { started: false, reason: Some(reason) },
+            Decision::Start => {
+                crate::app_update::request(state, wanted, automatic);
+                PeerUpdateStartResult { started: true, reason: None }
+            }
+        };
+    }
+    let updater = Updater::Daemon { unsupported: self_update::unsupported(state) };
+    match decide(&updater, CURRENT_VERSION, wanted, track) {
         Decision::Skip(reason) => PeerUpdateStartResult { started: false, reason: Some(reason) },
         Decision::Start => {
             state.daemon_updates.request(&state.store);
@@ -255,7 +286,14 @@ pub async fn follow_tick(state: &AppState) -> Option<String> {
     if !network.is_enabled() || !membership.self_is_member() || !membership.projection().follow_updates() {
         return None;
     }
-    if state.desktop_managed.load(Ordering::SeqCst) || self_update::unsupported(state).is_some() {
+    // The desktop app's daemon follows too, by updating the app; one that cannot (a deb or rpm, a development build)
+    // stays out rather than try every version.
+    let can_update = if state.desktop_managed.load(Ordering::SeqCst) {
+        !matches!(crate::app_update::current_route(state), crate::app_update::Route::Package(_) | crate::app_update::Route::Manual(_))
+    } else {
+        self_update::unsupported(state).is_none()
+    };
+    if !can_update {
         return None;
     }
     let newest = newest_peer_version(state)?;
@@ -268,7 +306,7 @@ pub async fn follow_tick(state: &AppState) -> Option<String> {
         return None;
     }
     tracing::info!(target: TARGET, %version, "another machine runs a newer version; updating to follow it");
-    let answer = start_self(state, Some(&version)).await;
+    let answer = start_following(state, &version).await;
     answer.started.then_some(version)
 }
 
@@ -289,34 +327,57 @@ pub async fn run(state: AppState) {
 mod tests {
     use super::*;
 
+    fn daemon(unsupported: Option<&str>) -> Updater {
+        Updater::Daemon { unsupported: unsupported.map(str::to_string) }
+    }
+
+    fn app(blocked: Option<&str>) -> Updater {
+        Updater::App { blocked: blocked.map(str::to_string) }
+    }
+
     #[test]
     fn a_machine_decides_from_who_manages_it_and_what_is_wanted() {
         let stable = UpdateTrack::Stable;
-        assert_eq!(decide(true, None, "0.19.0", Some("0.20.0"), stable), Decision::Skip("Updates with the app".into()));
         assert_eq!(
-            decide(false, Some("Development build; rebuild it instead."), "0.19.0", None, stable),
+            decide(&daemon(Some("Development build; rebuild it instead.")), "0.19.0", None, stable),
             Decision::Skip("Development build; rebuild it instead.".into())
         );
-        assert_eq!(decide(false, None, "0.20.0", Some("0.20.0"), stable), Decision::Skip("Already up to date".into()));
-        assert_eq!(decide(false, None, "0.21.0", Some("0.20.0"), stable), Decision::Skip("Already up to date".into()));
-        assert_eq!(decide(false, None, "0.19.0", Some("0.20.0"), stable), Decision::Start);
+        assert_eq!(decide(&daemon(None), "0.20.0", Some("0.20.0"), stable), Decision::Skip("Already up to date".into()));
+        assert_eq!(decide(&daemon(None), "0.21.0", Some("0.20.0"), stable), Decision::Skip("Already up to date".into()));
+        assert_eq!(decide(&daemon(None), "0.19.0", Some("0.20.0"), stable), Decision::Start);
         // Without a target version the machine looks at the release feed itself.
-        assert_eq!(decide(false, None, "0.19.0", None, stable), Decision::Start);
-        // The app wins over everything else.
-        assert_eq!(decide(true, Some("x"), "0.19.0", None, stable), Decision::Skip("Updates with the app".into()));
+        assert_eq!(decide(&daemon(None), "0.19.0", None, stable), Decision::Start);
+        // A daemon that cannot replace itself says so even when it is on the version.
+        assert_eq!(decide(&daemon(Some("x")), "0.20.0", Some("0.20.0"), stable), Decision::Skip("x".into()));
+    }
+
+    #[test]
+    fn a_desktop_app_machine_starts_through_the_app_unless_it_cannot() {
+        let stable = UpdateTrack::Stable;
+        // The open app, or the daemon for the closed app, installs it (ADE-125): no longer "Updates with the app".
+        assert_eq!(decide(&app(None), "0.19.0", Some("0.20.0"), stable), Decision::Start);
+        assert_eq!(decide(&app(None), "0.19.0", None, stable), Decision::Start);
+        // A deb or rpm says what to run instead.
+        let package = "Needs an update — download kybern-gpuix_0.20.0_x86_64.deb from the release page, then run sudo apt install ./kybern-gpuix_0.20.0_x86_64.deb";
+        assert_eq!(decide(&app(Some(package)), "0.19.0", Some("0.20.0"), stable), Decision::Skip(package.into()));
+        // A machine that is already there says so first, even one that could not update anyway.
+        assert_eq!(decide(&app(Some(package)), "0.20.0", Some("0.20.0"), stable), Decision::Skip("Already up to date".into()));
+        assert_eq!(decide(&app(None), "0.20.0", Some("0.20.0"), stable), Decision::Skip("Already up to date".into()));
+        // Each keeps to its own track: a dev build is no target for a Stable app machine.
+        assert_eq!(decide(&app(None), "0.20.0", Some("0.21.0-dev.2"), stable), Decision::Start);
     }
 
     #[test]
     fn a_machine_keeps_to_its_own_update_track() {
         // A dev build is no target for a Stable machine: it checks its own feed, which may still have a newer stable.
-        assert_eq!(decide(false, None, "0.20.0", Some("0.21.0-dev.2"), UpdateTrack::Stable), Decision::Start);
-        assert_eq!(decide(false, None, "0.21.0-dev.2", Some("0.21.0-dev.2"), UpdateTrack::Stable), Decision::Start);
+        assert_eq!(decide(&daemon(None), "0.20.0", Some("0.21.0-dev.2"), UpdateTrack::Stable), Decision::Start);
+        assert_eq!(decide(&daemon(None), "0.21.0-dev.2", Some("0.21.0-dev.2"), UpdateTrack::Stable), Decision::Start);
         assert_eq!(
-            decide(false, None, "0.21.0-dev.2", Some("0.21.0-dev.2"), UpdateTrack::Dev),
+            decide(&daemon(None), "0.21.0-dev.2", Some("0.21.0-dev.2"), UpdateTrack::Dev),
             Decision::Skip("Already up to date".into())
         );
         assert_eq!(
-            decide(false, None, "0.21.0-dev.3", Some("0.21.0-dev.2"), UpdateTrack::Dev),
+            decide(&daemon(None), "0.21.0-dev.3", Some("0.21.0-dev.2"), UpdateTrack::Dev),
             Decision::Skip("Already up to date".into())
         );
 

@@ -671,6 +671,62 @@ method!(DaemonUpdateStatusMethod, "daemon_update.status", Some(Scope::Orchestrat
 method!(DaemonUpdateCheck, "daemon_update.check", Some(Scope::OrchestrationOperate), Empty, DaemonUpdate);
 method!(DaemonUpdateRun, "daemon_update.run", Some(Scope::OrchestrationOperate), Empty, DaemonUpdate);
 
+// A daemon the desktop app manages updates through the app (ADE-125). Each window of the app on this machine
+// attaches over its local connection; when this machine is asked to update ("Update all machines", "Keep all
+// machines on the same version", `daemon_update.run`) and nothing is running, the daemon sends
+// `app_update.requested` to one attached window, which installs the release from its own feed, verified with
+// its own key, and restarts the app and the daemon. With no window attached the daemon updates the installed
+// app itself. Only the local desktop client (the bootstrap token) may attach.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AppUpdaterAttachParams {
+    /// The app's version.
+    pub version: String,
+    /// Whether this copy of the app can install a release by itself.
+    pub can_install: bool,
+    /// Why it cannot, in words for the machines page, when `can_install` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+method!(AppUpdaterAttach, "app_updater.attach", Some(Scope::OrchestrationOperate), AppUpdaterAttachParams, Empty);
+
+/// How far the app got with an update the daemon asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AppUpdatePhase {
+    /// Downloading and verifying the release.
+    Installing,
+    /// Verified; waiting for running work to finish before the restart.
+    Waiting,
+    /// About to restart on the new version.
+    Restarting,
+    /// The feed has nothing newer for the app's update track.
+    Current,
+    /// The update failed; `message` says why.
+    Failed,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AppUpdaterReportParams {
+    pub phase: AppUpdatePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+method!(AppUpdaterReport, "app_updater.report", Some(Scope::OrchestrationOperate), AppUpdaterReportParams, Empty);
+
+/// Sent to the one attached window that should install an update. `version` is the version this machine was
+/// asked to reach; the app still reads its own track's feed and installs only a release newer than itself.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AppUpdateRequestedNotification {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Nobody asked for this update: the machine follows another one ("Keep all machines on the same version").
+    /// The daemon waited for terminals to close as well; the app does the same before it restarts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic: bool,
+}
+pub const APP_UPDATE_REQUESTED_NOTIFICATION: &str = "app_update.requested";
+
 // ---- projects ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -4717,6 +4773,9 @@ method!(PeerClipboardAuto, "peer.clipboard.auto", Some(Scope::MachineClipboardAu
 method!(PeerPortsPrepare, "peer.ports.prepare", Some(Scope::MachinePorts), PeerPortsPrepareParams, PeerPortsPrepareResult);
 method!(PeerPortsRelease, "peer.ports.release", Some(Scope::MachinePeer), PeerPortsReleaseParams, Empty);
 method!(PeerPortsOpen, "peer.ports.open", Some(Scope::MachinePorts), PeerPortsOpenParams, Empty);
+method!(PeerPortsVia, "peer.ports.via", Some(Scope::MachinePorts), PeerPortsViaParams, PeerPortsViaResult);
+method!(PeerPortsHop, "peer.ports.hop", Some(Scope::MachineRelay), PeerPortsHopParams, PeerPortsHopResult);
+method!(PeerPortsHopCheck, "peer.ports.hop_check", Some(Scope::MachinePorts), PeerPortsHopCheckParams, Empty);
 // Data and close frames only reach a stream that an authorized open created, so `machine:peer` is enough.
 method!(PeerPortsData, "peer.ports.data", Some(Scope::MachinePeer), PeerRelayDataParams, Empty);
 method!(PeerPortsClose, "peer.ports.close", Some(Scope::MachinePeer), PeerRelayCloseParams, Empty);
@@ -4787,6 +4846,8 @@ registry!(
     DaemonUpdateStatusMethod,
     DaemonUpdateCheck,
     DaemonUpdateRun,
+    AppUpdaterAttach,
+    AppUpdaterReport,
     ProjectsList,
     ProjectsBrowse,
     ProjectsAdd,
@@ -5035,6 +5096,9 @@ registry!(
     PeerPortsPrepare,
     PeerPortsRelease,
     PeerPortsOpen,
+    PeerPortsVia,
+    PeerPortsHop,
+    PeerPortsHopCheck,
     PeerPortsData,
     PeerPortsClose,
     PluginsInventory,
