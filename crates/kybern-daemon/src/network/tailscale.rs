@@ -203,6 +203,8 @@ fn candidates() -> Vec<PathBuf> {
 pub struct Cli {
     binary: Mutex<Option<String>>,
     status: Mutex<Option<(Instant, TsStatus)>>,
+    /// The `status` call running, which concurrent callers wait on instead of starting their own.
+    status_running: Mutex<Option<Arc<tokio::sync::OnceCell<TsStatus>>>>,
     whois: Mutex<HashMap<IpAddr, (Instant, Whois)>>,
     /// The `whois` call running for an address, which concurrent callers wait on instead of starting their own: a
     /// browser opening several connections at once costs one CLI call, not one each.
@@ -302,15 +304,13 @@ impl Tailscale for Cli {
         {
             return Ok(status.clone());
         }
-        let status = match self.run(&["status", "--json"]).await {
-            None => TsStatus { detail: Some("Tailscale is not installed on this machine".into()), ..Default::default() },
-            // `tailscale status` exits 1 when the backend is stopped but still prints the JSON.
-            Some((_, text)) => match serde_json::from_str::<Value>(&text) {
-                Ok(value) => parse_status(&value),
-                Err(_) => TsStatus { detail: Some("Tailscale did not answer".into()), ..Default::default() },
-            },
-        };
-        *self.status.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), status.clone()));
+        // One CLI call for everyone who asks while it runs; it fills the cache before it ends.
+        let running = self.status_running.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).clone();
+        let status = running.get_or_init(|| self.status_now()).await.clone();
+        let mut slot = self.status_running.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &running)) {
+            *slot = None;
+        }
         Ok(status)
     }
 
@@ -337,6 +337,19 @@ impl Tailscale for Cli {
 }
 
 impl Cli {
+    async fn status_now(&self) -> TsStatus {
+        let status = match self.run(&["status", "--json"]).await {
+            None => TsStatus { detail: Some("Tailscale is not installed on this machine".into()), ..Default::default() },
+            // `tailscale status` exits 1 when the backend is stopped but still prints the JSON.
+            Some((_, text)) => match serde_json::from_str::<Value>(&text) {
+                Ok(value) => parse_status(&value),
+                Err(_) => TsStatus { detail: Some("Tailscale did not answer".into()), ..Default::default() },
+            },
+        };
+        *self.status.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), status.clone()));
+        status
+    }
+
     async fn whois_now(&self, addr: IpAddr) -> Result<Whois> {
         let address = addr.to_string();
         let (ok, text) = self.run(&["whois", "--json", &address]).await.context("Tailscale is not installed on this machine")?;
@@ -511,6 +524,25 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    // Every client's `network.changed` and `network.status` read Tailscale's status: one CLI call serves them all.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_status_reads_share_one_cli_call() {
+        let dir = std::env::temp_dir().join(format!("kybern-ts-status-{}", uuid::Uuid::now_v7()));
+        let calls = dir.join("calls");
+        let body = format!("#!/bin/sh\necho x >> '{}'\nsleep 0.3\necho '{{\"BackendState\":\"Stopped\"}}'\n", calls.display());
+        let binary = crate::test_support::script(&dir, "tailscale", &body, "");
+        let cli = Cli::default();
+        *cli.binary.lock().unwrap() = Some(binary.to_string_lossy().into_owned());
+        let reads = futures::future::join_all((0..6).map(|_| cli.status())).await;
+        assert!(reads.iter().all(|read| read.as_ref().unwrap().backend_state == "Stopped"));
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1, "one call for six readers");
+        // The answer is cached for the next readers too.
+        cli.status().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn status_json() -> Value {
         json!({

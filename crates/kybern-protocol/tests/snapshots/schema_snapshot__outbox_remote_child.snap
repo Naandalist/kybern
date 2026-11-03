@@ -67,6 +67,10 @@ expression: schema_for!(RemoteChild)
       "description": "The mirror of the target's delegation (result, files touched, branch, head commit).",
       "$ref": "#/$defs/DelegationInfo"
     },
+    "completed_at_from_target": {
+      "description": "`info.completed_at` is the target's own time: the child was followed to its end and its delegation said when\nthat was. Otherwise an end time is this machine's (a cancel before delivery, an unreachable target, a failed\ndelivery), and only comparable with this machine's clock.",
+      "type": "boolean"
+    },
     "created_at": {
       "type": "string",
       "format": "date-time"

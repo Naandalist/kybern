@@ -848,6 +848,8 @@ enum DelegationsCmd {
         #[arg(long)]
         force: bool,
     },
+    /// What this machine records of a thread's agents on other machines (`kybern_agent_status`'s view).
+    Remote { thread: String },
 }
 
 fn parse_message_state(s: &str) -> Result<ThreadMessageState, String> {
@@ -2159,6 +2161,27 @@ pub async fn run() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&thread)?);
                 } else {
                     render::threads(&[thread]);
+                }
+            }
+            DelegationsCmd::Remote { thread } => {
+                let result =
+                    client.call::<DelegationsRemoteList>(DelegationsRemoteListParams { parent_thread_id: thread.parse()? }).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else if result.children.is_empty() {
+                    println!("No agents on other machines.");
+                } else {
+                    for child in &result.children {
+                        let thread = child.remote_thread_id.map(|id| id.to_string()).unwrap_or_else(|| "-".into());
+                        println!(
+                            "{}  {:<11}  {}  on {}  thread {}",
+                            child.task_id,
+                            child.state.as_str(),
+                            child.title,
+                            child.target,
+                            thread
+                        );
+                    }
                 }
             }
         },

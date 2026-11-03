@@ -208,6 +208,8 @@ expression: scopes
   - "orchestration:operate"
 - - delegations.worktree_remove
   - "orchestration:operate"
+- - delegations.remote_list
+  - "orchestration:read"
 - - coordinator.get
   - "orchestration:read"
 - - coordinator.open

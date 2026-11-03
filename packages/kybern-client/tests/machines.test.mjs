@@ -917,3 +917,143 @@ test("a dead local machine does not hide the network: a live saved computer that
   assert.ok(set.connection("x"), "a member the answering computer does not list is not forgotten on its word");
   set.dispose();
 });
+
+// ADE-121: a machine that came back while this app had it offline. The daemon the user is at tells clients with
+// `network.changed`; the set dials the member at once (not after its backoff) and reads its lists again.
+test("a member the daemon reports online again is dialed at once and its lists are read fresh", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "tok-b" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  const b = world.host(T, "b", { online: false });
+  world.lists("a", [], []);
+  world.lists("b", [project("p", "x", "r1")], [thread("child-a", "p", "2026-10-28T10:00:00Z", { status: "running" })]);
+  let members = [card("a"), card("b", { status: "offline" })];
+  world.on("a", "network.status", () => ({ enabled: true, self_machine: card("a"), members }));
+  world.on("a", "network.routes", () => ({ routes: [tailnet(T)] }));
+  await set.ensureAll();
+  assert.equal(set.connection("b").status, "offline");
+  // Several failed attempts: the next one is minutes away.
+  for (let i = 0; i < 6; i++) await clock.advance(70_000);
+  assert.equal(set.connection("b").status, "offline");
+
+  // b comes back with a new child; its old one finished. The daemon says so; nothing else happens on its own.
+  b.online = true;
+  world.lists("b", [project("p", "x", "r1")], [
+    thread("child-b", "p", "2026-10-28T11:00:00Z", { status: "running" }),
+    thread("child-a", "p", "2026-10-28T10:30:00Z", { status: "idle" }),
+  ]);
+  members = [card("a"), card("b")];
+  const a = world.clients.find((c) => c.machineId === "a").client;
+  a.notify("network.changed", { enabled: true, self_machine: card("a"), members });
+  await clock.advance(400);
+  assert.equal(set.connection("b").status, "online");
+  const listed = set.merged().threads.all.filter((t) => t.machineId === "b").map((t) => [t.thread.id, t.thread.status]);
+  assert.deepEqual(listed.sort(), [["child-a", "idle"], ["child-b", "running"]]);
+  set.dispose();
+});
+
+test("a connect attempt that hangs is abandoned for a fresh one instead of keeping the machine offline", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "tok-b" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  world.host(T, "b");
+  world.lists("a", [], []);
+  world.lists("b", [], []);
+  const members = [card("a"), card("b")];
+  world.on("a", "network.status", () => ({ enabled: true, self_machine: card("a"), members }));
+  world.on("a", "network.routes", () => ({ routes: [tailnet(T)] }));
+  // The first identity check of b never answers (a probe whose timeout was lost).
+  const probe = set.transport.probe;
+  let hung = false;
+  set.transport.probe = (url, options) => {
+    if (!hung && url.startsWith(T)) { hung = true; return new Promise(() => {}); }
+    return probe(url, options);
+  };
+  const first = set.ensureAll();
+  await clock.advance(1_000);
+  assert.notEqual(set.connection("b").status, "online");
+  // A sync later on (a `network.changed`) asks again: the old attempt is still pending, but stale.
+  await clock.advance(130_000);
+  await set.syncMembers();
+  await clock.advance(100);
+  assert.equal(set.connection("b").status, "online");
+  void first;
+  set.dispose();
+});
+
+// A member the daemon reaches and this device cannot (a phone off the tailnet) is reported online at every sync. Only
+// the daemon seeing it come back (offline before, online now) dials it out of its backoff; otherwise it settles at
+// the longest wait instead of a full route search every 30 s.
+test("a member the daemon reports online all along but this device cannot reach keeps its backoff", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "tok-b" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  world.host(T, "b", { online: false });
+  world.lists("a", [], []);
+  const members = [card("a"), card("b")];
+  world.on("a", "network.status", () => ({ enabled: true, self_machine: card("a"), members }));
+  world.on("a", "network.routes", () => ({ routes: [tailnet(T)] }));
+  await set.ensureAll();
+  const a = world.clients.find((c) => c.machineId === "a").client;
+  // Ten minutes of the daemon saying the network changed (other members come and go) every 30 s.
+  for (let i = 0; i < 20; i++) {
+    a.notify("network.changed", { enabled: true, self_machine: card("a"), members });
+    await clock.advance(30_000);
+  }
+  const before = probesTo(world, T).length;
+  for (let i = 0; i < 20; i++) {
+    a.notify("network.changed", { enabled: true, self_machine: card("a"), members });
+    await clock.advance(30_000);
+  }
+  assert.equal(set.connection("b").status, "offline");
+  // Settled at the 300 s wait: about two attempts in the second ten minutes.
+  assert.ok(probesTo(world, T).length - before <= 3, `${probesTo(world, T).length - before} probes in ten minutes`);
+
+  // The daemon loses it and sees it again: dialed at once.
+  members[1] = card("b", { status: "offline" });
+  a.notify("network.changed", { enabled: true, self_machine: card("a"), members });
+  await clock.advance(1_000);
+  const lost = probesTo(world, T).length;
+  members[1] = card("b");
+  a.notify("network.changed", { enabled: true, self_machine: card("a"), members });
+  await clock.advance(1_000);
+  assert.ok(probesTo(world, T).length > lost, "a member that came back is dialed out of its backoff");
+  set.dispose();
+});
+
+// `network.changed` carries the whole status: the sync it starts does not ask the daemon for it again.
+test("a sync started by network.changed uses the status it carried", async () => {
+  const { world, set, clock } = setup({
+    records: [rec("a", [tailnet("http://100.64.0.1:4173")], { signingKey: "key-a" }), rec("b", [tailnet(T)], { signingKey: "key-b" })],
+    credentials: { a: "tok-a", b: "tok-b" },
+    localMachineId: "a",
+  });
+  world.host("http://100.64.0.1:4173", "a");
+  world.host(T, "b");
+  world.lists("a", [], []);
+  world.lists("b", [], []);
+  let reads = 0;
+  world.on("a", "network.status", () => { reads++; return { enabled: true, self_machine: card("a"), members: [card("a"), card("b")] }; });
+  world.on("a", "network.routes", () => ({ routes: [tailnet(T)] }));
+  await set.ensureAll();
+  const before = reads;
+  const a = world.clients.find((c) => c.machineId === "a").client;
+  a.notify("network.changed", { enabled: true, self_machine: card("a"), members: [card("a"), card("b", { name: "renamed" })] });
+  await clock.advance(400);
+  assert.equal(reads, before, "no network.status read");
+  assert.equal(set.connection("b").record.name, "renamed");
+  // An older daemon's empty payload still reads the status.
+  a.notify("network.changed", {});
+  await clock.advance(400);
+  assert.equal(reads, before + 1);
+  set.dispose();
+});

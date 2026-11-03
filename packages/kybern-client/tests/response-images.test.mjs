@@ -38,10 +38,9 @@ test("only supported local image links open a thread preview", () => {
   for (const source of ["https://example.com/a.png", "javascript:alert(1).png", "data:text/html,a.png", "file://other/a.png", "//other/a.png", "page.html", "image.svg", "invalid%zz.png"]) assert.equal(localImageLink(source), false, source)
 })
 
-test("blocked image paths explain recovery without offering a futile retry", () => {
-  const blocked = responseImageError(new Error("image must be inside the thread folder"))
-  assert.equal(blocked.retryable, false)
-  assert.match(blocked.message, /copy it into that folder/)
+test("only images that can never load are not offered a retry; no folder is refused (ADE-122)", () => {
+  assert.equal(responseImageError(new Error("use a PNG, JPEG, GIF, WebP, or AVIF image")).retryable, false)
+  assert.doesNotMatch(responseImageError(new Error("Image not found. Check the path, or retry once the agent has saved it.")).message, /copy it into/)
   assert.equal(responseImageError(new Error("Connection interrupted")).retryable, true)
   assert.equal(responseImageError(new Error("image file is unavailable")).retryable, true)
   assert.equal(responseImageError(new Error("images are limited to 50 MB")).retryable, false)

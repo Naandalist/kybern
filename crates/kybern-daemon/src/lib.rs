@@ -54,6 +54,7 @@ mod settings_share;
 mod skills;
 mod state;
 mod terminal;
+mod thread_image;
 mod thread_projection;
 mod thumbnail;
 mod usage;

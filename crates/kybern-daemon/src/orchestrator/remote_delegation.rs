@@ -133,7 +133,6 @@ pub trait RemoteHub: Send + Sync {
 }
 
 /// Orchestrator-side state of remote delegation.
-#[derive(Default)]
 pub(super) struct RemoteState {
     pub(super) hub: Option<Arc<dyn RemoteHub>>,
     /// The login broker (S4): borrowed logins for sessions of accounts bound to it.
@@ -144,6 +143,21 @@ pub(super) struct RemoteState {
     writes: Mutex<()>,
     /// Threads with a move attempt in flight (`move_thread.rs`).
     pub(super) moving: Mutex<HashSet<ThreadId>>,
+    /// Every change to a `remote_children` row, for `delegations.remote_changed`.
+    changed: broadcast::Sender<RemoteChild>,
+}
+
+impl Default for RemoteState {
+    fn default() -> Self {
+        Self {
+            hub: None,
+            login: None,
+            followers: Mutex::default(),
+            writes: Mutex::default(),
+            moving: Mutex::default(),
+            changed: broadcast::channel(256).0,
+        }
+    }
 }
 
 /// What one delivery attempt of an outbox item came to.
@@ -182,6 +196,21 @@ impl Orchestrator {
 
     pub fn remote_hub(&self) -> Option<&Arc<dyn RemoteHub>> {
         self.inner.remote.hub.as_ref()
+    }
+
+    /// Changes to this machine's records of children on other machines, for forwarding to clients.
+    pub fn subscribe_remote_children(&self) -> broadcast::Receiver<RemoteChild> {
+        self.inner.remote.changed.subscribe()
+    }
+
+    /// `delegations.remote_list`: a thread's children on other machines, as this machine records them.
+    pub fn remote_children_list(&self, parent_thread_id: ThreadId) -> Result<Vec<RemoteChild>> {
+        self.inner.store.remote_children_of(parent_thread_id)
+    }
+
+    /// Tell clients a record changed. No receivers just means no client is connected.
+    fn publish_remote_child(&self, child: &RemoteChild) {
+        let _ = self.inner.remote.changed.send(child.clone());
     }
 
     fn hub(&self) -> Result<&Arc<dyn RemoteHub>> {
@@ -371,6 +400,7 @@ impl Orchestrator {
                 completed_at: None,
                 parent_notified: true,
             },
+            completed_at_from_target: false,
             created_at: now,
             updated_at: now,
         };
@@ -395,6 +425,7 @@ impl Orchestrator {
         drop(_creating);
         hub.kick();
         self.inner.delegation.changed.notify_waiters();
+        self.publish_remote_child(&child);
         let mut response = self.remote_response(child, parent.id, request.wait, request.timeout).await?;
         if let (Some(note), Some(object)) = (provision.note(), response.as_object_mut()) {
             object.insert("provision".into(), note);
@@ -562,6 +593,7 @@ impl Orchestrator {
             child
         };
         self.inner.delegation.changed.notify_waiters();
+        self.publish_remote_child(&updated);
         Ok(Some(updated))
     }
 
@@ -927,6 +959,7 @@ impl Orchestrator {
                     child.info.status = DelegationStatus::Running;
                     child.info.error = None;
                     child.info.completed_at = None;
+                    child.completed_at_from_target = false;
                     child.info.parent_notified = true;
                     true
                 })
@@ -1113,6 +1146,7 @@ impl Orchestrator {
             // Keep the target's own word ("interrupted by a restart") rather than the generic status.
             child.info.status = status;
             child.info.completed_at = view.completed_at.or_else(|| Some(Utc::now()));
+            child.completed_at_from_target = view.completed_at.is_some();
         });
         if let Err(error) = settled {
             tracing::warn!(task_id = %child.task_id, %error, "could not record a remote agent's result");

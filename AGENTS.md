@@ -424,13 +424,14 @@ stops frames: wheel scrolls never land and captures fail.
 
 ## Sharing image previews
 
-Kybern can display local images only inside the conversation's original working
-folder. A separate checkout or worktree does not change that folder. Before
-calling an image-view tool or sharing an image, copy the final preview into a
-dedicated artifact subfolder inside the conversation's folder and verify it
-exists. Do not share `/tmp` paths or paths in a different worktree.
+Kybern shows a local image a reply references from any folder: a path relative
+to the conversation's working folder, an absolute path or a `~/` path, in a
+separate checkout or worktree too (the daemon's `/threads/{id}/image` route
+serves any readable PNG, JPEG, GIF, WebP or AVIF file, judged by its content).
+There is no need to copy a preview into the conversation's folder; reference
+it where it is and verify it exists first.
 
-Use `![Description](<relative/path.png>)` for an inline preview. Keep generated
+Use `![Description](<path.png>)` for an inline preview. Keep generated
 previews out of commits unless the user asks to include them. Follow the
 thread-specific artifact guidance when Kybern provides the exact folder.
 

@@ -54,7 +54,7 @@ fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxItem> {
 }
 
 const CHILD_SELECT: &str = "SELECT task_id, operation_id, parent_thread_id, target, remote_thread_id, status, stop_requested, last_seq,
-    title, provider, model, info, created_at, updated_at FROM remote_children";
+    title, provider, model, info, created_at, updated_at, completed_at_from_target FROM remote_children";
 
 fn row_to_child(r: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteChild> {
     Ok(RemoteChild {
@@ -80,6 +80,7 @@ fn row_to_child(r: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteChild> {
         info: serde_json::from_str(&r.get::<_, String>(11)?).map_err(|error| conversion(11, error))?,
         created_at: time(r, 12)?,
         updated_at: time(r, 13)?,
+        completed_at_from_target: r.get(14)?,
     })
 }
 
@@ -298,8 +299,8 @@ impl Store {
         self.with(|c| {
             c.execute(
                 "INSERT OR IGNORE INTO remote_children(task_id, operation_id, parent_thread_id, target, remote_thread_id, status,
-                    stop_requested, last_seq, title, provider, model, info, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    stop_requested, last_seq, title, provider, model, info, created_at, updated_at, completed_at_from_target)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     child.task_id.to_string(),
                     child.operation_id.to_string(),
@@ -315,6 +316,7 @@ impl Store {
                     serde_json::to_string(&child.info)?,
                     child.created_at.to_rfc3339(),
                     child.updated_at.to_rfc3339(),
+                    child.completed_at_from_target,
                 ],
             )?;
             Ok(c.query_row(&format!("{CHILD_SELECT} WHERE operation_id = ?1"), [child.operation_id.to_string()], row_to_child)?)
@@ -332,8 +334,8 @@ impl Store {
             if existing.is_none() {
                 tx.execute(
                     "INSERT INTO remote_children(task_id, operation_id, parent_thread_id, target, remote_thread_id, status,
-                        stop_requested, last_seq, title, provider, model, info, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                        stop_requested, last_seq, title, provider, model, info, created_at, updated_at, completed_at_from_target)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
                         child.task_id.to_string(),
                         child.operation_id.to_string(),
@@ -349,6 +351,7 @@ impl Store {
                         serde_json::to_string(&child.info)?,
                         child.created_at.to_rfc3339(),
                         child.updated_at.to_rfc3339(),
+                        child.completed_at_from_target,
                     ],
                 )?;
                 tx.execute(
@@ -435,7 +438,7 @@ impl Store {
         self.with(|c| {
             Ok(c.execute(
                 "UPDATE remote_children SET remote_thread_id = ?2, status = ?3, stop_requested = ?4, last_seq = ?5, info = ?6,
-                    updated_at = ?7 WHERE task_id = ?1",
+                    updated_at = ?7, completed_at_from_target = ?8 WHERE task_id = ?1",
                 params![
                     child.task_id.to_string(),
                     child.remote_thread_id.map(|id| id.to_string()),
@@ -444,6 +447,7 @@ impl Store {
                     child.last_seq,
                     serde_json::to_string(&child.info)?,
                     child.updated_at.to_rfc3339(),
+                    child.completed_at_from_target,
                 ],
             )? > 0)
         })
@@ -558,6 +562,7 @@ mod tests {
                 completed_at: None,
                 parent_notified: true,
             },
+            completed_at_from_target: false,
             created_at: now,
             updated_at: now,
         }

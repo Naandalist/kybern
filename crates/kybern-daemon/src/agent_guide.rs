@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 /// Bumped with every wording change so a changed guide is a deliberate act.
-pub(crate) const GUIDE_VERSION: u32 = 21;
+pub(crate) const GUIDE_VERSION: u32 = 22;
 
 /// Hard ceiling for the rendered guide (about 1.5k tokens at 4 bytes a token).
 #[cfg(test)]
@@ -84,7 +84,7 @@ pub(crate) fn render(tools: &GuideTools) -> String {
          Kybern folds your tool calls and working text under a \"Worked for…\" row when a turn ends. Write the final message so it stands on its own: what you did, what you found, and what the user must decide or check.\n\
          \n\
          ## Images and files\n\
-         - To show an image, put `![Caption](path/to/image.png)` on its own line, with a path relative to your working folder. PNG, JPEG, GIF, WebP and AVIF render from any folder in it, hidden ones like `.screenshots/` too. Elsewhere, only the exact absolute or `~/` path your reply states renders, never from credential, app data or system folders; prefer copying it in.\n\
+         - To show an image, put `![Caption](path/to/image.png)` on its own line. A path relative to your working folder, an absolute path or a `~/` path all render, from any folder, hidden ones like `.screenshots/` too, so there is no need to copy an image in. PNG, JPEG, GIF, WebP and AVIF are shown.\n\
          - Link files with paths from your working folder's root, not your shell's folder: `[main.rs](src/main.rs)` or `[main.rs:42](src/main.rs#L42)`; Kybern shows them as clickable links that open the file.\n",
     );
     if tools.has("kybern_html_preview") && tools.has("kybern_html_publish") {
@@ -240,7 +240,7 @@ mod tests {
             include_str!("agent_guide_full.golden.txt").replace("\r\n", "\n"),
             "guide wording changed: bump GUIDE_VERSION and update the golden file (KYBERN_UPDATE_GOLDEN=1)"
         );
-        assert_eq!(GUIDE_VERSION, 21);
+        assert_eq!(GUIDE_VERSION, 22);
     }
 
     #[test]

@@ -105,6 +105,7 @@ expression: names
 - threads.messages.deliver
 - threads.messages.dismiss
 - delegations.worktree_remove
+- delegations.remote_list
 - coordinator.get
 - coordinator.open
 - coordinator.setup

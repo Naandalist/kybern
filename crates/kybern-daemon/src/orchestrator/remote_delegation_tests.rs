@@ -535,6 +535,9 @@ async fn a_stop_before_the_task_was_sent_removes_it_from_the_outbox_for_good() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(p.children_on_b(), 0);
     assert_eq!(p.row(task_id).state, RemoteChildState::Cancelled);
+    // Ended here, by this machine's clock: clients must not compare it with the target's.
+    assert!(p.row(task_id).info.completed_at.is_some());
+    assert!(!p.row(task_id).completed_at_from_target);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -785,4 +788,42 @@ async fn stopping_the_parent_stops_its_remote_children_too() {
     eventually(|| async { (agent.interrupts.load(Ordering::SeqCst) >= 1).then_some(()) }).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(p.children_on_b(), 1, "the queued one never started");
+}
+
+// ADE-121: clients read a's own record of the child (`delegations.remote_list`) and hear every change of it
+// (`delegations.remote_changed`), so a launch row or sidebar row settles even when the client's copy of b is stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clients_see_a_remote_childs_record_and_hear_it_settle() {
+    let Some(p) = Pair::new().await else { return };
+    let mut changes = p.a.state.orchestrator.subscribe_remote_children();
+    let started = p.delegate(json!({"task": "Tidy the release notes", "title": "Release notes"})).await;
+    let task_id = task_id_of(&started);
+
+    let listed = p.a.state.orchestrator.remote_children_list(p.parent.id).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].task_id, listed[0].target.as_str()), (task_id, p.b.id().as_str()));
+    assert!(listed[0].remote_thread_id.is_some(), "the target acknowledged before the call returned");
+    assert!(p.a.state.orchestrator.remote_children_list(ThreadId::now_v7()).unwrap().is_empty(), "another thread has none");
+
+    let first = tokio::time::timeout(Duration::from_secs(5), changes.recv()).await.expect("a change is announced").unwrap();
+    assert_eq!(first.task_id, task_id);
+
+    let agent = p.agent("Tidy the release notes").await;
+    p.end_parent_turn().await;
+    agent.finish("Release notes are tidy.").await;
+    let settled = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let change = changes.recv().await.unwrap();
+            if change.task_id == task_id && change.state == RemoteChildState::Completed {
+                return change;
+            }
+        }
+    })
+    .await
+    .expect("the completion is announced");
+    assert!(settled.info.completed_at.is_some());
+    // Followed to its end: the end time is the target's own, comparable with its copy of the thread.
+    assert!(settled.completed_at_from_target, "the end time came from the target");
+    let listed = p.a.state.orchestrator.remote_children_list(p.parent.id).unwrap();
+    assert_eq!((listed[0].state, listed[0].completed_at_from_target), (RemoteChildState::Completed, true));
 }

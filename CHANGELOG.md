@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.21.3
+
+<!-- kybern-release-title: Up-to-date status for your other machines -->
+<!-- kybern-release-summary: Agents on another machine show when they finish, machines that come back online show as online, and images in replies load from any folder. -->
+
+- Agents you delegate to another machine show Done, Failed or Stopped as soon as they finish. Before, their rows could say "Working" for hours, because the app had no reliable way to hear that an agent on another machine had ended.
+- The sidebar shows agents started on another machine after it was offline for a while. Before, it could keep the list from before the machine went away, with newer agents missing.
+- A machine that comes back online shows as Online in the machine menu without restarting the app, and "last seen" stays current while a machine is connected. Kybern now reconnects to a machine as soon as its daemon reports it online.
+- Images in agent replies load from any folder on the machine, including other checkouts, worktrees and folders a finished worktree left behind. Kybern still checks that the file is a real image under 50 MB, and only your paired devices can read it. Files on network shares and network drives are not loaded, nor are system device folders such as `/dev`. A disk that stops answering gives up after 15 seconds.
+- Images keep loading after a disk cleanup removes Kybern's image cache. Before, every image in a reply said "Unable to load the image" until the app restarted.
+
 ## 0.21.2
 
 <!-- kybern-release-title: Fast previews from your other machines -->

@@ -598,8 +598,8 @@ async fn a_link_that_hears_nothing_for_three_pings_is_closed_and_a_talkative_one
     let silent = PeerLink::new("silent".into(), Direction::Dialed, None, vec![], Arc::new(NullSink));
     let talking = PeerLink::new("talking".into(), Direction::Dialed, None, vec![], Arc::new(NullSink));
     let (tx, mut pings) = tokio::sync::mpsc::channel(8);
-    peers::spawn_heartbeat(silent.clone(), timing.clone(), tx.clone());
-    peers::spawn_heartbeat(talking.clone(), timing.clone(), tx);
+    peers::spawn_heartbeat(silent.clone(), timing.clone(), tx.clone(), || {});
+    peers::spawn_heartbeat(talking.clone(), timing.clone(), tx, || {});
     // Real time: the idle clock is std's. Twenty beats of 150 ms is five times `dead_after`.
     for _ in 0..20 {
         tokio::time::sleep(timing.ping_every / 2).await;
@@ -926,4 +926,27 @@ fn seed_two_data_directories_for_a_real_tailnet() {
     for ((_, _, id), dir) in machines.iter().zip(&dirs) {
         println!("seeded {dir}: machine {id}");
     }
+}
+
+// Each connection used to build its own status for every change. One is built per burst and shared, and the builder
+// stops with the last listener.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn network_changed_builds_one_status_per_change_for_every_connection() {
+    let Some(cluster) = Cluster::new(&[NodeSpec::owner("a")]) else { return };
+    let a = cluster.start("a", false).await;
+    let (mut first, mut second) = (super::status::subscribe_changes(&a.state), super::status::subscribe_changes(&a.state));
+    a.state.network.notify_changed();
+    tokio::time::timeout(WAIT, first.changed()).await.unwrap().unwrap();
+    tokio::time::timeout(WAIT, second.changed()).await.unwrap().unwrap();
+    let (one, two) = (first.borrow_and_update().clone().unwrap(), second.borrow_and_update().clone().unwrap());
+    assert!(Arc::ptr_eq(&one, &two), "the same status for both connections");
+    assert_eq!(one.self_machine.machine_id, a.id());
+    drop((first, second));
+    a.state.network.notify_changed();
+    eventually("the builder stops with its last listener", WAIT, || a.state.network.status_feed.lock().unwrap().is_none()).await;
+    // A later connection starts it again.
+    let mut third = super::status::subscribe_changes(&a.state);
+    a.state.network.notify_changed();
+    tokio::time::timeout(WAIT, third.changed()).await.unwrap().unwrap();
+    assert!(third.borrow().is_some());
 }

@@ -263,6 +263,8 @@ pub struct Network {
     utility_events: broadcast::Sender<(&'static str, serde_json::Value)>,
     enabled: AtomicBool,
     pub(crate) enabled_change: tokio::sync::Mutex<()>,
+    /// The shared `network.changed` feed while a connection listens (`status::subscribe_changes`).
+    pub(crate) status_feed: Mutex<Option<tokio::sync::watch::Sender<Option<Arc<kybern_protocol::NetworkStatus>>>>>,
 }
 
 impl Network {
@@ -311,6 +313,7 @@ impl Network {
             utility_events: broadcast::channel(64).0,
             enabled: AtomicBool::new(true),
             enabled_change: Default::default(),
+            status_feed: Default::default(),
         }
     }
 

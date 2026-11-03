@@ -2,7 +2,7 @@
 // exists while more than one machine is known. The choice is per window and kept with the other sidebar preferences.
 import { useState } from 'react'
 import { useMachines, type MachineRow } from '../machines/index.ts'
-import { footerText, statusText, statusTone, type Tone } from '../machines/format.ts'
+import { footerText, shownStatus, statusText, statusTone, type Tone } from '../machines/format.ts'
 import { useNetwork } from '../machines/network.ts'
 import { Icon } from '../icons.tsx'
 import { N } from '../nav/glyphs.ts'
@@ -26,9 +26,20 @@ export function activeMachineFilter(machines: readonly MachineRow[], filter: str
   return filter ? machines.find((machine) => machine.machineId === filter) ?? null : null
 }
 
+/** The rows as the picker shows them: a machine the daemon reports online reads "Online" (`shownStatus`). */
+export function pickerRows(machines: readonly MachineRow[], cards: readonly { machine_id: string; status: string }[] | undefined): MachineRow[] {
+  if (!cards?.length) return machines as MachineRow[]
+  const daemon = new Map(cards.map((card) => [card.machine_id, card.status]))
+  return machines.map((machine) => {
+    const status = shownStatus(machine.status, daemon.get(machine.machineId))
+    return status === machine.status ? machine : { ...machine, status, offline: false }
+  })
+}
+
 export function MachineFilter() {
   const t = useTheme()
-  const machines = useMachines()
+  const net = useNetwork()
+  const machines = pickerRows(useMachines(), net.status?.members)
   const filter = useNav((s) => s.machineFilter)
   const [open, setOpen] = useState(false)
   // One machine: the row looks as the environment row always did (this computer, a status dot, a chevron) and opens Settings → Machines, where the others are added.
@@ -58,8 +69,8 @@ export function MachineFilter() {
 /** The sidebar footer: "4 machines · 1 offline · 1 paused", plus "· 2 waiting" while the outbox holds work. It opens Settings → Machines. */
 export function MachinesFooter() {
   const t = useTheme()
-  const machines = useMachines()
   const net = useNetwork()
+  const machines = pickerRows(useMachines(), net.status?.members)
   if (machines.length < 2) return null
   const open = () => void import('../settings/SettingsScreen.tsx').then((m) => m.openSettingsTab('machines'))
   return <div testId="machines-footer" role="button" tabIndex={0} aria-label="Open machines settings" onClick={open} onKeyDown={(e) => { if (e.key === 'enter' || e.key === 'space') open() }}

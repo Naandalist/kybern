@@ -381,6 +381,11 @@ pub struct RemoteChild {
     pub model: Option<String>,
     /// The mirror of the target's delegation (result, files touched, branch, head commit).
     pub info: crate::DelegationInfo,
+    /// `info.completed_at` is the target's own time: the child was followed to its end and its delegation said when
+    /// that was. Otherwise an end time is this machine's (a cancel before delivery, an unreachable target, a failed
+    /// delivery), and only comparable with this machine's clock.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub completed_at_from_target: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

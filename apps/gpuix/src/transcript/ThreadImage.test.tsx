@@ -31,3 +31,13 @@ test('a missing image is asked for twice: once, then one automatic retry', async
   root.unmount()
   server.stop(true)
 })
+
+// ADE-122: images are served from any folder, so no failure tells the reader the image is in the wrong place.
+test('failure copy never blames the image folder', async () => {
+  const { imageFailure } = await import('./ThreadImage.tsx')
+  expect(imageFailure(404).reason).toContain('Image not found')
+  expect(imageFailure(403, 'token cannot read images').reason).toContain('Pair it again')
+  expect(imageFailure(415).reason).toContain('Not a PNG')
+  expect(imageFailure(413).reason).toContain('50 MB')
+  for (const status of [401, 403, 404, 413, 415, 0]) expect(imageFailure(status).reason).not.toMatch(/folder|protected|names it/i)
+})

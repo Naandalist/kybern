@@ -15,6 +15,11 @@ import {
   launchGroupDefaultOpen,
   launchGroupTitle,
   launchState,
+  isRemoteChildSettled,
+  remoteChildState,
+  remoteDelegationStatus,
+  remoteRecordWins,
+  withRemoteRecords,
   lineageCounts,
   lineageKind,
   lineageRows,
@@ -328,4 +333,82 @@ test("delegationMeta names the model as the picker does and drops the default wo
   assert.equal(delegationMeta(null, "codex", providers, "Worktree kept"), "Worktree kept");
   assert.equal(delegationMeta("sonnet", "claude-code", providers, "Shared checkout", "Windows PC"), "Sonnet 5.5 · on Windows PC");
   assert.equal(delegationMeta("gpt-6.1-sol", "codex", providers, "Own worktree", "instabox"), "GPT-6.1 Sol · on instabox · Own worktree");
+});
+
+// ---- ADE-121: children on other machines, by the delegating machine's own record ----
+
+const remoteRecord = (task, state, extra = {}) => ({
+  task_id: task,
+  operation_id: `op-${task}`,
+  parent_thread_id: "root",
+  target: "satyamas",
+  remote_thread_id: `t-${task}`,
+  state,
+  last_seq: 1,
+  title: `Child ${task}`,
+  info: { task_id: task, operation_id: `op-${task}`, parent_thread_id: "root", depth: 1, role: "implementation", workspace: "shared", status: remoteDelegationStatus(state), started_at: iso(0), ...(state === "completed" ? { completed_at: iso(60), result: "All done" } : {}) },
+  created_at: iso(0),
+  updated_at: iso(60),
+  ...extra,
+});
+
+test("a launch row whose remote child is unknown here follows the delegating machine's record", () => {
+  const call = { complete: true, isError: false };
+  assert.deepEqual(launchState(undefined, call), { phase: "working", word: "Working" });
+  assert.deepEqual(launchState(undefined, call, remoteRecord("a", "completed")), { phase: "done", word: "Done" });
+  assert.deepEqual(launchState(undefined, call, remoteRecord("a", "failed")), { phase: "failed", word: "Failed" });
+  assert.deepEqual(launchState(undefined, call, remoteRecord("a", "cancelled")), { phase: "stopped", word: "Stopped" });
+  assert.deepEqual(launchState(undefined, call, remoteRecord("a", "pending")), { phase: "working", word: "Starting" });
+  assert.deepEqual(launchState(undefined, call, remoteRecord("a", "running", { stop_requested: true })), { phase: "working", word: "Stopping" });
+  // A stale copy of the child that still works loses to a record that ended; a copy that ended wins over a running record.
+  assert.deepEqual(launchState(delegated("t-a", "running"), call, remoteRecord("a", "completed")), { phase: "done", word: "Done" });
+  assert.deepEqual(launchState(delegated("t-a", "completed"), call, remoteRecord("a", "running")), { phase: "done", word: "Done" });
+  // A copy taken after the end is a child a message woke again: the record does not follow that, the copy wins. Only
+  // when both times are the child's machine's (the record's end came from following it to its end).
+  const followed = remoteRecord("a", "completed", { completed_at_from_target: true });
+  const woken = delegated("t-a", "running", {}, { updated_at: iso(120) });
+  assert.deepEqual(launchState(woken, call, followed), { phase: "working", word: "Working" });
+  const stale = delegated("t-a", "running", {}, { updated_at: iso(30) });
+  assert.deepEqual(launchState(stale, call, followed), { phase: "done", word: "Done" });
+});
+
+// The delegating machine records some ends by its own clock (cancelled before delivery, unreachable, a failed
+// delivery): comparing that with the other machine's times would let a clock skew keep a stale copy "Working".
+test("a record ended by the delegating machine's own clock wins over a copy that still works, whatever its time", () => {
+  const call = { complete: true, isError: false };
+  const later = delegated("t-a", "running", {}, { updated_at: iso(120) });
+  for (const state of ["cancelled", "unreachable", "failed"]) {
+    const ended = remoteRecord("a", state, { info: { ...remoteRecord("a", state).info, completed_at: iso(60) } });
+    assert.equal(remoteRecordWins(later, ended), true, state);
+    assert.notEqual(launchState(later, call, ended).phase, "working", state);
+  }
+  // Without any end time the settled record still wins, and a record still at work never does.
+  assert.equal(remoteRecordWins(later, remoteRecord("a", "completed", { completed_at_from_target: true, info: { status: "completed" } })), true);
+  assert.equal(remoteRecordWins(later, remoteRecord("a", "running")), false);
+});
+
+test("remote record states map onto the delegation tools' words", () => {
+  assert.equal(remoteDelegationStatus("unreachable"), "failed");
+  assert.equal(remoteDelegationStatus("pending"), "running");
+  assert.deepEqual(remoteChildState({ state: "unreachable" }), { phase: "failed", word: "Unreachable" });
+  assert.equal(isRemoteChildSettled({ state: "running" }), false);
+  assert.equal(isRemoteChildSettled({ state: "cancelled" }), true);
+});
+
+test("records settle stale children and add rows for children the list lacks", () => {
+  const parents = new Map([["root", { project_id: "p1", permission_mode: "full-access", cwd: "/w" }]]);
+  const stale = delegated("t-a", "running", { task_id: "a" }, { status: "running" });
+  const done = withRemoteRecords([stale], [remoteRecord("a", "completed"), remoteRecord("b", "running")], parents);
+  assert.equal(done.length, 2);
+  assert.deepEqual(childState(done[0]), { phase: "done", word: "Done" });
+  assert.equal(done[0].status, "idle");
+  assert.equal(done[0].delegation.result, "All done");
+  assert.equal(done[1].id, "t-b");
+  assert.equal(done[1].machineId, "satyamas");
+  assert.equal(done[1].parent_thread_id, "root");
+  assert.deepEqual(childState(done[1]), { phase: "working", word: "Working" });
+  // Nothing recorded: the same array; a record whose parent is not listed adds nothing.
+  const children = [stale];
+  assert.equal(withRemoteRecords(children, [], parents), children);
+  assert.equal(withRemoteRecords([], [remoteRecord("c", "running", { parent_thread_id: "elsewhere" })], parents).length, 0);
 });

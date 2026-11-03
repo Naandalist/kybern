@@ -731,6 +731,11 @@ const MIGRATIONS: &[&str] = &[
       bytes BLOB NOT NULL
     );
     ",
+    // `remote_children.completed_at_from_target`: the end time in `info` is the target's own (the child was followed
+    // to its end), not this machine's. Clients compare it with the target's copy of the thread only then.
+    "
+    ALTER TABLE remote_children ADD COLUMN completed_at_from_target INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 pub fn migrate(conn: &Connection) -> Result<()> {

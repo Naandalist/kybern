@@ -2,14 +2,24 @@
 //! tailnet, Tailscale's state and the outbox, in one call. Also the single-card form the joining and
 //! pause handlers return.
 
+use std::sync::Arc;
+
 use kybern_protocol::{BrokerInfo, MachineCard, MachineStatus, NetworkStatus, OutboxSummary, TailscaleState};
+use tokio::sync::{broadcast, watch};
 
 use super::join;
+use super::tailscale::TsStatus;
 use crate::state::AppState;
 
 /// One current member as a card: the membership set's facts, then reachability from the peer
-/// manager and presence.
+/// manager and presence. Reads (and may write) the store, on the blocking pool.
 pub async fn card(state: &AppState, machine_id: &str) -> Option<MachineCard> {
+    let (state, machine_id) = (state.clone(), machine_id.to_string());
+    tokio::task::spawn_blocking(move || card_now(&state, &machine_id)).await.ok().flatten()
+}
+
+/// [`card`], blocking: it reads the member's stored row and may store when it was last seen.
+fn card_now(state: &AppState, machine_id: &str) -> Option<MachineCard> {
     let network = &state.network;
     let membership = network.membership()?;
     let me = membership.machine_id();
@@ -33,6 +43,13 @@ pub async fn card(state: &AppState, machine_id: &str) -> Option<MachineCard> {
         card.features = presence.features;
         card.harnesses = presence.harnesses;
     }
+    // A machine with a session up is seen now; its stored time moves on about once a minute.
+    if peer.online
+        && let Some(seen) = network.peers.refresh_seen(machine_id)
+    {
+        let _ = state.store.network_machine_touch(machine_id, seen);
+    }
+    let peer = if peer.online { network.peers.status(machine_id) } else { peer };
     card.last_seen_at = peer.last_seen.or_else(|| cached.and_then(|row| row.last_seen_at));
     if card.status != MachineStatus::Paused {
         card.status = if peer.online { MachineStatus::Online } else { MachineStatus::Offline };
@@ -67,10 +84,10 @@ async fn lone_card(state: &AppState) -> MachineCard {
     }
 }
 
-async fn tailscale_state(state: &AppState) -> TailscaleState {
+fn tailscale_state(state: &AppState, status: &anyhow::Result<TsStatus>) -> TailscaleState {
     let network = &state.network;
     let listening_port = network.listening_port();
-    match network.tailscale.status().await {
+    match status {
         Ok(status) => TailscaleState {
             installed: true,
             running: status.running,
@@ -98,18 +115,23 @@ async fn tailscale_state(state: &AppState) -> TailscaleState {
 
 /// Everything Settings → Machines needs.
 pub async fn network_status(state: &AppState) -> Option<NetworkStatus> {
+    // A client looking at Machines makes discovery tick every minute for a while (§3.1).
+    state.network.touch_watching();
+    snapshot(state).await
+}
+
+/// What `network.status` reports, without counting as a client looking at Machines: what the
+/// `network.changed` notification carries.
+pub async fn snapshot(state: &AppState) -> Option<NetworkStatus> {
     let network = &state.network;
     let membership = network.membership()?;
-    // A client looking at Machines makes discovery tick every minute for a while (§3.1).
-    network.touch_watching();
     let me = membership.machine_id();
     let projection = membership.projection();
-    let mut members = Vec::new();
-    for (id, _) in projection.members() {
-        if let Some(card) = card(state, id).await {
-            members.push(card);
-        }
-    }
+    // The members' stored rows are read (and their sightings stored) on the blocking pool, all in one go.
+    let ids: Vec<String> = projection.members().map(|(id, _)| id.to_string()).collect();
+    let blocking = state.clone();
+    let mut members: Vec<MachineCard> =
+        tokio::task::spawn_blocking(move || ids.iter().filter_map(|id| card_now(&blocking, id)).collect()).await.unwrap_or_default();
     members.sort_by(|a, b| {
         b.is_self
             .cmp(&a.is_self)
@@ -129,11 +151,11 @@ pub async fn network_status(state: &AppState) -> Option<NetworkStatus> {
         }
     });
     let found = join::found_list(state).await;
+    // One read of Tailscale's status for the whole report.
+    let tailscale = network.tailscale.status().await;
     let setup_candidates = if network.is_enabled() {
-        network
-            .tailscale
-            .status()
-            .await
+        tailscale
+            .as_ref()
             .ok()
             .map(|ts| {
                 ts.peers
@@ -169,10 +191,59 @@ pub async fn network_status(state: &AppState) -> Option<NetworkStatus> {
         found,
         outbox: OutboxSummary::default(),
         broker,
-        tailscale: tailscale_state(state).await,
+        tailscale: tailscale_state(state, &tailscale),
         digest: membership.has_network().then(|| membership.digest()),
         removed: membership.self_removed(),
         follow_updates: projection.follow_updates(),
         keep_reachable: Some(state.login_service.status(state)),
     })
+}
+
+/// How long `network.changed` waits for more changes before it reads the status once for all of them.
+const CHANGED_COALESCE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// What `network.changed` carries: the status after each burst of changes (members, the found list, a link), built
+/// once and shared by every connection that forwards it. The builder runs while some connection listens and stops
+/// with the last one. The receiver starts with the current value seen, so it wakes on the next change.
+pub fn subscribe_changes(state: &AppState) -> watch::Receiver<Option<Arc<NetworkStatus>>> {
+    let mut feed = state.network.status_feed.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(sender) = feed.as_ref() {
+        return sender.subscribe();
+    }
+    let (sender, receiver) = watch::channel(None);
+    *feed = Some(sender.clone());
+    // Subscribed before the builder starts, so no change between now and its first poll is missed.
+    let changes = state.network.subscribe_changes();
+    tokio::spawn(publish_changes(state.clone(), sender, changes));
+    receiver
+}
+
+async fn publish_changes(state: AppState, sender: watch::Sender<Option<Arc<NetworkStatus>>>, mut changes: broadcast::Receiver<()>) {
+    use broadcast::error::{RecvError, TryRecvError};
+    loop {
+        let changed = tokio::select! {
+            changed = changes.recv() => changed,
+            () = sender.closed() => {
+                // Subscribing happens under this lock: with no receiver now, none can join this sender.
+                let mut feed = state.network.status_feed.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if sender.receiver_count() == 0 {
+                    *feed = None;
+                    return;
+                }
+                continue;
+            }
+        };
+        match changed {
+            Ok(()) | Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => break,
+        }
+        tokio::time::sleep(CHANGED_COALESCE).await;
+        while matches!(changes.try_recv(), Ok(()) | Err(TryRecvError::Lagged(_))) {}
+        if let Some(status) = snapshot(&state).await {
+            sender.send_replace(Some(Arc::new(status)));
+        }
+    }
+    // The network's change channel closed (the daemon is stopping). The feed is only replaced once it is cleared, so
+    // the one there is this one.
+    *state.network.status_feed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }

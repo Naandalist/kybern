@@ -16,7 +16,7 @@ class Daemon {
   status = 'idle'
   info: unknown
   endpoint = { url: 'ws://fake/ws', token: 'tok' }
-  streams: { handler: (event: unknown) => void; open: boolean }[] = []
+  streams: { handler: (event: unknown) => void; open: boolean; onSubscribed?: (head: number, replay: { resumed: boolean; supported: boolean }) => void }[] = []
   lists: { threads: Thread[]; activity?: unknown[] } = { threads: [] }
   /** Children by parent, as `threads.list { parent_thread_id }` answers. */
   children: Record<string, Thread[]> = {}
@@ -37,8 +37,8 @@ class Daemon {
     throw new Error(`no handler for ${method}`)
   }
   callRaw(method: string, params?: { parent_thread_id?: string }) { return this.call(method, params) }
-  subscribeEvents(_: unknown, handler: (event: unknown) => void) {
-    const stream = { handler, open: true }
+  subscribeEvents(_: unknown, handler: (event: unknown) => void, onSubscribed?: (head: number, replay: { resumed: boolean; supported: boolean }) => void) {
+    const stream = { handler, open: true, onSubscribed }
     this.streams.push(stream)
     return { unsubscribe() { stream.open = false }, lastSeq: undefined }
   }
@@ -236,4 +236,18 @@ test('with one machine no child is read', async () => {
   const single = await setup({ remote: false })
   expect(await single.live.loadChildren('mac-1', 'shared')).toBeUndefined()
   expect(single.children.get().size).toBe(0)
+})
+
+// ADE-121: a stream that starts again without replaying what it missed cannot patch the lists up; they are read again.
+test('a machine stream that restarts without a replay reads that machine again; one that resumes does not', async () => {
+  const { vps } = await setup()
+  const stream = vps.streams.find((s) => s.open)!
+  const before = vps.reads
+  stream.onSubscribed?.(40, { resumed: true, supported: true })
+  await settle()
+  expect(vps.reads).toBe(before)
+  vps.lists.threads = [thread('r1', 'idle', 30), thread('child-b', 'running', 31)]
+  stream.onSubscribed?.(40, { resumed: false, supported: true })
+  await settle()
+  expect(vps.reads).toBe(before + 1)
 })

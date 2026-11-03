@@ -27,6 +27,15 @@ export function statusText(machine: StatusInput, now = Date.now()): string {
   }
 }
 
+/**
+ * The state a machine row shows: what this app's own connection says, except that a machine the daemon the user is at
+ * reports online is "Online" even while this app's connection to it is still coming back (it is dialed again at once,
+ * ADE-121). Paused and unpaired keep their own words.
+ */
+export function shownStatus(connection: StatusInput['status'], daemon?: string | null): StatusInput['status'] {
+  return connection === 'offline' && daemon === 'online' ? 'online' : connection
+}
+
 /** The footer line: "4 machines · 1 offline · 1 paused", and "· 2 waiting" while the outbox holds work for machines that are away. A paused machine is on purpose, so it is not "offline". */
 export function footerText(machines: readonly { offline: boolean; paused?: boolean }[], waiting = 0): string {
   const paused = machines.filter((machine) => machine.paused).length

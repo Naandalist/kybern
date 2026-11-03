@@ -67,10 +67,6 @@ export function localImageLink(source: string): boolean {
 export function responseImageError(error: unknown): { message: string; retryable: boolean } {
   const message = error instanceof Error ? error.message : "Unable to load image. Try again."
   if (message.startsWith("Preview unavailable")) return { message, retryable: false }
-  if (message === "image must be inside the thread folder") return {
-    message: "This image is outside the conversation’s folder. The agent needs to copy it into that folder and send it again.",
-    retryable: false,
-  }
   if (message === "use a PNG, JPEG, GIF, WebP, or AVIF image" || message === "images are limited to 50 MB") return { message, retryable: false }
   return { message, retryable: true }
 }

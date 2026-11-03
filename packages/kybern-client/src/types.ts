@@ -1883,6 +1883,28 @@ export interface DelegationsWorktreeRemoveParams {
   force?: boolean;
 }
 
+export interface DelegationsRemoteListParams {
+  /** The delegating thread on this machine. */
+  parent_thread_id: ThreadId;
+}
+
+export interface DelegationsRemoteListResult {
+  /** The thread's children on other machines, as this machine records them, oldest first. */
+  children: RemoteChild[];
+}
+
+/**
+ * This machine's record of one child on another machine changed (created, acknowledged, followed, settled).
+ * Params: the whole `RemoteChild`. A client that missed one reads `delegations.remote_list` again.
+ */
+export const DELEGATIONS_REMOTE_CHANGED_NOTIFICATION = "delegations.remote_changed";
+
+/**
+ * Sent instead of `delegations.remote_changed` notifications a client was too slow to take: some records changed
+ * unseen, and the client reads `delegations.remote_list` again for the parents it shows. Params: `{}`.
+ */
+export const DELEGATIONS_REMOTE_RESYNC_NOTIFICATION = "delegations.remote_resync";
+
 export interface ThreadsListResult {
   threads: Thread[];
   activity?: ThreadActivitySummary[];
@@ -4246,6 +4268,11 @@ export interface RemoteChild {
   provider?: ProviderKind | null;
   model?: string | null;
   info: DelegationInfo;
+  /**
+   * `info.completed_at` is the target's own time (the child was followed to its end). Otherwise an end time is the
+   * delegating machine's (a cancel before delivery, an unreachable target, a failed delivery).
+   */
+  completed_at_from_target?: boolean;
   created_at: DateTime;
   updated_at: DateTime;
 }
@@ -4665,6 +4692,7 @@ export interface Methods {
   "threads.messages.deliver": [{ message_id: MessageId }, ThreadMessageRecord];
   "threads.messages.dismiss": [{ message_id: MessageId }, ThreadMessageRecord];
   "delegations.worktree_remove": [DelegationsWorktreeRemoveParams, Thread];
+  "delegations.remote_list": [DelegationsRemoteListParams, DelegationsRemoteListResult];
   "coordinator.get": [CoordinatorGetParams, Thread | null];
   "coordinator.open": [CoordinatorOpenParams, CoordinatorOpenResult];
   "coordinator.setup": [CoordinatorSetupParams, Thread];

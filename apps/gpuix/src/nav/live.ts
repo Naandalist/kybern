@@ -35,6 +35,7 @@ import { gpuixConfigDir } from '../platform/os.ts'
 import { machineHub } from '../machines/index.ts'
 import { RemoteLive, activityMaps, withRemote } from './remoteLive.ts'
 import { remoteChildStore } from './remoteChildren.ts'
+import { RemoteDelegations, remoteDelegationStore } from './remoteDelegations.ts'
 
 const LIMITS_POLL_MS = 60_000
 const ACTIVITY_DEBOUNCE_MS = 600
@@ -178,13 +179,19 @@ function loadChildren(parentId: ThreadId): Promise<void> {
 let localActivity: NavState['activity'] = {}
 let localPending: NavState['pending'] = {}
 let remote: RemoteLive | undefined
+/** This daemon's records of its threads' children on other machines (`remoteDelegations.ts`). */
+let delegations: RemoteDelegations | undefined
 
 function applyActivity(summaries: ThreadActivitySummary[] | undefined) {
   const maps = activityMaps(summaries)
   localActivity = maps.activity
   localPending = maps.pending
-  // Delegated children are no runtime tasks of their parent: they count in `active_children` (ADE-74).
-  for (const summary of summaries ?? []) if (summary.active_agents > 0 || (summary.active_children ?? 0) > 0) void loadChildren(summary.thread_id)
+  // Delegated children are no runtime tasks of their parent: they count in `active_children` (ADE-74), children on
+  // other machines included, whose records this daemon keeps.
+  for (const summary of summaries ?? []) {
+    if (summary.active_agents > 0 || (summary.active_children ?? 0) > 0) void loadChildren(summary.thread_id)
+    if ((summary.active_children ?? 0) > 0 && machineHub().machineCount > 1) void delegations?.ensure(summary.thread_id)
+  }
   publishActivity()
 }
 
@@ -332,6 +339,14 @@ export function startLive() {
   })
   remote.start()
   stops.push(() => { remote?.stop(); remote = undefined; localActivity = {}; localPending = {} })
+  delegations = new RemoteDelegations(remoteDelegationStore, {
+    call: (parentId) => client.call('delegations.remote_list', { parent_thread_id: parentId }),
+    onNotification: (method, handler) => client.onNotification(method, handler),
+    refreshMachine: (machineId) => void machineHub().refreshMachineLists(machineId),
+  })
+  delegations.start()
+  // Records belong to this daemon: another one (an environment switch) starts from its own.
+  stops.push(() => { delegations?.dispose(); delegations = undefined; if (getClient() !== client) remoteDelegationStore.clear() })
   // An open thread of another machine reads its children there, so its sidebar rows and launch cards can open them.
   let opened = ''
   stops.push(subscribe(() => {
@@ -340,6 +355,27 @@ export function startLive() {
     if (key === opened) return
     opened = key
     if (key) void remote?.loadChildren(selectedMachineId!, selectedId!)
+  }))
+  // An open thread here reads what its daemon records of its children on other machines.
+  let openedHere = ''
+  stops.push(subscribe(() => {
+    const { selectedId, selectedMachineId } = getState()
+    const id = selectedId && !selectedMachineId ? selectedId : ''
+    if (id === openedHere) return
+    openedHere = id
+    if (id && machineHub().machineCount > 1) void delegations?.ensure(id)
+  }))
+  // A listed child on another machine that still says it works: its parent's records say whether it really does (its
+  // machine may be offline here, its end missed while the app was closed).
+  let childrenSeen: NavState['children'] | undefined
+  stops.push(subscribeNav(() => {
+    const children = getNav().children
+    if (children === childrenSeen || !delegations) return
+    childrenSeen = children
+    for (const child of Object.values(children) as (Thread & { machineId?: string })[]) {
+      const info = child.delegation
+      if (child.machineId && info?.status === 'running' && !remoteDelegationStore.get(info.task_id)) void delegations.ensure(info.parent_thread_id)
+    }
   }))
   stops.push(followSpaces())
   stops.push(followWorkspaceProgress())
@@ -350,6 +386,9 @@ export function startLive() {
     askLimits()
     void loadSpaces()
     void client.call('daemon.info', {}).then((info) => { if (getClient() === client) setNav({ version: info.version ?? null }) }, () => {})
+    // Records that changed while the daemon was away (or before this app started) are read again.
+    const { selectedId, selectedMachineId } = getState()
+    void delegations?.reread(selectedId && !selectedMachineId ? [selectedId] : [])
   }
   stops.push(client.onStatus((status) => {
     if (status === 'open' && getClient() === client) onOpen()

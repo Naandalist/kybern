@@ -20,6 +20,7 @@ import { purposeLabel } from "../../../../packages/kybern-client/src/delegations
 import { sendFollowUp } from "../state/followUp";
 import { count } from "../state/format";
 import type { JsonValue, RuntimeTask, Thread } from "../state/protocol";
+import { useRemoteRecord, useRemoteRecords } from "../state/remoteDelegations";
 import { errorText, getState, rpc, useApp } from "../state/runtime";
 import { runtimeStatus } from "../state/status";
 import type { Block } from "../state/transcript";
@@ -299,7 +300,9 @@ export const DelegationRow = memo(function DelegationRow({ block }: { block: Too
   const result = parseDelegateResult(block.output);
   const child = result ? app.threads.find((thread) => thread.id === result.threadId) : undefined;
   const title = delegateTitle(block.call.input, result);
-  const state = launchState(child, block);
+  // A child on another machine: the computer's own record says when it ended, whatever this phone's copy says.
+  const record = useRemoteRecord(result?.taskId);
+  const state = launchState(child, block, record);
   return (
     <WorkLine
       glyph={<StatusGlyph phase={state.phase} size={14} animated={state.phase === "working"} />}
@@ -390,6 +393,7 @@ export const AgentsGroupRow = memo(function AgentsGroupRow({
   onPress: () => void;
 }) {
   const app = useApp();
+  const records = useRemoteRecords();
   const phases: ChildPhase[] = launches.map((block) => {
     if (block.kind === "runtime_task") {
       const phase = runtimeStatus(block.task.status).phase;
@@ -397,7 +401,7 @@ export const AgentsGroupRow = memo(function AgentsGroupRow({
     }
     if (block.kind === "tool") {
       const result = parseDelegateResult(block.output);
-      return launchState(result ? app.threads.find((thread) => thread.id === result.threadId) : undefined, block).phase;
+      return launchState(result ? app.threads.find((thread) => thread.id === result.threadId) : undefined, block, result ? records.get(result.taskId) : undefined).phase;
     }
     return "done";
   });

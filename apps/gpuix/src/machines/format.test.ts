@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { footerText, lastSeen, statusText, statusTone } from './format.ts'
+import { footerText, lastSeen, shownStatus, statusText, statusTone } from './format.ts'
 
 const now = Date.parse('2026-10-29T12:00:00Z')
 test('the footer counts machines, the ones that are away, and queued work', () => {
@@ -24,4 +24,13 @@ test('relaying names the member, paused and unpaired say so', () => {
 })
 test('tones', () => {
   expect(['online', 'relaying', 'offline', 'paused', 'unpaired'].map((s) => statusTone(s as never))).toEqual(['good', 'warn', 'idle', 'idle', 'bad'])
+})
+
+// ADE-121: the daemon the user is at sees the machine online; the app's own connection is still coming back.
+test('a machine the daemon reports online reads Online, whatever this connection says', () => {
+  expect(shownStatus('offline', 'online')).toBe('online')
+  expect(shownStatus('offline', 'offline')).toBe('offline')
+  expect(shownStatus('offline', undefined)).toBe('offline')
+  expect(shownStatus('paused', 'online')).toBe('paused')
+  expect(shownStatus('relaying', 'online')).toBe('relaying')
 })

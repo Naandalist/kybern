@@ -7,6 +7,9 @@ import { findModel } from "./models.ts";
 import type {
   PendingRequestKind,
   ProviderModel,
+  RemoteChild,
+  RemoteChildState,
+  Thread,
   AgentResultItem,
   ContentPart,
   DelegationInfo,
@@ -28,6 +31,7 @@ export type LineageThread = {
   parent_thread_id?: string | null;
   status?: string;
   created_at?: string;
+  updated_at?: string;
   worktree?: { path: string; branch: string } | null;
   subagent?: SubagentInfo | null;
   delegation?: DelegationInfo | null;
@@ -380,11 +384,158 @@ export function stoppableDescendants<T extends LineageThread>(rows: readonly Lin
 
 // ---- transcript rows: launch status ----
 
-/** The word and phase of a delegation launch row, from its child thread when it is known. */
-export function launchState(thread: LineageThread | undefined, call: { complete: boolean; isError: boolean }): { phase: ChildPhase; word: string } {
+/**
+ * The word and phase of a delegation launch row: from the delegating machine's own record of a child on another machine
+ * (`delegations.remote_list`) when it says more than the child thread does, else from the child thread when it is known.
+ */
+export function launchState(
+  thread: LineageThread | undefined,
+  call: { complete: boolean; isError: boolean },
+  record?: Pick<RemoteChild, "state" | "stop_requested" | "info" | "updated_at" | "completed_at_from_target"> | null,
+): { phase: ChildPhase; word: string } {
+  if (record && remoteRecordWins(thread, record)) return remoteChildState(record);
   if (thread) return childState(thread);
   if (!call.complete) return { phase: "working", word: "Starting" };
   return call.isError ? { phase: "failed", word: "Failed" } : { phase: "working", word: "Working" };
+}
+
+// ---- children on other machines: the delegating machine's record ----
+
+/** Ended, by the delegating machine's record: it saw the child finish, fail, stop or disappear. */
+export function isRemoteChildSettled(record: Pick<RemoteChild, "state">): boolean {
+  return record.state !== "pending" && record.state !== "running";
+}
+
+/** The delegation status the tools report for a record's state (`RemoteChildState::delegation_status`). */
+export function remoteDelegationStatus(state: RemoteChildState): DelegationStatus {
+  switch (state) {
+    case "pending":
+    case "running":
+      return "running";
+    case "completed":
+      return "completed";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+    case "unreachable":
+      return "failed";
+  }
+}
+
+/** Glyph phase and word of a child on another machine by the delegating machine's record. */
+export function remoteChildState(record: Pick<RemoteChild, "state" | "stop_requested">): { phase: ChildPhase; word: string } {
+  switch (record.state) {
+    case "pending":
+      return { phase: "working", word: "Starting" };
+    case "running":
+      return { phase: "working", word: record.stop_requested ? "Stopping" : "Working" };
+    case "completed":
+      return { phase: "done", word: "Done" };
+    case "cancelled":
+      return { phase: "stopped", word: "Stopped" };
+    case "failed":
+      return { phase: "failed", word: "Failed" };
+    case "unreachable":
+      return { phase: "failed", word: "Unreachable" };
+  }
+}
+
+/**
+ * Whether the record decides over the thread. The delegating machine follows its child itself and keeps following it
+ * whatever this app saw, so a record that says the child ended beats a copy of the other machine's list that still
+ * says it works (that copy is stale: its machine went offline here, its events were missed, the app restarted). A copy
+ * that says it ended wins too (the record may not have caught up yet).
+ *
+ * One exception needs the two clocks to agree: a copy changed after the end is a child woken again by a message, which
+ * the record does not follow, and the copy wins. That comparison is made only when the record's end time is the
+ * child's machine's own (`completed_at_from_target`: it was followed to its end), like the copy's `updated_at`. An end
+ * the delegating machine recorded by its own clock (cancelled before delivery, unreachable, delivery failed) cannot be
+ * compared with the other machine's times, and the settled record wins.
+ */
+export function remoteRecordWins(
+  thread: LineageThread | undefined,
+  record: Pick<RemoteChild, "state" | "completed_at_from_target"> & { info?: Pick<DelegationInfo, "completed_at"> | null },
+): boolean {
+  if (!thread) return true;
+  if (!isRemoteChildSettled(record) || !isChildWorking(thread)) return false;
+  if (!record.completed_at_from_target) return true;
+  const ended = timeOf(record.info?.completed_at);
+  const copied = timeOf(thread.updated_at);
+  return !ended || !copied || copied <= ended;
+}
+
+/** The thread with what the record says when the record wins (`remoteRecordWins`); the same object otherwise. */
+export function withRemoteRecord<T extends LineageThread>(thread: T, record: RemoteChild): T {
+  if (!remoteRecordWins(thread, record)) return thread;
+  const own = thread.delegation;
+  const info: DelegationInfo = {
+    ...record.info,
+    ...(own ?? {}),
+    status: remoteDelegationStatus(record.state),
+    result: record.info.result ?? own?.result ?? null,
+    error: record.info.error ?? own?.error ?? null,
+    completed_at: record.info.completed_at ?? own?.completed_at ?? record.updated_at,
+  };
+  return { ...thread, status: thread.status === "running" || thread.status === "awaiting-approval" ? "idle" : thread.status, delegation: info };
+}
+
+/**
+ * A row for a child the delegating machine records but whose machine's list this app does not have (yet): offline here,
+ * listed before the child was made, or not read since. It opens the child on its machine like the listed row would.
+ */
+export function remoteChildStandIn(
+  record: RemoteChild,
+  parent: Pick<Thread, "project_id" | "permission_mode" | "cwd">,
+): Thread & { machineId: string } {
+  const status = remoteDelegationStatus(record.state);
+  return {
+    id: record.remote_thread_id ?? record.task_id,
+    project_id: parent.project_id,
+    parent_thread_id: record.parent_thread_id,
+    title: record.title,
+    provider: { kind: record.provider ?? "claude-code", instance: "" },
+    model: record.model ?? null,
+    permission_mode: parent.permission_mode,
+    status: status === "running" ? "running" : "idle",
+    cwd: parent.cwd,
+    pinned: false,
+    created_at: record.created_at,
+    updated_at: record.updated_at,
+    last_seq: 0,
+    delegation: { ...record.info, status, completed_at: record.info.completed_at ?? (status === "running" ? null : record.updated_at) },
+    machineId: record.target,
+  };
+}
+
+/**
+ * The child set with the delegating machine's records applied (ADE-121): a listed child takes the record's end when its
+ * copy still says it works, and a recorded child the list lacks gets a stand-in row (`remoteChildStandIn`) under a parent
+ * the app lists. Records without a parent in `parents` are left out. Unchanged children keep their identity.
+ */
+export function withRemoteRecords<T extends LineageThread & { machineId?: string }>(
+  children: readonly T[],
+  records: readonly RemoteChild[],
+  parents: ReadonlyMap<string, Pick<Thread, "project_id" | "permission_mode" | "cwd">>,
+): (T | (Thread & { machineId: string }))[] {
+  if (!records.length) return children as T[];
+  const byTask = new Map<string, RemoteChild>();
+  for (const record of records) byTask.set(record.task_id, record);
+  const seen = new Set<string>();
+  const out: (T | (Thread & { machineId: string }))[] = children.map((child) => {
+    const record = child.delegation ? byTask.get(child.delegation.task_id) : undefined;
+    if (!record) return child;
+    seen.add(record.task_id);
+    return withRemoteRecord(child, record);
+  });
+  const listed = new Set(children.map((child) => child.id));
+  for (const record of byTask.values()) {
+    if (seen.has(record.task_id)) continue;
+    const parent = parents.get(record.parent_thread_id);
+    // Not acknowledged yet (no thread to open there), or listed without its delegation (an older copy): no second row.
+    if (!parent || !record.remote_thread_id || listed.has(record.remote_thread_id)) continue;
+    out.push(remoteChildStandIn(record, parent));
+  }
+  return out;
 }
 
 export interface LaunchCounts {

@@ -1,8 +1,7 @@
 // A Markdown image in an agent reply (`![Caption](.screenshots/shot.png)`). Native Markdown paints images as links, so
 // image lines are split out (`splitImages`) and drawn here. A local reference loads through the daemon's
 // `/threads/{id}/image` route, as written: relative to the thread's own folder (worktree, Coordinator and delegated
-// threads included), hidden folders allowed, or an exact outside path the conversation names. It works the same for
-// remote environments. A source that cannot load shows a card with the caption, the reason and what to do, never a bare
+// threads included), or an absolute or `~/` path in any folder (ADE-122). It works the same for remote environments. A source that cannot load shows a card with the caption, the reason and what to do, never a bare
 // link; one written moments before the reply finished is retried once. Fresh images resolve from a blur (`ResponseImage`).
 import path from 'node:path'
 import { useEffect, useState } from 'react'
@@ -37,10 +36,10 @@ function remember(key: string, value: Loaded) {
 }
 
 /** What the reader is told, by the daemon's answer. */
-export function imageFailure(status: number, text: string): Failure {
+export function imageFailure(status: number, _text = ''): Failure {
   if (status === 404) return { status, reason: 'Image not found. Retry once the agent has saved it.' }
-  if (status === 403 && /thread folder/.test(text)) return { status, reason: 'Outside the working folder, and this conversation does not name it.' }
-  if (status === 403) return { status, reason: 'This folder is protected, so the image is not shown.' }
+  // Any folder is served; a 401 or 403 is this device's access to the machine, not the image's place.
+  if (status === 401 || status === 403) return { status, reason: 'This device cannot read images on that machine. Pair it again in Settings → Machines.' }
   if (status === 415) return { status, reason: 'Not a PNG, JPEG, GIF, WebP or AVIF image.' }
   if (status === 413) return { status, reason: 'Larger than 50 MB, so it is not shown.' }
   return { status, reason: 'Unable to load the image. Try again.' }

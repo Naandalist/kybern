@@ -3,6 +3,7 @@
 // actions of design §4.1. One store; it reads while something shows it and follows `network.changed`.
 import { useEffect, useSyncExternalStore } from 'react'
 import { NETWORK_CHANGED_NOTIFICATION, NETWORK_MACHINE_CHANGED_NOTIFICATION, OUTBOX_CHANGED_NOTIFICATION, type DoctorReport, type MachineId, type MachineInfo, type NetworkAddResult, type NetworkCodeCreateResult, type NetworkRemoveParams, type NetworkStatus, type NetworkUpdateAllResult, type OutboxItem } from '../../../../packages/kybern-client/src/types.ts'
+import { isNetworkStatus } from '../../../../packages/kybern-client/src/machines.ts'
 import { getClient } from '../state.ts'
 import { machineHub } from './index.ts'
 
@@ -29,12 +30,25 @@ const listeners = new Set<() => void>()
 const emit = (patch: Partial<NetworkState>) => { state = { ...state, ...patch }; for (const listener of listeners) listener() }
 export const getNetwork = () => state
 /** Tests: forget everything. */
-export function resetNetwork() { state = { status: null, unavailable: false, error: '', infos: {}, busy: null, outbox: [], updated: null, doctor: null }; reading = undefined; again = false }
+export function resetNetwork() { state = { status: null, unavailable: false, error: '', infos: {}, busy: null, outbox: [], updated: null, doctor: null }; reading = undefined; again = false; pushes = 0 }
 
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 let reading: Promise<void> | undefined
 let again = false
+/** Statuses `network.changed` delivered: a read sent before one is older than what it delivered. */
+let pushes = 0
+
+/** `network.changed` from `client` carries the whole status: it is shown as is, without reading `network.status` again
+ *  (which would also make the daemon's discovery tick as if Machines were open). `false` for a payload that is no status
+ *  (an older daemon sends `{}`): the caller reads it then. */
+export function applyNetworkChanged(client: unknown, params: unknown): boolean {
+  if (!isNetworkStatus(params)) return false
+  if (getClient() !== client) return true
+  pushes++
+  emit({ status: params, unavailable: false, error: '' })
+  return true
+}
 /** Read `network.status` from the machine the user is at. Reads that arrive during a read fold into one rerun. */
 export async function refreshNetwork(): Promise<void> {
   if (reading) { again = true; return reading }
@@ -44,9 +58,10 @@ export async function refreshNetwork(): Promise<void> {
       const client = getClient()
       if (!client || client.status !== 'open') return
       try {
+        const seen = pushes
         const status = await client.call('network.status', {})
         if (getClient() !== client) { again = true; continue }
-        emit({ status, unavailable: false, error: '' })
+        if (pushes === seen) emit({ status, unavailable: false, error: '' })
       } catch (error) {
         if (getClient() !== client) { again = true; continue }
         // Method not found: a daemon older than the network.
@@ -91,7 +106,7 @@ export function useNetwork(): NetworkState {
     void loadOutbox()
     let outboxTimer: ReturnType<typeof setTimeout> | undefined
     const outboxSoon = () => { clearTimeout(outboxTimer); outboxTimer = setTimeout(() => void loadOutbox(), 200) }
-    const stops = [client.onNotification(NETWORK_CHANGED_NOTIFICATION, soon), client.onNotification(NETWORK_MACHINE_CHANGED_NOTIFICATION, soon), client.onNotification(OUTBOX_CHANGED_NOTIFICATION, () => { soon(); outboxSoon() })]
+    const stops = [client.onNotification(NETWORK_CHANGED_NOTIFICATION, (params) => { if (!applyNetworkChanged(client, params)) soon() }), client.onNotification(NETWORK_MACHINE_CHANGED_NOTIFICATION, soon), client.onNotification(OUTBOX_CHANGED_NOTIFICATION, () => { soon(); outboxSoon() })]
     const off = machineHub().onMachinesChanged(soon)
     return () => { clearTimeout(timer); clearTimeout(outboxTimer); off(); for (const stop of stops) stop() }
   }, [])

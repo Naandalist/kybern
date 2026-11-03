@@ -48,3 +48,28 @@ test('enable waits for a trailing status read, and switching primaries discards 
   expect(result.stderr.toString()).toBe('')
   expect(result.exitCode).toBe(0)
 })
+
+// `network.changed` carries the status: it is shown without another read, and a read sent before it cannot undo it.
+test('a network.changed status is shown as is and beats a read that was already on its way', () => {
+  const result = Bun.spawnSync(['bun', '--eval', `
+    import { expect, mock } from 'bun:test'
+    let release, reads = 0
+    const active = { status: 'open', call: async (method) => { if (method === 'network.status') { reads++; return new Promise(resolve => { release = resolve }) } } }
+    mock.module('../state.ts', () => ({ getClient: () => active }))
+    mock.module('./index.ts', () => ({ machineHub: () => ({ set: { syncMembers: async () => {} } }) }))
+    const { applyNetworkChanged, refreshNetwork, getNetwork } = await import('./network.ts')
+    const pushed = { enabled: true, network_id: 'pushed', self_machine: { machine_id: 'a' }, members: [] }
+    const read = refreshNetwork()
+    expect(applyNetworkChanged(active, pushed)).toBe(true)
+    expect(getNetwork().status.network_id).toBe('pushed')
+    release({ enabled: true, network_id: 'older', self_machine: { machine_id: 'a' }, members: [] })
+    await read
+    expect(getNetwork().status.network_id).toBe('pushed')
+    expect(reads).toBe(1)
+    expect(applyNetworkChanged(active, {})).toBe(false)
+    expect(applyNetworkChanged({ other: true }, { ...pushed, network_id: 'elsewhere' })).toBe(true)
+    expect(getNetwork().status.network_id).toBe('pushed')
+  `], { cwd: import.meta.dir, stdout: 'pipe', stderr: 'pipe' })
+  expect(result.stderr.toString()).toBe('')
+  expect(result.exitCode).toBe(0)
+})

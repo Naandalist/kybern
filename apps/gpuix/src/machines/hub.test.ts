@@ -45,9 +45,9 @@ class FakeDaemon {
   }
   callRaw(method: string, params: unknown) { return this.call(method, params) }
   /** Event streams opened on this connection (`subscribeEvents`), with what each was asked for. */
-  streams: { params: { after_seq?: number }; handler: (event: unknown) => void; open: boolean }[] = []
-  subscribeEvents(params: { after_seq?: number }, handler: (event: unknown) => void) {
-    const stream = { params, handler, open: true }
+  streams: { params: { after_seq?: number }; handler: (event: unknown) => void; open: boolean; onSubscribed?: (head: number, replay: { resumed: boolean; supported: boolean }) => void }[] = []
+  subscribeEvents(params: { after_seq?: number }, handler: (event: unknown) => void, onSubscribed?: (head: number, replay: { resumed: boolean; supported: boolean }) => void) {
+    const stream = { params, handler, open: true, onSubscribed }
     this.streams.push(stream)
     return { unsubscribe() { stream.open = false }, lastSeq: undefined }
   }
@@ -371,6 +371,30 @@ test('another machine’s events reach a listener with its machine id; one machi
   expect(events).toEqual([['vps-1', 'thread_updated']])
   stop()
   expect(vps.streams.filter(s => s.open).length).toBe(0)
+})
+
+// Every machine's stream starts once at launch: that start reads nothing again (its lists were just read). A later start
+// that cannot replay what it missed does.
+test('a machine stream re-reads its lists when it restarts without replay, not when it first opens', async () => {
+  const vps = new FakeDaemon('vps-1', { 'projects.list': () => ({ projects: [] }), 'threads.list': () => ({ threads: [] }) })
+  const mac = new FakeDaemon('mac-1')
+  const { hub } = makeHub([saved('vps', { environment_id: 'vps-1' })], { transport: { createClient: () => vps as never } })
+  hub.onMachineEvent(() => {})
+  await openPrimary(hub, mac, undefined, { projects: [], threads: [] })
+  await hub.set.ensureAll()
+  await settle()
+  const [stream] = vps.streams.filter(s => s.open)
+  const reads = () => vps.calls.filter(method => method === 'threads.list').length
+  const before = reads()
+  stream!.onSubscribed?.(5, { resumed: false, supported: true })
+  await settle()
+  expect(reads()).toBe(before)
+  stream!.onSubscribed?.(9, { resumed: true, supported: true })
+  await settle()
+  expect(reads()).toBe(before)
+  stream!.onSubscribed?.(12, { resumed: false, supported: true })
+  await settle()
+  expect(reads()).toBe(before + 1)
 })
 
 test('without another machine the event listener opens nothing', async () => {

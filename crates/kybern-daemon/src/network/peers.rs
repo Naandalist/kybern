@@ -453,6 +453,23 @@ impl Peers {
         }
     }
 
+    /// A member with an open link was seen now. `last_seen` moves at most once per
+    /// [`SEEN_REFRESH`], so it stays meaningful and costs nothing per heartbeat; returns the new time
+    /// when it moved, for the caller to store. A machine without a link is not touched.
+    pub fn refresh_seen(&self, machine_id: &str) -> Option<DateTime<Utc>> {
+        let mut inner = self.lock();
+        if !inner.links.get(machine_id).is_some_and(|link| !link.is_closed()) {
+            return None;
+        }
+        let now = Utc::now();
+        let status = inner.status.entry(machine_id.to_string()).or_default();
+        if status.last_seen.is_some_and(|seen| now.signed_duration_since(seen) < SEEN_REFRESH) {
+            return None;
+        }
+        status.last_seen = Some(now);
+        Some(now)
+    }
+
     pub fn set_presence(&self, machine_id: &str, presence: PeerPresence) {
         let mut inner = self.lock();
         let status = inner.status.entry(machine_id.to_string()).or_default();
@@ -1180,9 +1197,20 @@ async fn dial(state: &AppState, member: &str, node: &TsNode) -> Result<(), Strin
     Err(last)
 }
 
+/// How often an online member's `last_seen` moves while its session is up.
+const SEEN_REFRESH: chrono::Duration = chrono::Duration::seconds(60);
+
+/// A member with a live session was seen now: its `last_seen` moves (at most once per [`SEEN_REFRESH`]) and is stored.
+pub(super) fn touch_seen(state: &AppState, machine_id: &str) {
+    if let Some(seen) = state.network.peers.refresh_seen(machine_id) {
+        let _ = state.store.network_machine_touch(machine_id, seen);
+    }
+}
+
 /// Ping every `ping_every`; a link that has heard nothing for `dead_after` (three missed pings) is
-/// closed, which the reader turns into an offline peer and a reconnect with backoff.
-pub(super) fn spawn_heartbeat(link: Arc<PeerLink>, timing: super::Timing, ping: mpsc::Sender<()>) {
+/// closed, which the reader turns into an offline peer and a reconnect with backoff. `alive` runs on
+/// every beat of a live link (it keeps the member's `last_seen` current).
+pub(super) fn spawn_heartbeat(link: Arc<PeerLink>, timing: super::Timing, ping: mpsc::Sender<()>, alive: impl Fn() + Send + 'static) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -1194,6 +1222,7 @@ pub(super) fn spawn_heartbeat(link: Arc<PeerLink>, timing: super::Timing, ping: 
                 link.close();
                 break;
             }
+            alive();
             let _ = ping.try_send(());
         }
     });
@@ -1255,7 +1284,9 @@ pub(super) fn run_dialed<S>(
     });
 
     // Heartbeat: a ping every interval; three missed ones and the link is dead.
-    spawn_heartbeat(link.clone(), timing.clone(), ping_tx);
+    let seen_state = state.clone();
+    let seen_id = link.machine_id.clone();
+    spawn_heartbeat(link.clone(), timing.clone(), ping_tx, move || touch_seen(&seen_state, &seen_id));
 
     // Renewal: a new signed request names the grant, so the socket keeps its authority (§3.3).
     let renew_state = state.clone();
@@ -1634,6 +1665,35 @@ mod tests {
         // The plain schedule would have retried after 2 s.
         peers.fail("n", &timing, "nothing answered".into());
         assert!(peers.soonest_retry().unwrap() <= Duration::from_secs(2));
+    }
+
+    struct NoSink;
+
+    #[async_trait::async_trait]
+    impl FrameSink for NoSink {
+        async fn send(&self, _frame: Value) -> bool {
+            true
+        }
+    }
+
+    // ADE-121: a member that stays connected is not "last seen" when its session opened.
+    #[test]
+    fn last_seen_moves_about_once_a_minute_while_a_link_is_up_and_never_without_one() {
+        let peers = Peers::default();
+        assert_eq!(peers.refresh_seen("m"), None, "no link, no sighting");
+        let link = PeerLink::new("m".into(), Direction::Dialed, None, vec![], Arc::new(NoSink));
+        peers.register(link.clone());
+        let opened = peers.status("m").last_seen.unwrap();
+        assert_eq!(peers.refresh_seen("m"), None, "seen moments ago");
+        // The session has been up for a while.
+        peers.lock().status.get_mut("m").unwrap().last_seen = Some(opened - chrono::Duration::minutes(5));
+        let seen = peers.refresh_seen("m").expect("it moves");
+        assert!(seen >= opened);
+        assert_eq!(peers.status("m").last_seen, Some(seen));
+        assert_eq!(peers.refresh_seen("m"), None, "not again within the minute");
+        link.close();
+        peers.lock().status.get_mut("m").unwrap().last_seen = Some(opened - chrono::Duration::minutes(5));
+        assert_eq!(peers.refresh_seen("m"), None, "a closed link is no sighting");
     }
 
     #[test]

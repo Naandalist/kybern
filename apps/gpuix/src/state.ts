@@ -28,6 +28,7 @@ import { mergeIntoCurrent } from '../../../packages/kybern-client/src/newChat.ts
 import { newChats } from './composer/newChats.ts'
 import { getNav, setNav } from './nav/store.ts'
 import { OriginChildren, remoteChildStore, underParents, withRemoteChildren } from './nav/remoteChildren.ts'
+import { RemoteRecordOverlay, remoteDelegationStore } from './nav/remoteDelegations.ts'
 
 export interface AppState {
   status: ConnectionStatus
@@ -483,8 +484,13 @@ function composeListsOnly(localProjects: readonly Project[], localThreads: reado
   machinesOf = merged.machinesOf
   const threads = merged.threads.length ? [...localThreads, ...merged.threads].sort(byPinnedThenNewest) : localThreads as StateThread[]
   const children = originChildren.list.length ? [...merged.children, ...originChildren.list] : merged.children
-  return { projects: merged.projects, threads, children: underParents(children, threads, hub.localMachineId!) }
+  const nested = underParents(children, threads, hub.localMachineId!)
+  // What this machine's daemon records of its threads' children on other machines decides over a stale copy (ADE-121).
+  const records = remoteDelegationStore.list()
+  const recorded = records.length ? recordOverlay.apply(nested, records, new Map(localThreads.map(th => [th.id, th]))) : nested
+  return { projects: merged.projects, threads, children: recorded }
 }
+const recordOverlay = new RemoteRecordOverlay()
 
 let viewStop: (() => void) | undefined
 let machinesStop: (() => void) | undefined
@@ -520,7 +526,7 @@ function watchMachines() {
     remoteChanged()
   }
   if (!machinesStop) {
-    const stops = [hub.onMachinesChanged(sync), remoteChildStore.subscribe(remoteChanged)]
+    const stops = [hub.onMachinesChanged(sync), remoteChildStore.subscribe(remoteChanged), remoteDelegationStore.subscribe(remoteChanged)]
     machinesStop = () => { for (const stop of stops) stop() }
   }
   sync()

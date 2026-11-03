@@ -382,6 +382,12 @@ async fn dispatch_part_5(state: &AppState, _ctx: &ConnectionCtx, method: &str, s
                     *running_children.entry(delegation.parent_thread_id).or_default() += 1;
                 }
             }
+            // Children on other machines count too: a client reads their records (`delegations.remote_list`) for these parents.
+            for child in state.store.remote_children_active().map_err(internal)? {
+                if !child.state.is_terminal() {
+                    *running_children.entry(child.parent_thread_id).or_default() += 1;
+                }
+            }
             // Subagent and delegated threads are opt-in: older clients must never list one as a normal thread.
             if let Some(parent) = p.parent_thread_id {
                 threads
@@ -733,6 +739,10 @@ async fn dispatch_part_8(state: &AppState, ctx: &ConnectionCtx, method: &str, sl
         DelegationsWorktreeRemove::NAME => {
             let p: DelegationsWorktreeRemoveParams = parse(params)?;
             ok(state.orchestrator.delegation_worktree_remove(p.thread_id, p.force).await.map_err(bad)?)
+        }
+        DelegationsRemoteList::NAME => {
+            let p: DelegationsRemoteListParams = parse(params)?;
+            ok(DelegationsRemoteListResult { children: state.orchestrator.remote_children_list(p.parent_thread_id).map_err(bad)? })
         }
         CoordinatorGet::NAME => {
             let p: CoordinatorGetParams = parse(params)?;

@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::auth::authenticate;
 use crate::state::AppState;
+use crate::thread_image::ImageError;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -188,97 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn protected_folders_stay_closed_for_outside_images() {
-        let home = std::path::Path::new("/Users/someone");
-        let data = std::path::Path::new("/Users/someone/.kybern");
-        for path in [
-            "/Users/someone/.ssh/id.png",
-            "/Users/someone/.kybern/assets/x.png",
-            "/private/etc/x.png",
-            "/Users/someone/Library/Keychains/x.png",
-        ] {
-            assert!(super::protected_location(std::path::Path::new(path), Some(home), data, None), "{path}");
-        }
-        assert!(!super::protected_location(std::path::Path::new("/Users/someone/Desktop/shot.png"), Some(home), data, None));
-        assert_eq!(super::percent_decode("a%20b%C3%A4.png").as_deref(), Some("a bä.png"));
-        assert_eq!(super::percent_decode("plain.png"), None);
-    }
-
-    #[test]
-    fn protected_folders_below_the_thread_folder_stay_closed_inside_it_too() {
-        let home = std::path::Path::new("/Users/someone");
-        let data = std::path::Path::new("/Users/someone/.kybern");
-        let inside = |path: &str, root: &str| {
-            super::protected_location(std::path::Path::new(path), Some(home), data, Some(std::path::Path::new(root)))
-        };
-        // A thread whose folder is the home folder.
-        for path in ["/Users/someone/.ssh/id.png", "/Users/someone/.kybern/assets/x.png", "/Users/someone/Library/Messages/a.png"] {
-            assert!(inside(path, "/Users/someone"), "{path}");
-        }
-        assert!(
-            super::protected_location(std::path::Path::new("/Users/someone/library/mail/a.png"), Some(home), data, None)
-                == cfg!(target_os = "macos")
-        );
-        assert!(super::protected_location(std::path::Path::new("/Volumes/x/Old.photoslibrary/a.png"), Some(home), data, None));
-        // A worktree under the data folder serves its own files.
-        assert!(!inside("/Users/someone/.kybern/worktrees/x/shots/a.png", "/Users/someone/.kybern/worktrees/x"));
-        assert!(!inside("/Users/someone/Desktop/project/a.png", "/Users/someone/Desktop/project"));
-        // Any folder holding a daemon token is a Kybern data folder.
-        let scratch = std::env::temp_dir().join(format!("kybern-protected-test-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(scratch.join("assets")).unwrap();
-        std::fs::write(scratch.join("daemon.token"), "t").unwrap();
-        assert!(super::protected_location(&scratch.join("assets/a.png"), Some(home), data, None));
-        assert!(!super::protected_location(&scratch.join("assets/a.png"), Some(home), data, Some(&scratch)));
-        std::fs::remove_dir_all(scratch).unwrap();
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[tokio::test]
-    async fn opened_path_names_the_file_that_was_opened() {
-        let folder = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("kybern-opened-test-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("real.png"), "x").unwrap();
-        std::os::unix::fs::symlink(folder.join("real.png"), folder.join("link.png")).unwrap();
-        let file = tokio::fs::File::open(folder.join("link.png")).await.unwrap();
-        assert_eq!(super::opened_path(&file).unwrap(), folder.join("real.png"));
-        std::fs::remove_dir_all(folder).unwrap();
-    }
-
-    #[test]
-    fn a_session_owns_the_images_its_harness_stored() {
-        let roots = |session: Option<&str>| super::ImageRoots {
-            root: "/work/ade".into(),
-            cwd: "/work/ade".into(),
-            home: None,
-            data_dir: "/data".into(),
-            session: session.map(String::from),
-        };
-        let session = "9aba3aec-2abd-453c-9753-0dcadbb13d74";
-        let path = std::path::Path::new("/private/tmp/claude-501/-Users-me-ade/9aba3aec-2abd-453c-9753-0dcadbb13d74/images/1.png");
-        assert!(roots(Some(session)).is_session_attachment(path));
-        assert!(!roots(Some("another-session-id")).is_session_attachment(path), "another conversation's image");
-        assert!(!roots(None).is_session_attachment(path));
-        for other in [
-            "/private/tmp/claude-501/p/9aba3aec-2abd-453c-9753-0dcadbb13d74/scratchpad/1.png",
-            "/private/tmp/claude-501/p/9aba3aec-2abd-453c-9753-0dcadbb13d74/images/deeper/1.png",
-            "/Users/me/Pictures/9aba3aec-2abd-453c-9753-0dcadbb13d74/images/1.png",
-        ] {
-            assert!(!roots(Some(session)).is_session_attachment(std::path::Path::new(other)), "{other}");
-        }
-    }
-
-    #[test]
-    fn message_references_are_targets_code_spans_and_words() {
-        let text =
-            "Saved ![shot](</a b/c.png> \"t\") and [x](/d/e(1).png), ![y](/j k.png \"title\") see `/f g.png` or /h.png. Also /i.png.bak";
-        let found = super::message_references(text);
-        for want in ["/a b/c.png", "/d/e(1).png", "/j k.png", "/f g.png", "/h.png", "/i.png.bak"] {
-            assert!(found.contains(&want), "{want} in {found:?}");
-        }
-        assert!(!found.contains(&"/i.png"));
-    }
-
-    #[test]
     fn accepts_tauri_and_vite_origins() {
         for origin in ["http://tauri.localhost", "tauri://localhost", "http://localhost:1420", "http://127.0.0.1:5173"] {
             assert_eq!(allowed_asset_origin(&headers(origin)).unwrap(), origin);
@@ -341,48 +251,38 @@ async fn get_thread_image(
             return (StatusCode::FORBIDDEN, "token cannot read images").into_response();
         }
         let Ok(Some(thread)) = state.store.thread_get(id) else { return (StatusCode::NOT_FOUND, "thread not found").into_response() };
-        let Ok(root) = tokio::fs::canonicalize(&thread.cwd).await else {
-            return (StatusCode::NOT_FOUND, "thread folder is unavailable").into_response();
+        let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+        let reference = query.path.clone();
+        // Finding and reading the file blocks, and a hung network mount can block it for good: it runs on the blocking
+        // pool, and the request gets an answer after IMAGE_READ_TIMEOUT whatever the thread is stuck on.
+        let read = tokio::task::spawn_blocking(move || {
+            // Relative references resolve against the thread's folder; one that is gone (a removed worktree) still
+            // serves absolute and `~/` references.
+            let cwd = std::path::PathBuf::from(&thread.cwd);
+            let root = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+            crate::thread_image::load(&root, home.as_deref(), &reference, MAX_ASSET_BYTES)
+        });
+        let image = match tokio::time::timeout(IMAGE_READ_TIMEOUT, read).await {
+            Ok(Ok(Ok(image))) => image,
+            Ok(Ok(Err(ImageError::NotFound))) => return IMAGE_NOT_FOUND.into_response(),
+            Ok(Ok(Err(ImageError::TooLarge))) => return (StatusCode::PAYLOAD_TOO_LARGE, "images are limited to 50 MB").into_response(),
+            Ok(Ok(Err(ImageError::NotImage))) => {
+                return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "use a PNG, JPEG, GIF, WebP, or AVIF image").into_response();
+            }
+            Ok(Ok(Err(ImageError::Unreadable)) | Err(_)) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "unable to read image").into_response();
+            }
+            Err(_) => {
+                return (StatusCode::GATEWAY_TIMEOUT, "Reading the image took too long. Check that its disk is connected, then retry.")
+                    .into_response();
+            }
         };
-        let roots = ImageRoots {
-            root,
-            cwd: thread.cwd.clone().into(),
-            home: directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
-            data_dir: state.paths.root.clone(),
-            session: thread.provider_session_id.clone(),
-        };
-        let (path, outside) = match thread_image_path(&state, id, &roots, &query.path).await {
-            Ok(found) => found,
-            Err(refusal) => return refusal.into_response(),
-        };
-        // Acquire before reading compressed data, and keep ownership inside
-        // spawn_blocking so a cancelled HTTP request cannot oversubscribe decodes.
+        let (mime, bytes) = (image.mime, image.bytes);
+        // Decodes run two at a time. The permit is taken once the bytes are in hand (a slow read holds none), and
+        // owned inside spawn_blocking so a cancelled HTTP request cannot oversubscribe decodes.
         static DECODES: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
             std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)));
         let permit = if query.preview { Some(DECODES.clone().acquire_owned().await.unwrap()) } else { None };
-        let Ok(file) = tokio::fs::File::open(&path).await else { return IMAGE_UNAVAILABLE.into_response() };
-        // Judge the file that was opened, not the path checked before: an outside image must still be the named one.
-        if let Some(opened) = opened_path(&file)
-            && opened != path
-            && match roots.place(&opened) {
-                Ok(false) => false,
-                Ok(true) => !outside || !path_under(&opened, &path),
-                Err(_) => true,
-            }
-        {
-            return IMAGE_UNAVAILABLE.into_response();
-        }
-        use tokio::io::AsyncReadExt;
-        let mut bytes = Vec::new();
-        if file.take((MAX_ASSET_BYTES + 1) as u64).read_to_end(&mut bytes).await.is_err() {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "unable to read image").into_response();
-        }
-        if bytes.len() > MAX_ASSET_BYTES {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "images are limited to 50 MB").into_response();
-        }
-        let Some(mime) = image_mime(&bytes) else {
-            return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "use a PNG, JPEG, GIF, WebP, or AVIF image").into_response();
-        };
         let (mime, bytes) = if let Some(permit) = permit {
             match tokio::task::spawn_blocking(move || {
                 let _permit = permit;
@@ -415,391 +315,9 @@ async fn get_thread_image(
     with_asset_cors(response, origin)
 }
 
-/// What every refusal of a reference that leaves the thread's folder answers, whether the file exists or not, so the
-/// route cannot be used to probe for files.
-const IMAGE_UNAVAILABLE: (StatusCode, &str) =
-    (StatusCode::NOT_FOUND, "Image not found. It must be in the thread's folder, or named exactly in this conversation.");
+/// How long finding and reading a thread's image may take: a hung network mount can hold any step.
+const IMAGE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The file a thread's image reference names, or why it is refused. `reference` is the path as the message wrote it:
-/// relative to the thread's folder, absolute, `~/…` or `file://…` (percent-encoding is tried when the literal path is
-/// missing). Inside the thread's folder any folder works, hidden ones such as `.screenshots` included, except Git
-/// internals and protected folders. A reference that leaves the folder (absolute, `~/`, `file://` or `..`) is looked up
-/// in this thread's messages before the file system is consulted (see `thread_names`) and served only when named, unless
-/// it lands inside the folder through an alias, so the route cannot read or probe arbitrary files; protected folders
-/// stay closed regardless, and every refusal is the same 404. The path
-/// is canonicalized, so `..` and symlinks are judged by where they land; only image files are served (by extension
-/// here, by content when read). Returns the path and whether it lies outside the thread's folder.
-async fn thread_image_path(
-    state: &AppState,
-    thread_id: Uuid,
-    roots: &ImageRoots,
-    reference: &str,
-) -> Result<(std::path::PathBuf, bool), (StatusCode, &'static str)> {
-    let reference = reference.trim();
-    let targets = image_targets(reference, roots);
-    let leaves = !targets.iter().any(|target| roots.lexically_inside(target));
-    // Asked before the file system, so an unnamed outside path answers the same whether it exists or not.
-    let named = if leaves { Some(thread_names(state, thread_id, reference, &targets, roots).await) } else { None };
-    let refuse = |refusal: (StatusCode, &'static str)| if leaves { IMAGE_UNAVAILABLE } else { refusal };
-    let mut found = None;
-    for target in &targets {
-        if let Ok(path) = tokio::fs::canonicalize(target).await {
-            found = Some(path);
-            break;
-        }
-    }
-    let path = found.ok_or(IMAGE_UNAVAILABLE)?;
-    if !tokio::fs::metadata(&path).await.is_ok_and(|meta| meta.is_file()) {
-        return Err(IMAGE_UNAVAILABLE);
-    }
-    let image_extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ["png", "jpg", "jpeg", "gif", "webp", "avif"].contains(&ext.to_ascii_lowercase().as_str()));
-    if !image_extension {
-        return Err(refuse((StatusCode::UNSUPPORTED_MEDIA_TYPE, "use a PNG, JPEG, GIF, WebP, or AVIF image")));
-    }
-    let outside = roots.place(&path).map_err(refuse)?;
-    // An absolute reference may still land inside through an alias of the folder (`/var` for `/private/var`). One that
-    // lands outside, through a symlink too, needs a naming message.
-    if outside && !roots.is_session_attachment(&path) {
-        let named = match named {
-            Some(named) => named,
-            None => thread_names(state, thread_id, reference, &targets, roots).await,
-        };
-        if !named {
-            return Err(IMAGE_UNAVAILABLE);
-        }
-    }
-    Ok((path, outside))
-}
-
-/// The thread's folder and the locations that decide where an image may be read from.
-struct ImageRoots {
-    /// The thread's folder, canonical.
-    root: std::path::PathBuf,
-    /// The thread's folder as stored, which absolute references may use when it differs from `root`.
-    cwd: std::path::PathBuf,
-    home: Option<std::path::PathBuf>,
-    data_dir: std::path::PathBuf,
-    /// The thread's provider session id, which names the folder a harness keeps the session's pasted images in.
-    session: Option<String>,
-}
-
-impl ImageRoots {
-    /// Whether a canonical path is an image the harness stored for this very thread: `<temp dir>/…/<session id>/images/<file>`
-    /// (Claude Code keeps a pasted image at `/private/tmp/claude-501/<project>/<session>/images/1.png`). The user attached
-    /// it, so it opens whether or not a message spells its path out. The session id is a UUID the conversation owns, the
-    /// folder must be under a temp dir, and protected locations are refused before this is asked.
-    fn is_session_attachment(&self, path: &std::path::Path) -> bool {
-        let Some(session) = self.session.as_deref().filter(|id| id.len() >= 8 && !id.contains(['/', '\\'])) else { return false };
-        let in_temp = ["/tmp", "/private/tmp"]
-            .into_iter()
-            .map(std::path::PathBuf::from)
-            .chain(std::fs::canonicalize(std::env::temp_dir()))
-            .any(|temp| path.starts_with(temp));
-        let parts: Vec<&str> = path.components().filter_map(|part| part.as_os_str().to_str()).collect();
-        in_temp && parts.len() >= 3 && parts[parts.len() - 3] == session && parts[parts.len() - 2] == "images"
-    }
-
-    fn lexically_inside(&self, target: &std::path::Path) -> bool {
-        target.starts_with(&self.root) || target.starts_with(&self.cwd)
-    }
-
-    /// Whether a canonical path may be served, and if so whether it lies outside the thread's folder.
-    fn place(&self, path: &std::path::Path) -> Result<bool, (StatusCode, &'static str)> {
-        match path.strip_prefix(&self.root) {
-            Ok(inside) => {
-                if inside.components().any(|part| part.as_os_str().to_str().is_some_and(|part| part.eq_ignore_ascii_case(".git"))) {
-                    return Err((StatusCode::FORBIDDEN, "images inside Git internals are not served"));
-                }
-                if protected_location(path, self.home.as_deref(), &self.data_dir, Some(&self.root)) {
-                    return Err((StatusCode::FORBIDDEN, "images in protected folders are not served"));
-                }
-                Ok(false)
-            }
-            Err(_) if protected_location(path, self.home.as_deref(), &self.data_dir, None) => {
-                Err((StatusCode::FORBIDDEN, "images in protected folders are not served"))
-            }
-            Err(_) => Ok(true),
-        }
-    }
-}
-
-/// Where a reference points, without touching the file system: `file://` stripped, `~/` expanded, relative paths
-/// joined to the thread's folder, `.` and `..` resolved lexically. The literal form first, then the percent-decoded one.
-fn image_targets(reference: &str, roots: &ImageRoots) -> Vec<std::path::PathBuf> {
-    let literal = reference.strip_prefix("file://localhost").or_else(|| reference.strip_prefix("file://")).unwrap_or(reference);
-    let mut targets = Vec::new();
-    for raw in [Some(literal.to_string()), percent_decode(literal)].into_iter().flatten() {
-        if raw.is_empty() {
-            continue;
-        }
-        let joined = match raw.strip_prefix("~/") {
-            Some(rest) => match &roots.home {
-                Some(home) => home.join(rest),
-                None => continue,
-            },
-            None => roots.root.join(&raw),
-        };
-        let mut target = std::path::PathBuf::new();
-        for part in joined.components() {
-            match part {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    target.pop();
-                }
-                part => target.push(part),
-            }
-        }
-        if !targets.contains(&target) {
-            targets.push(target);
-        }
-    }
-    targets
-}
-
-/// Whether one of the thread's prompts or replies names the image: a Markdown image or link target, a code span or a
-/// plain path in its text that points at the same place as `reference` (never a mere substring, reasoning or tool
-/// output). Positive answers are cached for good, since history only grows; negative ones until the next message.
-async fn thread_names(state: &AppState, thread_id: Uuid, reference: &str, targets: &[std::path::PathBuf], roots: &ImageRoots) -> bool {
-    const CACHE_ENTRIES: usize = 512;
-    /// (thread, reference) → (named, newest message seq searched, last use).
-    type Cache = std::collections::HashMap<(Uuid, String), (bool, i64, u64)>;
-    static CACHE: std::sync::LazyLock<std::sync::Mutex<(Cache, u64)>> = std::sync::LazyLock::new(Default::default);
-    if targets.is_empty() {
-        return false;
-    }
-    let key = (thread_id, reference.to_string());
-    let store = state.store.clone();
-    let Ok(Ok(newest)) = tokio::task::spawn_blocking(move || store.thread_last_message_seq(thread_id)).await else { return false };
-    let searched = {
-        let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (cache, clock) = &mut *guard;
-        *clock += 1;
-        let now = *clock;
-        match cache.get_mut(&key) {
-            Some(entry) if entry.0 || entry.1 == newest => {
-                entry.2 = now;
-                return entry.0;
-            }
-            Some(entry) => entry.1,
-            None => 0,
-        }
-    };
-    let mut before = newest + 1;
-    let mut named = false;
-    loop {
-        let store = state.store.clone();
-        let needle = reference.to_string();
-        let Ok(Ok((texts, next))) =
-            tokio::task::spawn_blocking(move || store.thread_message_texts_containing(thread_id, &needle, searched, before)).await
-        else {
-            return false;
-        };
-        if texts.iter().any(|text| {
-            message_references(text)
-                .into_iter()
-                .any(|candidate| candidate == reference || image_targets(candidate, roots).iter().any(|target| targets.contains(target)))
-        }) {
-            named = true;
-            break;
-        }
-        match next {
-            Some(seq) => before = seq,
-            None => break,
-        }
-    }
-    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (cache, clock) = &mut *guard;
-    if cache.len() >= CACHE_ENTRIES
-        && !cache.contains_key(&key)
-        && let Some(oldest) = cache.iter().min_by_key(|(_, entry)| entry.2).map(|(key, _)| key.clone())
-    {
-        cache.remove(&oldest);
-    }
-    cache.insert(key, (named, newest, *clock));
-    named
-}
-
-/// The path-like references in a message: Markdown link and image targets, code spans, and whitespace-separated words
-/// with surrounding quotes, brackets and trailing punctuation removed.
-fn message_references(text: &str) -> Vec<&str> {
-    let mut found = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("](") {
-        let target = &rest[start + 2..];
-        let (destination, after) = if let Some(inner) = target.strip_prefix('<') {
-            match inner.find('>') {
-                Some(end) => (&inner[..end], &inner[end + 1..]),
-                None => break,
-            }
-        } else {
-            let mut depth = 0usize;
-            let end = target
-                .char_indices()
-                .find(|&(_, c)| match c {
-                    '(' => {
-                        depth += 1;
-                        false
-                    }
-                    ')' if depth == 0 => true,
-                    ')' => {
-                        depth -= 1;
-                        false
-                    }
-                    '\n' => true,
-                    _ => false,
-                })
-                .map_or(target.len(), |(end, _)| end);
-            // Agents write spaces into destinations without `<…>`; a trailing `"title"` or `'title'` is not part of it.
-            let mut destination = target[..end].trim();
-            for quote in ['"', '\''] {
-                if destination.ends_with(quote)
-                    && let Some(start) = destination[..destination.len() - 1].rfind(&format!(" {quote}"))
-                {
-                    destination = destination[..start].trim_end();
-                }
-            }
-            (destination, &target[end..])
-        };
-        found.push(destination);
-        rest = after;
-    }
-    let mut spans = text.split('`');
-    spans.next();
-    found.extend(spans.step_by(2).map(str::trim));
-    found.extend(text.split_whitespace().map(|word| {
-        word.trim_start_matches(['`', '\'', '"', '(', '[', '<', '{', '*', '_'])
-            .trim_end_matches(['`', '\'', '"', ')', ']', '>', '}', ',', ';', ':', '!', '?', '.', '*', '_'])
-    }));
-    found.retain(|candidate| !candidate.is_empty());
-    found
-}
-
-/// Folders an image is never read from, even when a message names it: credentials, keychains, mail and messages, app
-/// data, the Photos library, system configuration and Kybern's data (this daemon's, `~/.kybern`, and any folder holding
-/// a daemon token). With `within` (the thread's folder, for an image inside it) only folders below it count, so a thread
-/// whose folder is the home folder still cannot serve `~/.ssh`, while a worktree under `~/.kybern` serves its own files.
-fn protected_location(
-    path: &std::path::Path,
-    home: Option<&std::path::Path>,
-    data_dir: &std::path::Path,
-    within: Option<&std::path::Path>,
-) -> bool {
-    let below = |folder: &std::path::Path| within.is_none_or(|root| path_under(folder, root) && !path_under(root, folder));
-    let counts = |folder: &std::path::Path| path_under(path, folder) && below(folder);
-    let canonical_data = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    if counts(&canonical_data) || counts(data_dir) {
-        return true;
-    }
-    if ["/etc", "/private/etc", "/private/var/db", "/System", "/dev", "/proc", "/var/db"]
-        .iter()
-        .any(|prefix| counts(std::path::Path::new(prefix)))
-    {
-        return true;
-    }
-    const HOME_FOLDERS: [&str; 16] = [
-        ".ssh",
-        ".gnupg",
-        ".aws",
-        ".kube",
-        ".docker",
-        ".config/gcloud",
-        ".netrc",
-        ".kybern",
-        "Library/Keychains",
-        "Library/Cookies",
-        "Library/Messages",
-        "Library/Mail",
-        "Library/Safari",
-        "Library/Containers",
-        "Library/Group Containers",
-        "Library/Application Support",
-    ];
-    if home.is_some_and(|home| HOME_FOLDERS.iter().any(|folder| counts(&home.join(folder)))) {
-        return true;
-    }
-    // Photos libraries wherever they live, and any other Kybern data folder (it holds a daemon token).
-    path.ancestors().skip(1).filter(|folder| below(folder)).any(|folder| {
-        folder.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("photoslibrary")) || folder.join("daemon.token").exists()
-    })
-}
-
-/// `path` is `folder` or inside it, ignoring ASCII case on macOS, whose file systems usually do.
-fn path_under(path: &std::path::Path, folder: &std::path::Path) -> bool {
-    if !cfg!(target_os = "macos") {
-        return path.starts_with(folder);
-    }
-    let mut parts = path.components();
-    folder.components().all(|want| {
-        parts.next().is_some_and(|part| match (part.as_os_str().to_str(), want.as_os_str().to_str()) {
-            (Some(part), Some(want)) => part.eq_ignore_ascii_case(want),
-            _ => part == want,
-        })
-    })
-}
-
-/// The path an open file actually is, to judge it again after opening: a folder on the way may have been swapped for a
-/// symlink between the checks and the open.
-#[cfg(target_os = "macos")]
-fn opened_path(file: &tokio::fs::File) -> Option<std::path::PathBuf> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::ffi::OsStringExt;
-    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
-    // SAFETY: F_GETPATH writes a NUL-terminated path of at most PATH_MAX bytes into the buffer.
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } == -1 {
-        return None;
-    }
-    buffer.truncate(buffer.iter().position(|&byte| byte == 0)?);
-    Some(std::ffi::OsString::from_vec(buffer).into())
-}
-
-#[cfg(target_os = "linux")]
-fn opened_path(file: &tokio::fs::File) -> Option<std::path::PathBuf> {
-    use std::os::fd::AsRawFd;
-    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn opened_path(_file: &tokio::fs::File) -> Option<std::path::PathBuf> {
-    None
-}
-
-fn percent_decode(text: &str) -> Option<String> {
-    if !text.contains('%') {
-        return None;
-    }
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let Some(hex) = text.get(i + 1..i + 3)
-            && let Ok(byte) = u8::from_str_radix(hex, 16)
-        {
-            out.push(byte);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(&[255, 216, 255]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        Some("image/webp")
-    } else if bytes.get(4..8) == Some(b"ftyp") && matches!(bytes.get(8..12), Some(b"avif" | b"avis")) {
-        Some("image/avif")
-    } else {
-        None
-    }
-}
+/// A reference that names no regular file.
+const IMAGE_NOT_FOUND: (StatusCode, &str) =
+    (StatusCode::NOT_FOUND, "Image not found. Check the path, or retry once the agent has saved it.");

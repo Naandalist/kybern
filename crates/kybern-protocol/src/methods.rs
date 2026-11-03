@@ -1460,6 +1460,33 @@ method!(
     Thread
 );
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DelegationsRemoteListParams {
+    /// The delegating thread on this machine.
+    pub parent_thread_id: ThreadId,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct DelegationsRemoteListResult {
+    /// The thread's children on other machines, as this machine records them, oldest first.
+    pub children: Vec<crate::RemoteChild>,
+}
+// This machine's own record of the agents a thread delegated to other machines: the state that
+// `kybern_agent_status` reports, which a client reads instead of its copy of the other machine's list.
+method!(
+    DelegationsRemoteList,
+    "delegations.remote_list",
+    Some(Scope::OrchestrationRead),
+    DelegationsRemoteListParams,
+    DelegationsRemoteListResult
+);
+/// Sent to every client that may read orchestration state whenever this machine's record of a
+/// child on another machine changes (created, acknowledged, followed, settled). Params are the
+/// whole [`crate::RemoteChild`]; a client that missed one reads `delegations.remote_list` again.
+pub const DELEGATIONS_REMOTE_CHANGED_NOTIFICATION: &str = "delegations.remote_changed";
+/// Sent instead of [`DELEGATIONS_REMOTE_CHANGED_NOTIFICATION`]s a client was too slow to take: some records changed
+/// unseen, and the client reads `delegations.remote_list` again for the parents it shows. Params are an empty object.
+pub const DELEGATIONS_REMOTE_RESYNC_NOTIFICATION: &str = "delegations.remote_resync";
+
 // ---- project coordinator (the lead thread) ----
 
 /// Tell an absent field (`None`, via `default`) from an explicit `null`
@@ -4827,6 +4854,7 @@ registry!(
     ThreadMessagesDeliver,
     ThreadMessagesDismiss,
     DelegationsWorktreeRemove,
+    DelegationsRemoteList,
     CoordinatorGet,
     CoordinatorOpen,
     CoordinatorSetup,

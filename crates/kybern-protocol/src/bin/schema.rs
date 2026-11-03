@@ -192,6 +192,7 @@ fn main() {
     method::<ThreadMessagesDeliver>(&mut methods);
     method::<ThreadMessagesDismiss>(&mut methods);
     method::<DelegationsWorktreeRemove>(&mut methods);
+    method::<DelegationsRemoteList>(&mut methods);
     method::<CoordinatorGet>(&mut methods);
     method::<CoordinatorOpen>(&mut methods);
     method::<CoordinatorSetup>(&mut methods);

@@ -40,6 +40,7 @@ import {
   type MachineCard,
   type MachineId,
   type NetworkClientGrantResult,
+  type NetworkStatus,
   type Project,
   type Route,
   type Thread,
@@ -356,6 +357,13 @@ export interface MachineSetOptions {
 
 const MAX_PROJECTS_PER_MACHINE = 1000;
 const FAILURE_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 300_000];
+/**
+ * A connect attempt older than this is abandoned when another is asked for: every step of one has its own timeout,
+ * so an attempt this old is stuck, and waiting on it would keep the machine offline until the app restarts.
+ */
+const ATTEMPT_STALE_MS = 120_000;
+/** How often a sync may dial a member the daemon saw come back, out of its backoff. */
+const REDIAL_MS = 30_000;
 const LIVE: ReadonlySet<MachineConnectionStatus> = new Set(["online", "relaying", "needs-update"]);
 
 interface Opened {
@@ -401,6 +409,12 @@ interface Slot {
   tried?: Set<string>;
   failures: number;
   retryTimer?: unknown;
+  /** When the attempt in `attempt` started (clock ms). */
+  attemptAt?: number;
+  /** When a sync last dialed it because the daemon saw it come back (clock ms). */
+  redialAt?: number;
+  /** Its status in the last member list the daemon reported (`syncMembers`); `undefined` before the first. */
+  daemonSaw?: MachineCard["status"];
   graceTimer?: unknown;
   lists?: { projects: Project[]; threads: MachineThread[]; activity?: ThreadActivitySummary[] };
   view?: MachineConnection;
@@ -477,6 +491,8 @@ export class MachineSet {
   private probeTimer: unknown;
   private syncTimer: unknown;
   private syncing: Promise<void> | undefined;
+  /** The status the last `network.changed` carried, and the member that sent it, until a sync uses it. */
+  private pushed: { slot: Slot; status: NetworkStatus } | undefined;
   private syncAgain = false;
   private disposed = false;
   private _version = 0;
@@ -1048,7 +1064,7 @@ export class MachineSet {
       autoRefresh: true,
     };
     // Members tell clients when the network changes. The proxy keeps these handlers across route changes.
-    slot.proxy.onNotification("network.changed", () => this.scheduleSync());
+    slot.proxy.onNotification("network.changed", (params) => this.scheduleSync(slot, params));
     slot.proxy.onNotification("network.machine.changed", () => this.scheduleSync());
     this.slots.set(record.machineId, slot);
     return slot;
@@ -1152,9 +1168,11 @@ export class MachineSet {
       return Promise.resolve();
     }
     if (slot.external) return Promise.resolve();
-    if (slot.attempt) return slot.attempt;
+    if (slot.attempt && this.clock.now() - (slot.attemptAt ?? 0) < ATTEMPT_STALE_MS) return slot.attempt;
+    // A stuck attempt is superseded: the new generation makes whatever it still finds close itself.
     this.clock.clearTimeout(slot.retryTimer);
     const gen = ++slot.gen;
+    slot.attemptAt = this.clock.now();
     const attempt = (async () => {
       try {
         const result = await this.findRoute(slot, gen, {});
@@ -1547,8 +1565,10 @@ export class MachineSet {
     }
   }
 
-  private scheduleSync() {
+  private scheduleSync(from?: Slot, params?: unknown) {
     if (this.disposed) return;
+    // `network.changed` carries the whole status: the sync uses it instead of asking again when it asks that member.
+    if (from && isNetworkStatus(params)) this.pushed = { slot: from, status: params };
     if (this.syncing) { this.syncAgain = true; return; }
     this.clock.clearTimeout(this.syncTimer);
     this.syncTimer = this.clock.setTimeout(() => void this.syncMembers(), 300);
@@ -1589,8 +1609,10 @@ export class MachineSet {
     const localId = this.localId;
     const current = () => !this.disposed && this.localId === localId && this.slots.get(source.record.machineId) === source && source.inner === inner && source.gen === gen && LIVE.has(source.status);
     let members: MachineCard[];
+    const pushed = this.pushed;
+    this.pushed = undefined;
     try {
-      const status = await inner.call("network.status", {});
+      const status = pushed?.slot === source ? pushed.status : await inner.call("network.status", {});
       if (!current() || this.syncAgain || status.self_machine.machine_id !== source.record.machineId) return;
       // Turning the switch off keeps the saved network, routes and credentials. It must not
       // become an authoritative empty member list (or mint grants through this connection).
@@ -1668,8 +1690,43 @@ export class MachineSet {
         // Routes are refreshed on the next sync.
       }
     }
+    // The machine the user is at saw these members come back (offline at the last sync, online now): one that is
+    // offline here (waiting out its backoff, or with routes learned while it was away) is dialed now, so it comes back
+    // without an app restart. A member the daemon has reported online all along and this device cannot reach (a phone
+    // off the tailnet) keeps its backoff; only an attempt of its that is stuck is replaced (`connectSlot`). Not
+    // awaited: a dial that hangs must not hold up the next sync.
+    const redial: Slot[] = [];
+    for (const card of members) {
+      const slot = this.slots.get(card.machine_id);
+      if (!slot) continue;
+      const cameBack = card.status === "online" && slot.daemonSaw !== undefined && slot.daemonSaw !== "online";
+      slot.daemonSaw = card.status;
+      const stuck = card.status === "online" && slot.attempt !== undefined && this.clock.now() - (slot.attemptAt ?? 0) >= ATTEMPT_STALE_MS;
+      if (!(cameBack || stuck) || slot === source || !wantsDial(slot) || fresh.includes(slot)) continue;
+      // At most every REDIAL_MS, however often it flaps.
+      if (cameBack && slot.redialAt !== undefined && this.clock.now() - slot.redialAt < REDIAL_MS) continue;
+      if (cameBack) {
+        slot.redialAt = this.clock.now();
+        slot.failures = 0;
+        this.clock.clearTimeout(slot.retryTimer);
+      }
+      redial.push(slot);
+    }
     this.persist();
     this.touch(undefined, "records");
+    for (const slot of redial) void this.connectSlot(slot);
     await mapLimit(fresh, 4, (slot) => this.connectSlot(slot));
   }
+}
+
+/** A machine the set dials itself that is not connected. One with an attempt under way joins it (`connectSlot`). */
+function wantsDial(slot: Slot): boolean {
+  return !slot.external && !slot.record.paused && !LIVE.has(slot.status) && slot.status !== "unpaired";
+}
+
+/** A `network.changed` payload that is a whole `NetworkStatus` (older daemons send `{}`). */
+export function isNetworkStatus(value: unknown): value is NetworkStatus {
+  const status = value as Partial<NetworkStatus> | null | undefined;
+  return !!status && typeof status === "object" && typeof status.enabled === "boolean" && Array.isArray(status.members) &&
+    typeof status.self_machine?.machine_id === "string";
 }
