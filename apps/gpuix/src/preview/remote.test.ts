@@ -9,9 +9,16 @@ test('forwarding a port asks the daemon for that machine and port', async () => 
   const calls: unknown[] = []
   const client: ForwardClient = { call: async (method, params) => { calls.push([method, params]); return forward(41000) } }
   const result = await forwardPort(client, 'm1', 8765)
-  expect(calls).toEqual([['ports.forward', { machine: 'm1', remote_port: 8765 }]])
+  expect(calls).toEqual([['ports.forward', { machine: 'm1', remote_port: 8765, origin: 'preview' }]])
   expect(forwardedAddress(result, '/app?x=1')).toBe('http://localhost:41000/app?x=1')
   expect(forwardedAddress(result)).toBe('http://localhost:41000')
+})
+
+test('"Forward a port…" asks for a manual forward', async () => {
+  const calls: unknown[] = []
+  const client: ForwardClient = { call: async (method, params) => { calls.push([method, params]); return forward(41000) } }
+  await forwardPort(client, 'm1', 8765, 'manual')
+  expect(calls).toEqual([['ports.forward', { machine: 'm1', remote_port: 8765, origin: 'manual' }]])
 })
 
 test('a forward error reaches the caller', async () => {

@@ -211,10 +211,13 @@ async fn list_proc() -> Option<Vec<Listener>> {
     .flatten()
 }
 
+/// Without a listener table (Windows, or no `lsof`), the usual dev ports are probed. They are listed as bound to `::`
+/// so a probe tries 127.0.0.1 and then [::1]: Node resolves `localhost` to ::1 on Windows, and a Vite server there
+/// listens on [::1] alone.
 fn common_port_listeners() -> Vec<Listener> {
     COMMON_PORTS
         .iter()
-        .map(|&port| Listener { addr: IpAddr::V4(Ipv4Addr::LOCALHOST), port, pid: None, process_name: None, cwd: None })
+        .map(|&port| Listener { addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED), port, pid: None, process_name: None, cwd: None })
         .collect()
 }
 
@@ -528,6 +531,14 @@ mod tests {
 
     fn listener(addr: &str, port: u16, pid: u32, name: &str) -> Listener {
         Listener { addr: addr.parse().unwrap(), port, pid: Some(pid), process_name: Some(name.into()), cwd: None }
+    }
+
+    #[test]
+    fn common_ports_are_probed_on_ipv4_and_ipv6_loopback() {
+        let found = candidates(common_port_listeners(), ScanOptions::default());
+        let vite = found.iter().find(|c| c.port == 5173).unwrap();
+        assert_eq!(vite.hosts, vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]);
+        assert!(!vite.v6_only);
     }
 
     #[test]

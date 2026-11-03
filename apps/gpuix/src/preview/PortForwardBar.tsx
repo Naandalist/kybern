@@ -26,7 +26,7 @@ export function PortForwardBar({ threadId }: { threadId: string }) {
     if (!chosen || previewState(threadId).busy) return
     const target = parseForwardTarget(port)
     if ('error' in target) { setPreview(threadId, { error: target.error }); return }
-    void openRemoteServer(threadId, { id: chosen.machineId, name: shortMachineName(chosen.name), port: target.port, path: target.path }).then((opened) => { if (opened) close() })
+    void openRemoteServer(threadId, { id: chosen.machineId, name: shortMachineName(chosen.name), port: target.port, path: target.path }, false, 'manual').then((opened) => { if (opened) close() })
   }
   return <div testId="preview-forward-bar" style={{ display: 'flex', alignItems: 'center', height: 36, gap: 6, paddingLeft: 8, paddingRight: 6, flexShrink: 0, borderBottomWidth: 1, borderColor: t.surfaceDivider }}>
     {chosen ? <Menu testId="preview-forward-machine" trigger={(open) => <PickerChip size="sm" open={open}>{shortMachineName(chosen.name)}</PickerChip>}>

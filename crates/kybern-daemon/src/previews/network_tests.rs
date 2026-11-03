@@ -203,7 +203,13 @@ async fn run_server_preview() {
     let remote_port = listener.local_addr().unwrap().port();
     let dev = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let forward = client
-        .call::<PortsForward>(PortsForwardParams { machine: source.clone(), remote_port, local_port: None, https: false })
+        .call::<PortsForward>(PortsForwardParams {
+            machine: source.clone(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
         .await
         .unwrap();
     assert_eq!(forward.machine_id, source);
@@ -253,7 +259,8 @@ async fn run_server_preview() {
                 machine: source,
                 remote_port: server_host.address.port(),
                 local_port: None,
-                https: false
+                https: false,
+                origin: Default::default(),
             })
             .await
             .is_err()
@@ -363,8 +370,16 @@ async fn run_direct_ports() {
     link.call::<PeerPortsRelease>(PeerPortsReleaseParams { forward_id: id }).await.unwrap();
 
     let (client, _) = a.client(&Scope::ALL).await;
-    let forwarded =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let forwarded = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     assert!(forwarded.local_port > remote_port, "the occupied remote port is followed by a higher free port");
     assert!(
         a.state.network.ports.lock().iter().find(|f| f.id == forwarded.id).unwrap().route_now().is_some(),
@@ -391,8 +406,16 @@ async fn run_direct_ports() {
     write_tailnet(&b.dir.path().join("no-tailnet.json"), "b", "c");
     c.link(&b).await;
     let (on_c, _) = c.client(&Scope::ALL).await;
-    let second =
-        on_c.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let second = on_c
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     let token_a = a.state.network.ports.lock().iter().find(|f| f.id == forwarded.id).unwrap().route_now().unwrap().endpoint.token.clone();
     let token_c = c.state.network.ports.lock().iter().find(|f| f.id == second.id).unwrap().route_now().unwrap().endpoint.token.clone();
     assert!(token_a != token_c, "each member must get its own token");
@@ -413,7 +436,16 @@ async fn run_direct_ports() {
     let end = tokio::time::timeout(Duration::from_secs(3), websocket.next()).await.expect("policy did not end TCP");
     assert!(end.is_none_or(|frame| frame.is_err() || matches!(frame, Ok(Message::Close(_)))));
     assert!(
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: 1, local_port: None, https: false }).await.is_err()
+        client
+            .call::<PortsForward>(PortsForwardParams {
+                machine: b.id(),
+                remote_port: 1,
+                local_port: None,
+                https: false,
+                origin: Default::default()
+            })
+            .await
+            .is_err()
     );
     client.call::<PortsStop>(PortsStopParams { id: forwarded.id }).await.unwrap();
     let op = b.state.network.membership().unwrap().set(&format!("allow.{}.ports", b.id()), serde_json::json!(true)).unwrap();
@@ -424,8 +456,16 @@ async fn run_direct_ports() {
     // a now sends JSON frames with base64 data and the 256 KiB window; b still sends a binary frames.
     a.state.network.peers.link(&b.id()).unwrap().set_peer_features(&old.features);
     a.state.network.peers.set_presence(&b.id(), old);
-    let legacy =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let legacy = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     let (mut legacy_ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/hmr", legacy.local_port)).await.unwrap();
     legacy_ws.send(Message::Text("legacy".into())).await.unwrap();
     assert_eq!(legacy_ws.next().await.unwrap().unwrap(), Message::Text("legacy".into()));
@@ -451,7 +491,13 @@ fn port_forward_benchmark_fixture() {
             let (client, _) = a.client(&Scope::ALL).await;
             let started = std::time::Instant::now();
             let direct = client
-                .call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false })
+                .call::<PortsForward>(PortsForwardParams {
+                    machine: b.id(),
+                    remote_port,
+                    local_port: None,
+                    https: false,
+                    origin: Default::default(),
+                })
                 .await
                 .unwrap();
             let open_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -459,7 +505,13 @@ fn port_forward_benchmark_fixture() {
             old.features.retain(|f| f != features::PORTS_DIRECT_V1);
             a.state.network.peers.set_presence(&b.id(), old);
             let tunnel = client
-                .call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: Some(0), https: false })
+                .call::<PortsForward>(PortsForwardParams {
+                    machine: b.id(),
+                    remote_port,
+                    local_port: Some(0),
+                    https: false,
+                    origin: Default::default(),
+                })
                 .await
                 .unwrap();
             let info =
@@ -554,13 +606,29 @@ async fn run_fast_mode() {
     });
 
     let (client, _) = a.client(&Scope::ALL).await;
-    let plain =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let plain = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     assert!(plain.https_available, "a current machine offers Fast mode");
     assert!(plain.https_port.is_none() && plain.https_certificate.is_none(), "Fast mode is opened only when asked for");
     assert!(plain.rtt_ms.is_some());
-    let forward =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: true }).await.unwrap();
+    let forward = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: true,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     assert_eq!(forward.id, plain.id, "the same forward gains an HTTPS listener");
     let port = forward.https_port.expect("an HTTPS listener");
     let pem = forward.https_certificate.clone().unwrap();
@@ -915,8 +983,16 @@ async fn run_plain_http() {
     });
 
     let (client, _) = a.client(&Scope::ALL).await;
-    let forward =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let forward = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     let port = forward.local_port;
     // What a page's module script sends: only such subresources are answered from what a page load's batch confirmed.
     let gzip = [("accept-encoding", "gzip, deflate, br"), ("sec-fetch-dest", "script")];
@@ -994,7 +1070,13 @@ async fn run_plain_http() {
     assert_eq!(a.state.network.peers.link(&b.id()).unwrap().relays.len(), 0);
 
     let greeted = client
-        .call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: greeter_port, local_port: None, https: false })
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port: greeter_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
         .await
         .unwrap();
     let mut raw = tokio::net::TcpStream::connect(("127.0.0.1", greeted.local_port)).await.unwrap();
@@ -1076,8 +1158,16 @@ async fn run_api_after_write() {
     let remote_port = listener.local_addr().unwrap().port();
     let dev = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (client, _) = a.client(&Scope::ALL).await;
-    let forward =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let forward = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     let port = forward.local_port;
     let fetch = [("sec-fetch-dest", "empty"), ("sec-fetch-mode", "cors"), ("accept", "application/json")];
     let navigate = [("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "document")];
@@ -1170,8 +1260,16 @@ async fn run_hop() {
     // The background choice is settled (nothing faster) so the test sets the route itself.
     v.state.network.ports.book.set(&t.id(), None);
     let (client, _) = v.client(&Scope::ALL).await;
-    let opened =
-        client.call::<PortsForward>(PortsForwardParams { machine: t.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let opened = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: t.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     assert!(opened.route_via.is_none());
     let forward = v.state.network.ports.lock().iter().find(|f| f.id == opened.id).unwrap().clone();
     let straight = forward.route_now().unwrap();

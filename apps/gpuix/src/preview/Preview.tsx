@@ -26,13 +26,15 @@ import { pressRow } from '../shell/motion.ts'
 import { PATCHED_NATIVE } from '../native/local-build.ts'
 import { Floating } from '../live/Floating.tsx'
 import { DockEmpty, ErrorLine } from '../dock/parts.tsx'
-import { floatingPreview, openPreview, openRemoteServer, previewState, setPreview, showPreview, subscribePreviews, usePreview } from './store.ts'
+import { disposePreview, floatingPreview, openPreview, openRemoteServer, previewState, previewThreads, previewUses, setPreview, showPreview, subscribePreviews, usePreview } from './store.ts'
+import { watchPreviewLifetime } from './lifetime.ts'
+import { createPortsStore, type PortsClient } from './ports.ts'
 import { PreviewSlot, PreviewSurface, previewCommand } from './Surface.tsx'
 import { previewDockSize } from './Surface.tsx'
 import { useElementBounds } from '../native/layout-hooks.ts'
 import { clampPlayerSize, defaultPlayerSize, type PlayerSize } from '../../../../packages/kybern-client/src/previewMiniPlayer.ts'
 import { dockGeometry, useDock } from '../dock/store.ts'
-import { useGroups } from '../split/store.ts'
+import { subscribeTabs, threadHasTab, useGroups } from '../split/store.ts'
 import { useSidebarWidth, useWindowWidth } from '../shell/layout.ts'
 import { PreviewResizeCapture } from './resize.tsx'
 import { MiniResize, type MiniCorner } from './MiniResize.tsx'
@@ -176,6 +178,22 @@ export function PreviewIntegration({ insetBottom = 0 }: { insetBottom?: number }
     const offs = [...clients].map(client => client.onNotification('previews.open_requested', payload => { const request = payload as PreviewOpenRequestedNotification; showPreview(request.thread_id, true); void openPreview(request.thread_id, request.target) }))
     return () => { for (const off of offs) off() }
   }, [connected, id])
+  // A closed browser tab ends its page, and a forward it opened ends 10 s after no browser shows it (ADE-128, `lifetime.ts`).
+  useEffect(() => {
+    const client = connected ? localClient() : null
+    if (!client) return
+    const ports = createPortsStore(client as unknown as PortsClient)
+    const stop = watchPreviewLifetime({
+      threads: previewThreads,
+      open: threadId => threadHasTab(threadId, 'preview') || previewState(threadId).floating,
+      dispose: disposePreview,
+      uses: previewUses,
+      forwards: ports.get,
+      stop: forwardId => ports.stop(forwardId),
+      subscribe: listener => { const offs = [subscribeTabs(listener), subscribePreviews(listener), ports.subscribe(listener)]; return () => { for (const off of offs) off() } },
+    })
+    return () => { stop(); ports.dispose() }
+  }, [connected])
   useEffect(() => addWindowKeyHandler(e => { if (id && page === 'home' && !settings && isPrimaryChord(e.modifiers, { alt: true, shift: 'any' }) && !(!isMacKeys() && isAltGrText(e)) && e.key === 'p') { if (!webHost.available) { showPreview(id); return true } setNav({ keyboardNav: true }); const s = previewState(id); if (s.entries.length) { setPreview(id, { floating: !s.floating }); if (s.floating) showPreview(id) } else showPreview(id); return true } }), [id, page, settings])
   // One native document per thread: the threads whose browser tab is active in some group, the selected one, and the floating one.
   const groups = useGroups()

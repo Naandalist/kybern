@@ -97,6 +97,10 @@ expression: schema_for!(PortForward)
           "type": "null"
         }
       ]
+    },
+    "origin": {
+      "description": "A preview's forward, stopped when the page's last tab closes; absent for a manual one.",
+      "$ref": "#/$defs/PortForwardOrigin"
     }
   },
   "required": [
@@ -175,6 +179,21 @@ expression: schema_for!(PortForward)
         "bytes_per_second",
         "open_requests",
         "elapsed_ms"
+      ]
+    },
+    "PortForwardOrigin": {
+      "description": "Why a forward exists ([`PortsForwardParams::origin`]). Daemons before 0.21.5 leave it out, and clients read that as manual.",
+      "oneOf": [
+        {
+          "description": "Forwarded by hand (\"Forward a port…\", `kybern ports forward`): it stays until it is stopped.",
+          "type": "string",
+          "const": "manual"
+        },
+        {
+          "description": "Opened to show a page in a preview: the app that showed it stops it when the page's last tab closes.",
+          "type": "string",
+          "const": "preview"
+        }
       ]
     }
   }

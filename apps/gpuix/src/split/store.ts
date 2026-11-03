@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react'
 import { canSplitPane, collectThreadPanes, findParentSplit, findThreadPane, removeThreadPane, replacePaneThread, setSplitNodeRatio, splitThreadPane, type Pane, type SplitDirection, type SplitSide } from '../shared/state/splitView.ts'
 import { createPane, closePaneState, DEFAULT_PANE, focusPane, getFocusedPaneId, getState, getPane, selectPaneThread, setPane, subscribe } from '../state.ts'
 import { load, save } from '../shell/persist.ts'
-import { CHAT, chatGroup, closeIn, moveBetween, normalize, readGroup, readMemory, release, remember, retarget, tabKey, writeMemory, type Group, type GroupRecord, type Groups, type Memory, type Tab } from '../tabs/model.ts'
+import { CHAT, chatGroup, closeIn, hasTab, moveBetween, normalize, readGroup, readMemory, release, remember, retarget, tabKey, writeMemory, type Group, type GroupRecord, type Groups, type Memory, type Tab } from '../tabs/model.ts'
 export { canSplitPane, collectThreadPanes }
 export type { Pane, SplitDirection, SplitSide }
 // One window split tree (max 2×2). Every leaf is a tab group (ADE-54): the thread it shows and that thread's tabs in this
@@ -35,6 +35,13 @@ export function useGroups() { return useSyncExternalStore(listenTabs, getGroups)
 export const subscribeTabs = listenTabs
 /** What a thread remembers (its tabs while it is off screen). */
 export const getMemory = (threadId: string): Group | undefined => memory.get(threadId)
+/** Whether a tab (by `tabKey`) of the thread is open: in its groups while it is on screen, else in what it remembers. */
+export function threadHasTab(threadId: string, key: string): boolean {
+  const own = Object.values(groups).filter((group) => group.threadId === threadId)
+  if (own.length) return own.some((group) => hasTab(group, key))
+  const remembered = memory.get(threadId)
+  return !!remembered && hasTab(remembered, key)
+}
 /** The leaves showing a thread, in tree order. */
 export const groupsOfThread = (threadId: string) => collectThreadPanes(root).filter((leaf) => groups[leaf.id]?.threadId === threadId).map((leaf) => leaf.id)
 

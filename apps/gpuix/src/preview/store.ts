@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { classifyPreviewInput, PREVIEW_REJECTED_MESSAGE } from '../../../../packages/kybern-client/src/previewTarget.ts'
 import { httpBase } from '../../../../packages/kybern-client/src/address.ts'
-import type { PreviewOpenResult, PreviewTargetInfo, PreviewProbeResult } from '../../../../packages/kybern-client/src/types.ts'
+import type { PortForwardOrigin, PreviewOpenResult, PreviewTargetInfo, PreviewProbeResult } from '../../../../packages/kybern-client/src/types.ts'
 import { getState, localClient, machineOfThreadId, threadClient } from '../state.ts'
 import { launchBrowser } from './browser.ts'
 import { openTab } from '../tabs/open.ts'
@@ -13,6 +13,7 @@ import { webHost } from '../native/webview.ts'
 import { addressPath, forwardedAddress, forwardPort, localServerOn, sourceAddress, type RemoteServer } from './remote.ts'
 import { fastAddress, fastKey, wantsFast, type FastMode } from './fast.ts'
 import { machineHub, machineRows } from '../machines/index.ts'
+import { previewUse, type PreviewUse } from './lifetime.ts'
 import { shortMachineName } from '../../../../packages/kybern-client/src/forkMachine.ts'
 export type PreviewLoad = { phase: 'idle' | 'resolving' | 'ready' | 'external' } | { phase: 'waiting'; error: 'connection_refused' | 'timed_out'; startedAt: number } | { phase: 'blocked'; header: string; value: string } | { phase: 'error'; error?: string; status?: number; message?: string } | { phase: 'not-found'; name: string } | { phase: 'relay-failed' }
 export interface Entry { target?: PreviewTargetInfo; proxy?: boolean; query?: string; address: string; url: string; frameUrl?: string; closeRelay?: () => void; title: string; ticket?: string; kind: 'file' | 'server' | 'external'; /** A dev server on another machine, shown through a forward of its port. */ machine?: RemoteServer; releaseTicket?: () => void; released?: boolean
@@ -27,6 +28,9 @@ const listeners = new Set<() => void>()
 export const previewState = (id: string) => sessions.get(id) ?? empty
 export const usePreview = (id: string) => useSyncExternalStore(l => { listeners.add(l); return () => { listeners.delete(l) } }, () => previewState(id))
 export const subscribePreviews = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } }
+/** Threads that hold browser state, and what each one's browser shows (the forwards it keeps open, `lifetime.ts`). */
+export const previewThreads = () => [...sessions.keys()]
+export const previewUses = (): PreviewUse[] => [...sessions.values()].map(previewUse)
 export const floatingPreview = () => [...sessions].find(([, s]) => s.floating && s.entries.length)?.[0] ?? null
 export const releasePreviewEntry = (entry: Entry) => { if (entry.released) return; entry.released = true; entry.closeRelay?.(); entry.releaseTicket?.() }
 const release = releasePreviewEntry
@@ -58,7 +62,9 @@ function commitEntry(id: string, entry: Entry, replace: boolean, load: PreviewLo
 const REMOTE_FILE_MESSAGE = "Files on another machine can't be previewed here yet. Ask the agent to serve the page, then open its address."
 export interface OpenOptions { proxy?: boolean; retry?: boolean; suffix?: string; /** A server on another machine; its port is forwarded to this machine first. */ machine?: RemoteServer; /** The forward exists: `raw` is its local address. */ forwarded?: boolean
   /** The forward's Fast mode; `raw` is then its `https://localhost` address and `fast.plain` the one to show and copy. */ fast?: FastMode; trust?: { sha256: string; pem: string }
-  /** Open through the thread machine's own preview ticket, not a forward (the forward could not be opened). */ ticketRoute?: boolean }
+  /** Open through the thread machine's own preview ticket, not a forward (the forward could not be opened). */ ticketRoute?: boolean
+  /** Who asks for the forward: "Forward a port…" opens a `manual` one that stays; every other open asks for a `preview` one,
+   *  which ends with the browser's last tab (ADE-128). */ origin?: PortForwardOrigin }
 /** A server of a thread that runs on another machine: forwarded to this machine over the direct route when the machine is in
  * this machine's network (keep-alive TCP, no relay hop), else `undefined` and the page goes through that machine's ticket. */
 function threadServer(id: string, raw: string, options: OpenOptions): RemoteServer | undefined {
@@ -169,13 +175,14 @@ async function openForwarded(id: string, machine: RemoteServer, launch: boolean,
     const primaryId = client.info?.machine_id ?? client.info?.environment_id
     let address = sourceAddress(machine), fast: FastMode | undefined, trust: Entry['trust']
     if (primaryId !== machine.id) {
-      const forward = await forwardPort(client, machine.id, machine.port)
+      const origin = options.origin ?? 'preview'
+      const forward = await forwardPort(client, machine.id, machine.port, origin)
       const plain = forwardedAddress(forward, machine.path, machine.scheme)
       address = plain
       if (webHost.available && machine.scheme !== 'https' && forward.https_available) {
         fast = { on: false, plain, rttMs: forward.rtt_ms }
         if (wantsFast(forward.rtt_ms, previewState(id).fastChoice?.[fastKey(machine)])) {
-          const secure = await client.call('ports.forward', { machine: machine.id, remote_port: machine.port, https: true }).catch(() => undefined)
+          const secure = await client.call('ports.forward', { machine: machine.id, remote_port: machine.port, https: true, origin }).catch(() => undefined)
           const fastUrl = secure && fastAddress(secure, machine.path)
           if (fastUrl && secure.https_certificate && secure.https_certificate_sha256) {
             address = fastUrl; fast = { ...fast, on: true }; trust = { sha256: secure.https_certificate_sha256, pem: secure.https_certificate }
@@ -197,7 +204,7 @@ async function openForwarded(id: string, machine: RemoteServer, launch: boolean,
   }
 }
 /** Show a dev server of another machine in the Browser. */
-export const openRemoteServer = (id: string, machine: RemoteServer, launch = false) => openPreview(id, `${machine.name}:${machine.port}`, false, launch, false, { machine })
+export const openRemoteServer = (id: string, machine: RemoteServer, launch = false, origin?: PortForwardOrigin) => openPreview(id, `${machine.name}:${machine.port}`, false, launch, false, { machine, ...(origin ? { origin } : {}) })
 export async function launchPreview(id: string) {
   const entry = previewState(id).entries[previewState(id).index]
   if (!entry) return
@@ -227,6 +234,18 @@ export function closePreview(id: string) {
   generations.set(id, ++nextGeneration)
   previewState(id).entries.forEach(release)
   setPreview(id, { entries: [], load: { phase: 'idle' }, loading: false, index: -1, floating: false, opened: false, busy: false, error: null, attemptedAddress: undefined, attemptedMachine: undefined, permission: undefined, bridge: undefined, pagePath: undefined, pageTitle: undefined })
+}
+
+/** The thread's last browser tab closed (ADE-128): its page, history, relays, tickets and choices (Fast, device, servers
+ *  machine) go, and late responses are dropped, so the next browser tab starts fresh at the servers list. Its web view goes
+ *  with the page (`PreviewSurface`). */
+export function disposePreview(id: string) {
+  const state = sessions.get(id)
+  if (!state) return
+  generations.set(id, ++nextGeneration)
+  state.entries.forEach(release)
+  sessions.delete(id)
+  listeners.forEach(listener => listener())
 }
 
 /** Environment lifecycle hook: clear metadata and invalidate all late responses. */

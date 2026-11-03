@@ -61,7 +61,8 @@ export function PreviewSurface({ threadId }: { threadId: string }) {
       const rect = slot?.bounds.rect, clip = slot?.bounds.clippedRect
       if (!rect || !clip || current.busy || current.load.phase !== 'ready') { if (ready.current) webHost.hide(id); visibility.current(false); return }
       visibility.current(true)
-      if (suspended.current) { const entry = suspended.current; suspended.current = null; void openPreview(threadId, currentAddress(entry, current.pagePath).full, false, false, true); return }
+      // A page suspended while hidden comes back only while it is still the browser's page: a closed tab's page never does.
+      if (suspended.current) { const entry = suspended.current; suspended.current = null; if (current.entries[current.index] === entry) { void openPreview(threadId, currentAddress(entry, current.pagePath).full, false, false, true); return } }
       if (!ready.current) return
       if (kind === 'dock') { dockedSizes.delete(threadId); dockedSizes.set(threadId, { w: rect.width, h: rect.height }); if (dockedSizes.size > 40) dockedSizes.delete(dockedSizes.keys().next().value!) }
       const logical = current.device ? { w: current.width, h: current.height } : kind === 'mini' ? dockedSizes.get(threadId) ?? { w: 512, h: 320 } : { w: rect.width, h: rect.height }

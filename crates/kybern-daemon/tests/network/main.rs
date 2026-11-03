@@ -408,7 +408,13 @@ async fn two_started_daemons_of_one_user_join_and_the_cli_lists_checks_and_remov
             axum::serve(listener, server).await.unwrap();
         });
         let forwarded = client_a
-            .call::<PortsForward>(PortsForwardParams { machine: id_b.clone(), remote_port: port, local_port: None, https: false })
+            .call::<PortsForward>(PortsForwardParams {
+                machine: id_b.clone(),
+                remote_port: port,
+                local_port: None,
+                https: false,
+                origin: Default::default(),
+            })
             .await
             .unwrap();
         assert!(forwarded.local_port > port, "the server occupies the same local port");

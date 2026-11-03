@@ -838,17 +838,79 @@ async fn echo_server() -> u16 {
     port
 }
 
+/// ADE-128: a preview's forward says so, so the app that showed it can stop it with its last tab; a forward asked for by
+/// hand stays manual, and asking by hand for a preview's forward makes it manual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forward_records_whether_a_preview_or_a_person_opened_it() {
+    let Some((_cluster, a, b)) = pair().await else { return };
+    let client = admin(&a).await;
+    let ask = |remote_port: u16, origin: PortForwardOrigin| PortsForwardParams {
+        machine: b.id(),
+        remote_port,
+        local_port: None,
+        https: false,
+        origin,
+    };
+    // The agent's preview tool opens a preview forward.
+    let agent_port = echo_server().await;
+    let hub = a.state.orchestrator.remote_hub().unwrap().clone();
+    let local = hub.forward_port(&b.id(), agent_port).await.unwrap();
+    let listed = client.call::<PortsList>(Empty {}).await.unwrap().forwards;
+    let agent = listed.iter().find(|forward| forward.local_port == local).unwrap();
+    assert_eq!(agent.origin, PortForwardOrigin::Preview);
+    // On the wire a manual forward has no `origin`, the way older daemons send every forward.
+    let preview_port = echo_server().await;
+    let preview = client.call::<PortsForward>(ask(preview_port, PortForwardOrigin::Preview)).await.unwrap();
+    assert_eq!(preview.origin, PortForwardOrigin::Preview);
+    assert_eq!(serde_json::to_value(&preview).unwrap()["origin"], "preview");
+    // A preview asking again keeps it a preview forward; asking by hand makes it manual for good.
+    assert_eq!(
+        client.call::<PortsForward>(ask(preview_port, PortForwardOrigin::Preview)).await.unwrap().origin,
+        PortForwardOrigin::Preview
+    );
+    let manual = client.call::<PortsForward>(ask(preview_port, PortForwardOrigin::Manual)).await.unwrap();
+    assert_eq!((manual.id, manual.origin), (preview.id, PortForwardOrigin::Manual));
+    assert!(serde_json::to_value(&manual).unwrap().get("origin").is_none());
+    assert_eq!(client.call::<PortsForward>(ask(preview_port, PortForwardOrigin::Preview)).await.unwrap().origin, PortForwardOrigin::Manual);
+    // A manual forward stays manual when a preview shows it, and a request without `origin` (an older client) is manual.
+    let hand_port = echo_server().await;
+    let raw: PortsForwardParams = serde_json::from_value(json!({ "machine": b.id(), "remote_port": hand_port })).unwrap();
+    assert_eq!(raw.origin, PortForwardOrigin::Manual);
+    let hand = client.call::<PortsForward>(raw).await.unwrap();
+    assert_eq!(client.call::<PortsForward>(ask(hand_port, PortForwardOrigin::Preview)).await.unwrap().origin, PortForwardOrigin::Manual);
+    // `ports.stop` ends a preview forward like any other.
+    let after = client.call::<PortsStop>(PortsStopParams { id: agent.id }).await.unwrap().forwards;
+    assert!(after.iter().all(|forward| forward.id != agent.id));
+    assert!(after.iter().any(|forward| forward.id == hand.id));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_forwarded_port_carries_tcp_both_ways_refuses_kybernd_ports_and_closes_when_idle() {
     let Some((_cluster, a, b)) = pair().await else { return };
     let remote_port = echo_server().await;
     let client = admin(&a).await;
-    let forwarded =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let forwarded = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     assert_eq!((forwarded.remote_port, forwarded.machine_id.as_str()), (remote_port, b.id().as_str()));
     // The same request returns the forward that exists.
-    let again =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let again = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     assert_eq!(again.id, forwarded.id);
     assert_eq!(client.call::<PortsList>(Empty {}).await.unwrap().forwards.len(), 1);
     // The agent's preview tool asks the hub for a forward and gets the same one.
@@ -880,8 +942,15 @@ async fn a_forwarded_port_carries_tcp_both_ways_refuses_kybernd_ports_and_closes
     // kybernd's own ports are never reachable: its listeners and the default port.
     let own = [b.primary.port(), b.state.network.listening_port().unwrap(), DEFAULT_PORT];
     for port in own {
-        let refused =
-            client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: port, local_port: None, https: false }).await;
+        let refused = client
+            .call::<PortsForward>(PortsForwardParams {
+                machine: b.id(),
+                remote_port: port,
+                local_port: None,
+                https: false,
+                origin: Default::default(),
+            })
+            .await;
         let error = refused.unwrap_err().to_string();
         assert!(error.contains("belongs to Kybern"), "port {port}: {error}");
     }
@@ -896,19 +965,43 @@ async fn a_forwarded_port_carries_tcp_both_ways_refuses_kybernd_ports_and_closes
     assert!(tokio::net::TcpStream::connect(("127.0.0.1", forwarded.local_port)).await.is_err());
 
     // A forward is stopped by hand, too; and a machine that turned ports off refuses it.
-    let second =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let second = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     let after = client.call::<PortsStop>(PortsStopParams { id: second.id }).await.unwrap();
     assert!(after.forwards.is_empty());
     b.membership().set(&format!("allow.{}.ports", b.id()), json!(false)).unwrap();
-    let refused = client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await;
+    let refused = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await;
     assert!(refused.is_err(), "{refused:?}");
 }
 
 /// One forwarded connection to b's echo server, proven open by an echo.
 async fn open_echo_connection(a: &Node, b: &Node, client: &Client, remote_port: u16) -> tokio::net::TcpStream {
-    let forwarded =
-        client.call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port, local_port: None, https: false }).await.unwrap();
+    let forwarded = client
+        .call::<PortsForward>(PortsForwardParams {
+            machine: b.id(),
+            remote_port,
+            local_port: None,
+            https: false,
+            origin: Default::default(),
+        })
+        .await
+        .unwrap();
     let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", forwarded.local_port)).await.unwrap();
     socket.write_all(b"ping").await.unwrap();
     let mut got = [0u8; 4];
@@ -1138,7 +1231,13 @@ async fn the_servers_of_another_machine_are_listed_there_and_open_through_a_forw
         // Opening it: a forward on a's machine, whose local address serves b's page.
         let on_a = admin(&a).await;
         let forwarded = on_a
-            .call::<PortsForward>(PortsForwardParams { machine: b.id(), remote_port: port, local_port: None, https: false })
+            .call::<PortsForward>(PortsForwardParams {
+                machine: b.id(),
+                remote_port: port,
+                local_port: None,
+                https: false,
+                origin: Default::default(),
+            })
             .await
             .unwrap();
         let page = reqwest::get(format!("http://127.0.0.1:{}/", forwarded.local_port)).await.unwrap();
@@ -1151,6 +1250,7 @@ async fn the_servers_of_another_machine_are_listed_there_and_open_through_a_forw
                 remote_port: port,
                 local_port: None,
                 https: false,
+                origin: Default::default(),
             })
             .await;
         assert!(unknown.is_err());

@@ -4167,7 +4167,10 @@ export interface SkillsCopyResult {
 export interface SkillCopyPayload { name: string; from_home: SkillHome; homes: SkillHome[]; replaces?: string[] }
 
 /** `https`: also serve the forward as `https://localhost:<https_port>` with HTTP/2 (Fast mode) for Kybern's web views. */
-export interface PortsForwardParams { machine: string; remote_port: number; local_port?: number | null; https?: boolean }
+export interface PortsForwardParams { machine: string; remote_port: number; local_port?: number | null; https?: boolean; origin?: PortForwardOrigin }
+/** Why a forward exists. `preview`: opened to show a page, and stopped when that page's last tab closes. Absent (every forward
+ *  of a daemon before 0.21.5) means `manual`: it stays until someone stops it. */
+export type PortForwardOrigin = 'manual' | 'preview'
 export interface PortForward {
   id: Uuid;
   machine_id: MachineId;
@@ -4190,6 +4193,8 @@ export interface PortForward {
   route_via?: PortRouteVia;
   /** A page load in progress over this forward, while it is still fetching. */
   loading?: PortLoad;
+  /** `preview` for a preview's forward; absent for a manual one. */
+  origin?: PortForwardOrigin;
 }
 export interface PortRouteVia { machine_id: MachineId; machine_name: string }
 /** What a forward has fetched for the page loading now; `expected_bytes` is what its previous complete load transferred. */

@@ -87,6 +87,8 @@ struct Forward {
     via: std::sync::Mutex<Option<(PortRouteVia, Arc<direct::Route>)>>,
     /// A route choice ([`hop::choose`]) runs.
     choosing: std::sync::atomic::AtomicBool,
+    /// Opened for a preview (stopped by the app when the page's last tab closes) until someone asks for it by hand.
+    preview: std::sync::atomic::AtomicBool,
 }
 
 impl Forward {
@@ -119,6 +121,7 @@ impl Forward {
             https_certificate_sha256: https.as_ref().map(|(_, cert)| cert.sha256.clone()),
             route_via: self.via_now(),
             loading: self.load.view(),
+            origin: if self.preview.load(Ordering::Relaxed) { PortForwardOrigin::Preview } else { PortForwardOrigin::Manual },
         }
     }
 }
@@ -205,10 +208,22 @@ pub fn stop(state: &AppState, id: Uuid) -> Result<PortsListResult, RpcError> {
 pub async fn forward(state: &AppState, params: PortsForwardParams) -> Result<PortForward, RpcError> {
     let hub = state.orchestrator.remote_hub().ok_or_else(|| RpcError::new(codes::NOT_AVAILABLE, "the machine network is not available"))?;
     let target = hub.resolve(&params.machine).map_err(|message| RpcError::new(codes::NOT_FOUND, message))?;
-    forward_to(&state.network, &state.shutdown, &target.id, &target.name, params.remote_port, params.local_port, params.https).await
+    forward_to(
+        &state.network,
+        &state.shutdown,
+        &target.id,
+        &target.name,
+        params.remote_port,
+        params.local_port,
+        params.https,
+        params.origin,
+    )
+    .await
 }
 
-/// [`forward`] for a machine already resolved; the agent's preview tool comes through here too.
+/// [`forward`] for a machine already resolved; the agent's preview tool comes through here too (`origin: Preview`).
+/// A manual ask for a forward a preview opened makes it manual: it then stays when the preview closes.
+#[allow(clippy::too_many_arguments)]
 pub async fn forward_to(
     network: &Arc<Network>,
     shutdown: &CancellationToken,
@@ -217,6 +232,7 @@ pub async fn forward_to(
     remote_port: u16,
     local_port: Option<u16>,
     https: bool,
+    origin: PortForwardOrigin,
 ) -> Result<PortForward, RpcError> {
     if remote_port == 0 {
         return Err(RpcError::invalid_params("Name a port between 1 and 65535."));
@@ -232,6 +248,9 @@ pub async fn forward_to(
         })
         .cloned();
     if let Some(existing) = existing {
+        if origin.is_manual() && existing.preview.swap(false, Ordering::Relaxed) {
+            announce(network);
+        }
         if https {
             start_https(network, &existing).await?;
         }
@@ -285,6 +304,7 @@ pub async fn forward_to(
         load: load::LoadMeter::default(),
         via: std::sync::Mutex::new(None),
         choosing: Default::default(),
+        preview: std::sync::atomic::AtomicBool::new(origin == PortForwardOrigin::Preview),
         connections: AtomicU32::new(0),
         cancel,
     });
@@ -942,6 +962,7 @@ mod tests {
             load: load::LoadMeter::default(),
             via: std::sync::Mutex::new(None),
             choosing: Default::default(),
+            preview: Default::default(),
             connections: AtomicU32::new(0),
             cancel: CancellationToken::new(),
         };

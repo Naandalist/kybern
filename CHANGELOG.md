@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.5
+
+<!-- kybern-release-title: Tidier previews -->
+<!-- kybern-release-summary: Closing a Browser tab closes its page and the port Kybern forwarded for it, and dev servers on Windows show up in the servers list. -->
+
+- Closing a Browser tab now closes its page. A new tab starts at the servers list, and a port Kybern forwarded for that page stops about 10 seconds later. Ports you forward yourself stay open.
+- Dev servers on a Windows machine show up under Servers on all machines. A Vite or Node server there often listens only on the IPv6 loopback, which Kybern did not check, so it could be opened but was never listed.
+
 ## 0.21.4
 
 <!-- kybern-release-title: Fewer password prompts, every machine up to date -->

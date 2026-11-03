@@ -120,8 +120,9 @@ fn render_forwards(forwards: &[PortForward]) {
     for forward in forwards {
         let https = forward.https_port.map(|port| format!("  https://localhost:{port} (HTTP/2)")).unwrap_or_default();
         let rtt = forward.rtt_ms.map(|ms| format!("  {ms} ms")).unwrap_or_default();
+        let preview = if forward.origin == PortForwardOrigin::Preview { "  (preview: stops when its tab closes)" } else { "" };
         println!(
-            "{}  127.0.0.1:{} -> {}:{}  {} connection(s){rtt}{https}",
+            "{}  127.0.0.1:{} -> {}:{}  {} connection(s){rtt}{https}{preview}",
             forward.id, forward.local_port, forward.machine_name, forward.remote_port, forward.connections
         );
     }
@@ -130,7 +131,9 @@ fn render_forwards(forwards: &[PortForward]) {
 pub async fn run_ports(client: &Client, cmd: PortsCmd, json: bool) -> Result<()> {
     match cmd {
         PortsCmd::Forward { machine, remote_port, local_port, https } => {
-            let forward = client.call::<PortsForward>(PortsForwardParams { machine, remote_port, local_port, https }).await?;
+            let forward = client
+                .call::<PortsForward>(PortsForwardParams { machine, remote_port, local_port, https, origin: PortForwardOrigin::Manual })
+                .await?;
             if json { println!("{}", serde_json::to_string_pretty(&forward)?) } else { render_forwards(&[forward]) }
         }
         PortsCmd::List => {

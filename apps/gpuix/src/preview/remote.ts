@@ -1,15 +1,16 @@
 // A dev server on another machine (ADE-86 U3): the Browser lists it under that machine, and opening it forwards its port to this
 // machine (`ports.forward`) and shows `http://localhost:<local>`. The page, its assets and its hot-reload WebSocket are plain
 // TCP to the webview, so nothing in the page changes.
-import type { PortForward, PortsForwardParams } from '../../../../packages/kybern-client/src/types.ts'
+import type { PortForward, PortForwardOrigin, PortsForwardParams } from '../../../../packages/kybern-client/src/types.ts'
 
 /** A server on another machine, as an entry remembers it so reload, back and forward can forward the port again. */
 export interface RemoteServer { id: string; name: string; port: number; path: string; scheme?: 'http' | 'https' }
 
 export interface ForwardClient { call(method: 'ports.forward', params: PortsForwardParams): Promise<PortForward> }
 
-/** Forward `port` of `machine`; the daemon returns the forward it already holds for the same machine and port. */
-export const forwardPort = (client: ForwardClient, machineId: string, port: number): Promise<PortForward> => client.call('ports.forward', { machine: machineId, remote_port: port })
+/** Forward `port` of `machine`; the daemon returns the forward it already holds for the same machine and port. A `preview`
+ *  forward ends with the browser tabs that show it; a manual one stays (a manual ask makes an existing preview forward manual). */
+export const forwardPort = (client: ForwardClient, machineId: string, port: number, origin: PortForwardOrigin = 'preview'): Promise<PortForward> => client.call('ports.forward', { machine: machineId, remote_port: port, origin })
 
 /** The page to show once the port is forwarded. */
 export const forwardedAddress = (forward: Pick<PortForward, 'local_port'>, path = '', scheme = 'http'): string => `${scheme}://localhost:${forward.local_port}${path.startsWith('/') || !path ? path : `/${path}`}`

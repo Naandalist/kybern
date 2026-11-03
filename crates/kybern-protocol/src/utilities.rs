@@ -206,6 +206,27 @@ pub struct PortsForwardParams {
     /// web views, which trust the certificate in [`PortForward::https_certificate`] and nothing else does.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub https: bool,
+    /// Who opens the forward: a preview opens one for its page and stops it when its last tab closes; any other forward
+    /// (the default) stays until it is stopped. Asking again for a preview forward by hand makes it manual.
+    #[serde(default, skip_serializing_if = "PortForwardOrigin::is_manual")]
+    pub origin: PortForwardOrigin,
+}
+
+/// Why a forward exists ([`PortsForwardParams::origin`]). Daemons before 0.21.5 leave it out, and clients read that as manual.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardOrigin {
+    /// Forwarded by hand ("Forward a port…", `kybern ports forward`): it stays until it is stopped.
+    #[default]
+    Manual,
+    /// Opened to show a page in a preview: the app that showed it stops it when the page's last tab closes.
+    Preview,
+}
+
+impl PortForwardOrigin {
+    pub fn is_manual(&self) -> bool {
+        *self == Self::Manual
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -241,6 +262,9 @@ pub struct PortForward {
     /// A page load in progress over this forward, while it is still fetching. Absent when nothing is loading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loading: Option<PortLoad>,
+    /// A preview's forward, stopped when the page's last tab closes; absent for a manual one.
+    #[serde(default, skip_serializing_if = "PortForwardOrigin::is_manual")]
+    pub origin: PortForwardOrigin,
 }
 
 /// The member a forward's connections are relayed through.
