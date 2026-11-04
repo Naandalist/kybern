@@ -1,5 +1,5 @@
 //! Share only reusable provider assets. Auth, sessions and plugin runtime data stay local.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use kybern_protocol::{ProviderKind, ProviderSettings, Settings};
 use std::{
     collections::BTreeMap,
@@ -46,9 +46,12 @@ pub fn prepare(provider: &ProviderSettings, kind: ProviderKind) -> Result<()> {
             continue;
         }
         for (local, global, directory) in &assets {
-            link_asset(&account_root.join(local), &shared.join(global), *directory).with_context(|| {
-                format!("Unable to share {}. Check folder permissions, then try again.", account_root.join(local).display())
-            })?;
+            // Sharing is a convenience: an account whose assets cannot be linked
+            // still signs in and runs, with its own account-local copies.
+            let local = account_root.join(local);
+            if let Err(error) = link_asset(&local, &shared.join(global), *directory) {
+                tracing::warn!(provider = %kind, local = %local.display(), error = format!("{error:#}"), "Could not share account asset; the account keeps its own copy");
+            }
         }
         if kind == ProviderKind::ClaudeCode {
             // Only booleans naming plugins are copied. Never share settings.json:
@@ -124,7 +127,22 @@ fn link_asset(local: &Path, shared: &Path, directory: bool) -> Result<()> {
     // Create the replacement first: unsupported symlinks/permissions must fail
     // before moving any account-local content.
     let replacement = parent.join(format!(".kybern-shared-{}", uuid::Uuid::now_v7()));
-    create_link(shared, &replacement, directory)?;
+    if let Err(error) = create_link(shared, &replacement, directory) {
+        if !directory && cfg!(windows) {
+            // Windows file symlinks need Developer Mode or elevation. A hard link
+            // would split at the CLI's next atomic rewrite and re-merge (with a
+            // backup) on every spawn, so the file stays account-local instead,
+            // seeded once from the shared copy. Plugin folders are still shared.
+            tracing::debug!(local = %local.display(), %error, "File link unavailable; keeping the file account-local");
+            if !present(local) && shared.is_file() {
+                std::fs::copy(shared, local)?;
+            }
+            return Ok(());
+        }
+        return Err(
+            anyhow::Error::from(error).context(format!("Unable to share {}. Check folder permissions, then try again.", local.display()))
+        );
+    }
     let result = migrate_asset(local, shared, directory, &replacement);
     if present(&replacement) {
         if cfg!(windows) && directory {
@@ -136,19 +154,33 @@ fn link_asset(local: &Path, shared: &Path, directory: bool) -> Result<()> {
     result
 }
 
-fn create_link(target: &Path, link: &Path, directory: bool) -> Result<()> {
+fn create_link(target: &Path, link: &Path, directory: bool) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let _ = directory;
-        std::os::unix::fs::symlink(target, link)?;
+        std::os::unix::fs::symlink(target, link)
     }
     #[cfg(windows)]
-    if directory {
-        std::os::windows::fs::symlink_dir(target, link)?;
-    } else {
-        std::os::windows::fs::symlink_file(target, link)?;
+    {
+        #[cfg(test)]
+        if !directory && tests::FAIL_FILE_LINKS.with(|fail| fail.get()) {
+            // ERROR_PRIVILEGE_NOT_HELD, what a stock (non-Developer Mode) user gets.
+            return Err(std::io::Error::from_raw_os_error(1314));
+        }
+        if !directory {
+            return std::os::windows::fs::symlink_file(target, link);
+        }
+        // Junctions need no privilege, unlike directory symlinks (Developer Mode
+        // or elevation). std reports them as symlinks (name-surrogate reparse
+        // points), so the is_symlink checks, canonicalize and remove_dir below
+        // treat both alike. Junctions only reach local volumes: fall back to a
+        // symlink for anything else.
+        let Err(error) = junction::create(target, link) else {
+            return Ok(());
+        };
+        let _ = std::fs::remove_dir(link);
+        std::os::windows::fs::symlink_dir(target, link).map_err(|_| error)
     }
-    Ok(())
 }
 
 fn migrate_asset(local: &Path, shared: &Path, directory: bool, replacement: &Path) -> Result<()> {
@@ -324,6 +356,11 @@ fn merge_plugin_switches(shared_path: &Path, local_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use kybern_protocol::ProviderAccount;
+    #[cfg(windows)]
+    thread_local! {
+        /// Simulates a Windows user without the symlink privilege (no Developer Mode).
+        pub(super) static FAIL_FILE_LINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
@@ -514,7 +551,9 @@ mod tests {
         let scratch = Scratch::new();
         let provider = scratch.provider();
         scratch.put("one/skills", "unexpected file");
-        assert!(prepare(&provider, ProviderKind::ClaudeCode).is_err());
+        // A failed share is logged, never a reason to refuse the account.
+        prepare(&provider, ProviderKind::ClaudeCode).unwrap();
+        assert_eq!(scratch.0.join("two/skills").canonicalize().unwrap(), scratch.0.join("home/.claude/skills").canonicalize().unwrap());
         assert_eq!(std::fs::read_to_string(scratch.0.join("one/skills")).unwrap(), "unexpected file");
         assert!(
             !std::fs::read_dir(scratch.0.join("one")).unwrap().any(|entry| entry
@@ -523,5 +562,59 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".kybern-shared-"))
         );
+    }
+
+    #[cfg(windows)]
+    fn entries_starting_with(dir: &Path, prefix: &str) -> usize {
+        std::fs::read_dir(dir).unwrap().filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().starts_with(prefix)).count()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directories_share_through_junctions() {
+        let scratch = Scratch::new();
+        let provider = scratch.provider();
+        scratch.put("one/skills/local/SKILL.md", "account one");
+        prepare(&provider, ProviderKind::Codex).unwrap();
+        for id in ["one", "two"] {
+            let skills = scratch.0.join(id).join("skills");
+            // A junction, not a directory symlink: no Developer Mode or elevation needed.
+            assert!(junction::exists(&skills).unwrap(), "{id}");
+            assert!(std::fs::symlink_metadata(&skills).unwrap().file_type().is_symlink(), "std treats junctions as links");
+            assert_eq!(skills.canonicalize().unwrap(), scratch.0.join("home/.codex/skills").canonicalize().unwrap());
+            assert!(junction::exists(scratch.0.join(id).join("plugins/cache")).unwrap());
+        }
+        assert_eq!(std::fs::read_to_string(scratch.0.join("two/skills/local/SKILL.md")).unwrap(), "account one");
+        // Idempotent: an existing junction is recognised, nothing is migrated again.
+        let backups = entries_starting_with(&scratch.0.join("one"), "skills.kybern-local-");
+        prepare(&provider, ProviderKind::Codex).unwrap();
+        assert_eq!(entries_starting_with(&scratch.0.join("one"), "skills.kybern-local-"), backups);
+        assert_eq!(entries_starting_with(&scratch.0.join("one"), ".kybern-shared-"), 0);
+        // Removing an account's junction leaves the shared skills intact.
+        std::fs::remove_dir(scratch.0.join("two/skills")).unwrap();
+        assert_eq!(std::fs::read_to_string(scratch.0.join("home/.codex/skills/local/SKILL.md")).unwrap(), "account one");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_links_fall_back_to_account_local_copies() {
+        FAIL_FILE_LINKS.with(|fail| fail.set(true));
+        let scratch = Scratch::new();
+        let provider = scratch.provider();
+        scratch.put("home/.claude/plugins/installed_plugins.json", r#"{"plugins":{"shared@m":[]}}"#);
+        scratch.put("one/plugins/installed_plugins.json", r#"{"plugins":{"local@m":[]}}"#);
+        prepare(&provider, ProviderKind::ClaudeCode).unwrap();
+        prepare(&provider, ProviderKind::ClaudeCode).unwrap();
+        FAIL_FILE_LINKS.with(|fail| fail.set(false));
+        // Folders are still shared; registry files stay per account, seeded once from the shared copy.
+        assert!(junction::exists(scratch.0.join("one/plugins/cache")).unwrap());
+        let registry = |id: &str| scratch.0.join(id).join("plugins/installed_plugins.json");
+        assert!(!std::fs::symlink_metadata(registry("two")).unwrap().file_type().is_symlink());
+        assert!(read_json(&registry("two")).unwrap()["plugins"].get("shared@m").is_some());
+        assert!(read_json(&registry("one")).unwrap()["plugins"].get("local@m").is_some());
+        assert!(read_json(&registry("one")).unwrap()["plugins"].get("shared@m").is_none());
+        assert!(!scratch.0.join("one/plugins/known_marketplaces.json").exists());
+        assert_eq!(entries_starting_with(&scratch.0.join("one/plugins"), "installed_plugins.json.kybern-local-"), 0);
+        assert_eq!(entries_starting_with(&scratch.0.join("one/plugins"), ".kybern-shared-"), 0);
     }
 }

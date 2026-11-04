@@ -141,7 +141,8 @@ export function Account({ close, provider, instance }: { close: () => void; prov
       toast.success(`${shownName.trim()} added`)
       return true
     } catch (error) {
-      setFinishError(`${errorText(error)} Check the name, then try again.`)
+      // Daemon errors already say what to do next (the name check says "Enter a name…").
+      setFinishError(errorText(error))
       return false
     } finally {
       setFinishing(false)
