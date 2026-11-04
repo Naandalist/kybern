@@ -1,6 +1,5 @@
 // The terminal sheet (SPEC §3f): rises from the window's bottom edge with the install or sign-in command typed and never run.
 // Return runs it. When the program ends, "Close and check" closes the sheet and checks that agent again.
-import { useWindowSize } from '@gpuix/react'
 import { Button } from '../kit/Button.tsx'
 import { GlassEdge } from '../kit/GlassEdge.tsx'
 import { Kbd } from '../kit/Kbd.tsx'
@@ -8,6 +7,7 @@ import { Icon } from '../icons.tsx'
 import { EASE } from '../motion/tokens.ts'
 import { Presence } from '../motion/Presence.tsx'
 import { N } from '../nav/glyphs.ts'
+import { useNativeWindowSize } from '../native/layout-hooks.ts'
 import { PATCHED_NATIVE } from '../native/local-build.ts'
 import { frostBackdrop, frostFill, useGlass } from '../platform/glass.ts'
 import { Screen as TerminalScreen } from '../terminal/Terminal.tsx'
@@ -40,7 +40,9 @@ export function TerminalSheet() {
 export function TerminalSheetView({ sheet, onClose, onExit, testId = 'agent-sheet' }: { sheet: TerminalSheetState | null; onClose: () => void; onExit: () => void; testId?: string }) {
   const t = useTheme()
   const g = useGlass()
-  const size = useWindowSize({ intervalMs: 300 })
+  // Resize events, not a poll: App.tsx mounts the gh sheet for the window's life, and off macOS every poll is a waited
+  // UI-thread call (0.44 per key while typing, #229's smoke).
+  const size = useNativeWindowSize()
   const width = Math.min(620, (size?.width ?? 1200) - 40)
   const enter = PATCHED_NATIVE
     ? REDUCED_MOTION
