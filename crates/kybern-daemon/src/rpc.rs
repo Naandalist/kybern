@@ -1304,7 +1304,7 @@ async fn dispatch_part_14(state: &AppState, _ctx: &ConnectionCtx, method: &str, 
             }
             let cwd = std::path::PathBuf::from(&t.cwd);
             if !crate::github::gh_available().await {
-                return Err(RpcError::new(codes::PROVIDER_UNAVAILABLE, "GitHub CLI (gh) is not installed or not logged in"));
+                return Err(gh_missing());
             }
             if p.commit_first && crate::github::has_changes(&cwd).await {
                 let message = state.orchestrator.generate_commit_message(&t).await.map_err(provider_err)?;
@@ -1322,12 +1322,12 @@ async fn dispatch_part_14(state: &AppState, _ctx: &ConnectionCtx, method: &str, 
                     (title.unwrap_or(gt), body.unwrap_or(gb))
                 }
             };
-            ok(crate::github::pr_create(&cwd, &title, &body, &base, p.draft).await.map_err(bad)?)
+            ok(crate::github::pr_create(&cwd, &title, &body, &base, p.draft).await.map_err(gh_bad)?)
         }
         PrCreateGroup::NAME => {
             let p: PrCreateGroupParams = parse(params)?;
             if !crate::github::gh_available().await {
-                return Err(RpcError::new(codes::PROVIDER_UNAVAILABLE, "GitHub CLI (gh) is not installed or not logged in"));
+                return Err(gh_missing());
             }
             ok(state.orchestrator.pr_create_group(p, "gh").await.map_err(bad)?)
         }
@@ -1338,7 +1338,7 @@ async fn dispatch_part_14(state: &AppState, _ctx: &ConnectionCtx, method: &str, 
                 return ok(state.orchestrator.group_pr_list(&project, &p.state, p.limit, "gh").await);
             }
             ok(PrListResult {
-                pull_requests: crate::github::pr_list(std::path::Path::new(&project.path), &p.state, p.limit).await.map_err(bad)?,
+                pull_requests: crate::github::pr_list(std::path::Path::new(&project.path), &p.state, p.limit).await.map_err(gh_bad)?,
                 repos: Vec::new(),
             })
         }
@@ -1356,7 +1356,7 @@ async fn dispatch_part_15(state: &AppState, ctx: &ConnectionCtx, method: &str, s
             let p: PrDetailParams = parse(params)?;
             let project = state.store.project_get(p.project_id).map_err(internal)?.ok_or_else(|| RpcError::not_found("project"))?;
             let dir = pr_dir(&project, p.repo.as_deref())?;
-            let mut detail = crate::github_review::detail(&dir, p.number).await.map_err(bad)?;
+            let mut detail = crate::github_review::detail(&dir, p.number).await.map_err(gh_bad)?;
             // Group calls always name their member (`pr_dir`); single projects stay untagged.
             detail.pull_request.repo = p.repo;
             ok(detail)
@@ -1365,7 +1365,7 @@ async fn dispatch_part_15(state: &AppState, ctx: &ConnectionCtx, method: &str, s
             let p: PrPageParams = parse(params)?;
             let project = state.store.project_get(p.project_id).map_err(internal)?.ok_or_else(|| RpcError::not_found("project"))?;
             let dir = pr_dir(&project, p.repo.as_deref())?;
-            ok(crate::github_review::page(&dir, &p).await.map_err(bad)?)
+            ok(crate::github_review::page(&dir, &p).await.map_err(gh_bad)?)
         }
         PrAction::NAME => {
             let p: PrActionParams = parse(params)?;
@@ -1379,7 +1379,7 @@ async fn dispatch_part_15(state: &AppState, ctx: &ConnectionCtx, method: &str, s
                 }
                 state.orchestrator.pr_checkout(&p).await.map_err(bad)?;
             } else {
-                crate::github_review::action(&dir, &p).await.map_err(bad)?;
+                crate::github_review::action(&dir, &p).await.map_err(gh_bad)?;
             }
             ok(Empty {})
         }
@@ -1634,33 +1634,33 @@ pub(crate) async fn actions_call(state: &AppState, gh: &str, method: &str, param
     match method {
         ActionsRuns::NAME => {
             let p: ActionsRunsParams = parse(params)?;
-            ok(actions::runs(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(bad)?)
+            ok(actions::runs(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(gh_bad)?)
         }
         ActionsRun::NAME => {
             let p: ActionsRunParams = parse(params)?;
-            ok(actions::run_detail(gh, &dir(state, p.project_id, p.repo.as_deref())?, p.run_id, p.attempt).await.map_err(bad)?)
+            ok(actions::run_detail(gh, &dir(state, p.project_id, p.repo.as_deref())?, p.run_id, p.attempt).await.map_err(gh_bad)?)
         }
         ActionsLog::NAME => {
             let p: ActionsLogParams = parse(params)?;
             let cache = state.paths.root.join("cache").join("actions-logs");
-            ok(actions::log(gh, &dir(state, p.project_id, p.repo.as_deref())?, &cache, &p).await.map_err(bad)?)
+            ok(actions::log(gh, &dir(state, p.project_id, p.repo.as_deref())?, &cache, &p).await.map_err(gh_bad)?)
         }
         ActionsWorkflows::NAME => {
             let p: ActionsWorkflowsParams = parse(params)?;
-            ok(actions::workflows(gh, &dir(state, p.project_id, p.repo.as_deref())?).await.map_err(bad)?)
+            ok(actions::workflows(gh, &dir(state, p.project_id, p.repo.as_deref())?).await.map_err(gh_bad)?)
         }
         ActionsWorkflow::NAME => {
             let p: ActionsWorkflowParams = parse(params)?;
-            ok(actions::workflow(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(bad)?)
+            ok(actions::workflow(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(gh_bad)?)
         }
         ActionsAction::NAME => {
             let p: ActionsActionParams = parse(params)?;
-            actions::action(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(bad)?;
+            actions::action(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(gh_bad)?;
             ok(Empty {})
         }
         ActionsDispatch::NAME => {
             let p: ActionsDispatchParams = parse(params)?;
-            actions::dispatch(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(bad)?;
+            actions::dispatch(gh, &dir(state, p.project_id, p.repo.as_deref())?, &p).await.map_err(gh_bad)?;
             ok(Empty {})
         }
         _ => Err(RpcError::method_not_found(method)),
@@ -1722,6 +1722,30 @@ fn write_error(e: anyhow::Error) -> RpcError {
 }
 
 /// User-facing failures from the orchestrator: not found, busy, bad input.
+/// A `gh` call's failure: `friendly`'s words, with the `Problem` a client recovers by as `data.problem`.
+fn gh_bad(e: anyhow::Error) -> RpcError {
+    match crate::github::friendly_problem(e) {
+        (message, Some(problem)) => gh_error(message, &problem),
+        (message, None) => bad(anyhow::anyhow!(message)),
+    }
+}
+
+fn gh_error(message: String, problem: &kybern_protocol::rpc::Problem) -> RpcError {
+    use kybern_protocol::rpc::ProblemKind;
+    let code = match problem.kind {
+        ProblemKind::ToolMissing | ProblemKind::SignedOut => codes::PROVIDER_UNAVAILABLE,
+        ProblemKind::NotFound => codes::NOT_FOUND,
+        _ => codes::INVALID_PARAMS,
+    };
+    RpcError::new(code, message).with_problem(problem)
+}
+
+/// `gh_available` said no.
+fn gh_missing() -> RpcError {
+    let problem = crate::github::gh_problem(crate::github::GhErrorKind::GhMissing, "gh --version: program not found".into());
+    gh_error(crate::github::GH_MISSING.to_string(), &problem)
+}
+
 fn bad(e: anyhow::Error) -> RpcError {
     let msg = e.to_string();
     if msg.contains("not found") {
@@ -1794,4 +1818,33 @@ fn pending_request_kinds(store: &kybern_store::Store) -> anyhow::Result<(Pending
         }
     }
     Ok((own, below))
+}
+
+#[cfg(test)]
+mod gh_error_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_gh_reaches_the_client_as_a_problem() {
+        let error = gh_bad(anyhow::anyhow!("run gh: program not found"));
+        assert_eq!(error.code, codes::PROVIDER_UNAVAILABLE);
+        assert!(error.message.starts_with("The GitHub CLI (gh) isn't installed."), "{}", error.message);
+        let problem = &error.data.as_ref().unwrap()["problem"];
+        assert_eq!(problem["kind"], "tool_missing");
+        assert_eq!(problem["subject"], "gh");
+        assert_eq!(problem["action"]["id"], "install_tool");
+        assert_eq!(problem["action"]["params"]["tool"], "gh");
+        assert_eq!(problem["secondary"]["id"], "retry");
+        assert_eq!(problem["detail"], "run gh: program not found");
+        assert_eq!(problem["retryable"], true);
+        assert_eq!(gh_missing().data.unwrap()["problem"]["kind"], "tool_missing");
+    }
+
+    #[test]
+    fn other_gh_errors_stay_plain() {
+        let error = gh_bad(anyhow::anyhow!("gh pr list: boom"));
+        assert_eq!((error.message.as_str(), error.data), ("gh pr list: boom", None));
+        let signed_out = gh_bad(anyhow::anyhow!("gh pr list: not logged in to any GitHub hosts"));
+        assert_eq!(signed_out.data.unwrap()["problem"]["action"]["id"], "sign_in");
+    }
 }

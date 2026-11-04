@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { asError } from '../../../../../packages/kybern-client/src/problem.ts'
 import type { PrTimelineEvent } from '../../../../../packages/kybern-client/src/types.ts'
 import { useApp } from '../../state.ts'
 import { prClient } from '../client.ts'
@@ -12,7 +13,7 @@ const remember = (state: State) => {
   while (remembered.size > 8) remembered.delete(remembered.keys().next().value!)
 }
 
-interface State { key: string; events: PrTimelineEvent[]; cursor?: string; page: number; hasMore: boolean; loading: boolean; error?: string }
+interface State { key: string; events: PrTimelineEvent[]; cursor?: string; page: number; hasMore: boolean; loading: boolean; error?: Error }
 
 /**
  * The pull request's history, oldest first, one cursor page (30) at a time. A new key (another pull request, a refresh
@@ -34,7 +35,7 @@ export function useTimeline(projectId: string, number: number, repo: string | un
     if (!client) return
     void client.call('github.pr.page', { project_id: projectId, number, kind: 'timeline', page, ...(cursor ? { cursor } : {}), ...(repo ? { repo } : {}) }).then(result => {
       setState(s => s.key !== forKey ? s : { key: forKey, events: mergeTimeline(page === 1 ? [] : s.events, result.timeline ?? []), ...(result.next_cursor ? { cursor: result.next_cursor } : {}), page, hasMore: !!result.has_more && !!result.next_cursor, loading: false })
-    }, e => { setState(s => s.key !== forKey ? s : { ...s, loading: false, error: String(e) }) })
+    }, e => { setState(s => s.key !== forKey ? s : { ...s, loading: false, error: asError(e) }) })
   }, [projectId, number, repo, client])
   useEffect(() => {
     if (!head || connection !== 'open') return

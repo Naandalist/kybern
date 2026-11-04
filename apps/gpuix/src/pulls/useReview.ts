@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { asError } from '../../../../packages/kybern-client/src/problem.ts'
 import { afterReviewSubmission, assertReviewDraftHead, bindReviewDraft, readReviewDraft, repairReviewPrompt, type ReviewDraft } from '@/state/prReviewModel'
 import type { MergeMethod, PrActionKind, PrDetailResult, PrPageKind, PrPageResult } from '../../../../packages/kybern-client/src/types.ts'
 import { load, save as persist } from './persist.ts'
@@ -20,7 +21,7 @@ export function useReview(projectId: string, number: number, repo?: string) {
   const detailKey = `${projectId}/${repo ?? ''}:${number}`
   const [detail, setDetail] = useState<PrDetailResult | null>(() => details.get(detailKey) ?? null)
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | null>(null)
   const [revision, refresh] = useState(0)
   const [draft, setDraft] = useState(() => readReviewDraft(load(key, null)))
   const draftRef = useRef(draft)
@@ -48,7 +49,7 @@ export function useReview(projectId: string, number: number, repo?: string) {
         while (details.size > 8) details.delete(details.keys().next().value!)
         setDetail(value); setError(null); setLoading(false)
       }
-    }, e => { if (!canceled) { setError(String(e)); setLoading(false) } })
+    }, e => { if (!canceled) { setError(asError(e)); setLoading(false) } })
     return () => { canceled = true }
   }, [projectId, number, repo, revision, connection, client, detailKey])
   /** `options`: `merge` and `enable_auto_merge` take a method; `merge` may be an admin merge ("Merge anyway"). */

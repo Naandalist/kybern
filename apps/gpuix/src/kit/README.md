@@ -146,6 +146,9 @@ All take `testId` and (except the popups) `style`.
 on one native tween, attached to the window like `background-attachment: fixed`), `Spinner` (`size` 24, `color`, `spinning`),
 `Empty` + `EmptyHeader`, `EmptyMedia` (`variant` default/icon, `icon`), `EmptyTitle`, `EmptyDescription`, `EmptyContent`
 (the header children rise in together, 12 px, 500 ms; `play={false}` for none).
+`ProblemState` (`title`, `body`, `primary`, `secondary`, `detail`): a page that couldn't load, in plain words, with the
+action that fixes it and the technical text behind "Show details" and a copy button, never as the headline. The pull
+request surfaces map an RPC error's `data.problem` to it (`pulls/PrStates.tsx`, copy in `pulls/problemCopy.ts`).
 
 ## Resize (`Resize.tsx`)
 

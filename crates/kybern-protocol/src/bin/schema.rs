@@ -26,6 +26,7 @@ fn main() {
     add::<RpcResponse>(&mut types, "RpcResponse");
     add::<RpcNotification>(&mut types, "RpcNotification");
     add::<RpcError>(&mut types, "RpcError");
+    add::<Problem>(&mut types, "Problem");
     add::<ThreadEvent>(&mut types, "ThreadEvent");
     add::<EventNotification>(&mut types, "EventNotification");
     add::<EventsReadyNotification>(&mut types, "EventsReadyNotification");

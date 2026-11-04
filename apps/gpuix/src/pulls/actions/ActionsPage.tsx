@@ -3,6 +3,7 @@
 // every branch, latest push first, with its pull request), filtered by status and workflow (read from GitHub) and by branch
 // (as you type); the selected run, or the form that starts a workflow, beside it. Lists refresh every 10 s while a run in them is in progress, every 60 s otherwise, and not at
 // all while the window is hidden (`refreshDelay`). Every list read also feeds the finished-run notices (`watch.ts`).
+import { asError } from '../../../../../packages/kybern-client/src/problem.ts'
 import { PlayIcon } from '@hugeicons/core-free-icons'
 import { useGpuix } from '@gpuix/react'
 import { Profiler, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -95,7 +96,7 @@ function ActionsTab() {
   const [branch, setBranch] = useState('')
   const [limit, setLimit] = useState(PAGE)
   const [revision, refresh] = useState(0)
-  const [data, setData] = useState<{ key: string; result?: ActionsRunsResult; error?: string } | null>(null)
+  const [data, setData] = useState<{ key: string; result?: ActionsRunsResult; error?: Error } | null>(null)
   const [pending, setPending] = useState(false)
   const [workflows, setWorkflows] = useState<{ key: string; result: ActionsWorkflowsResult } | null>(null)
   const [current, setCurrent] = useState<{ key: string; branch: string | null } | null>(null)
@@ -147,7 +148,7 @@ function ActionsTab() {
       if (canceled) return
       setData({ key: loadKey, result }); setPending(false)
       observe(choice, result.runs, result.viewer, ownBranch)
-    }, e => { if (!canceled) { setData({ key: loadKey, error: String(e) }); setPending(false) } })
+    }, e => { if (!canceled) { setData({ key: loadKey, error: asError(e) }); setPending(false) } })
     return () => { canceled = true }
   }, [loadKey, revision, connected])
 
@@ -214,7 +215,7 @@ function ActionsTab() {
         </div>
       </div>
       <virtual-list {...PR_SCROLL_LAYOUT} testId="actions-list" estimatedItemHeight={96} style={{ flexGrow: 1, minHeight: 0, paddingTop: 2, paddingBottom: 12 }}>
-        {failure ? <div key="error" style={{ padding: 20 }}><Problem error={failure} refresh={() => refresh(n => n + 1)} /></div>
+        {failure ? <div key="error" style={{ padding: 20 }}><Problem error={failure} projectId={choice?.projectId} noun="workflow runs" refresh={() => refresh(n => n + 1)} /></div>
           : !shown ? <div key="loading" style={{ padding: 24 }}><PrLoading label="Loading workflow runs…" kind="list" rows={6} /></div>
           : <>
             {!main && branches.length === 0 && <div key="empty" style={{ ...column, gap: 10, padding: 24, paddingTop: 64 }}>

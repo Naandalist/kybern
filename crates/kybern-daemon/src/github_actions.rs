@@ -4,7 +4,6 @@
 //! A finished job's log never changes, so it is streamed once from `gh api` into a file under the
 //! data folder's cache and pages are read from there: neither the daemon nor a client ever holds a
 //! whole log. A sparse line index (every `CHECKPOINT` lines) keeps a page read short.
-use kybern_protocol::process::NoWindow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -13,7 +12,6 @@ use anyhow::{Context, Result, anyhow, ensure};
 use kybern_protocol::methods::*;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 
 use crate::github::run;
 
@@ -45,27 +43,7 @@ fn num(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or_default()
 }
 
-/// `gh`'s failure in words that say what to do next; the original text follows for the details.
-pub(crate) fn friendly(error: anyhow::Error) -> anyhow::Error {
-    let raw = format!("{error:#}");
-    let lower = raw.to_ascii_lowercase();
-    let lead = if lower.contains("program not found") || lower.contains("no such file") || lower.contains("run gh:") {
-        "The GitHub CLI (gh) isn't installed. Install it from cli.github.com, run gh auth login, and try again."
-    } else if lower.contains("gh auth login") || lower.contains("not logged in") || lower.contains("http 401") {
-        "gh isn't signed in. Run gh auth login and try again."
-    } else if lower.contains("workflow_dispatch") {
-        "This workflow can't be started by hand: its file has no workflow_dispatch trigger on that branch."
-    } else if lower.contains("http 403") {
-        "GitHub refused this: the signed-in gh account can't do it in this repository. Check its access and try again."
-    } else if lower.contains("http 404") {
-        "GitHub couldn't find this. Check that origin points at GitHub and that the gh account can see the repository."
-    } else if lower.contains("none of the git remotes") || lower.contains("no git remotes") || lower.contains("not a git repository") {
-        "This project has no GitHub remote. Add one, then try again."
-    } else {
-        return error;
-    };
-    anyhow!("{lead} ({})", raw.lines().last().unwrap_or_default().trim())
-}
+pub(crate) use crate::github::friendly;
 
 /// A workflow id, or a file name such as `ci.yml`: the only forms GitHub's workflow routes take.
 fn validate_workflow(workflow: &str) -> Result<&str> {
@@ -760,16 +738,8 @@ async fn prune(dir: &Path) {
 
 /// Download one finished job's log into `path`, streaming `gh`'s output.
 async fn download(gh: &str, cwd: &Path, job_id: u64, path: &Path) -> Result<LogIndex> {
-    let mut child = Command::new(gh)
-        .no_window()
-        .current_dir(cwd)
-        .args(["api", &format!("repos/{{owner}}/{{repo}}/actions/jobs/{job_id}/logs")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("run {gh}"))?;
+    let endpoint = format!("repos/{{owner}}/{{repo}}/actions/jobs/{job_id}/logs");
+    let mut child = crate::github::spawn(cwd, gh, &["api", &endpoint], std::process::Stdio::null())?;
     let stdout = child.stdout.take().context("gh stdout")?;
     let mut stderr = child.stderr.take().context("gh stderr")?;
     let errors = tokio::spawn(async move {

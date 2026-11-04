@@ -15,6 +15,7 @@ import { refreshAccounts, useAccounts } from '../usage/accounts.ts'
 import { AGENT_NAMES, AGENT_ORDER, agentCommand, applyOverride, deriveAgent, pickDefault, type AgentOverride, type AgentState } from './model.ts'
 import { announce, defaultAgentAnnouncement } from './announce.ts'
 import { createStore } from './store.ts'
+import { openTypedTerminal } from './typedTerminal.ts'
 
 export type SheetMode = 'install' | 'login' | 'update'
 export interface Sheet {
@@ -217,8 +218,6 @@ function followCursor() {
 
 // ─── The terminal sheet ───────────────────────────────────────────────────
 
-const b64 = (text: string) => Buffer.from(text).toString('base64')
-
 /** Open the sheet: a shell with the command typed and never run. Return runs it; nothing runs before. */
 export async function openSheet(kind: ProviderKind, mode: SheetMode) {
   const client = getClient()
@@ -229,28 +228,9 @@ export async function openSheet(kind: ProviderKind, mode: SheetMode) {
   agents.set({ popover: null, sheet: { kind, mode, title: mode === 'login' ? `Sign in to ${name}` : mode === 'update' ? `Update ${name}` : `Install ${name}`, command, info: null, exited: false, error: null } })
   setOverride(kind, 'installing')
   try {
-    const info = await client.call('terminals.create', { cols: 100, rows: 14, cwd: activeEnvironment().local ? homedir() : '/' })
-    if (agents.get().sheet?.kind !== kind) { void client.call('terminals.close', { terminal_id: info.id }).catch(() => {}); return }
-    agents.set((s) => ({ sheet: s.sheet ? { ...s.sheet, info } : s.sheet }))
-    // Type it the way a person would, once the shell has drawn its prompt (typed earlier, the tty would echo it twice).
-    let i = 0
-    let started = false
-    const type = () => {
-      const live = agents.get().sheet
-      if (!live?.info || live.info.id !== info.id || i >= command.length) return
-      const chunk = command.slice(i, i + 2)
-      i += chunk.length
-      void client.call('terminals.input', { terminal_id: info.id, data: b64(chunk) }).catch(() => {})
-      later(22, type)
-    }
-    const start = () => { if (started) return; started = true; off(); type() }
-    let quiet: ReturnType<typeof setTimeout> | undefined
-    const off = client.onNotification('terminal.output', (params) => {
-      if ((params as { terminal_id?: string }).terminal_id !== info.id) return
-      clearTimeout(quiet)
-      quiet = setTimeout(start, 350)
-    })
-    later(3000, start)
+    const wanted = (info: TerminalInfo) => { const live = agents.get().sheet; return live?.kind === kind && (!live.info || live.info.id === info.id) }
+    const info = await openTypedTerminal(client, command, { cwd: activeEnvironment().local ? homedir() : '/', wanted, later })
+    if (info) agents.set((s) => ({ sheet: s.sheet ? { ...s.sheet, info } : s.sheet }))
   } catch (error) {
     agents.set((s) => ({ sheet: s.sheet ? { ...s.sheet, error: error instanceof Error ? error.message : String(error) } : s.sheet }))
   }

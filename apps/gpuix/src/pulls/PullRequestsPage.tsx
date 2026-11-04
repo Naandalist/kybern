@@ -8,7 +8,8 @@ import { N } from '../nav/glyphs.ts'
 import { useGpuix, type PublicInstance } from '@gpuix/react'
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { mapWithConcurrency } from '@/lib/workload'
-import { classifyPrError } from '@/state/prReviewModel'
+import { classifyPrError, ghProblem, isGhSetup } from '@/state/prReviewModel'
+import { errorMessage } from '../../../../packages/kybern-client/src/problem.ts'
 import type { Project, PullRequest } from '../../../../packages/kybern-client/src/types.ts'
 import { useApp } from '../state.ts'
 import { prCall } from './client.ts'
@@ -34,10 +35,12 @@ import { PrLoading, Problem } from './PrStates.tsx'
 import { SwapOnChange } from '../motion/kit.tsx'
 import { isPrimaryNotAltGr } from '../platform/keys.ts'
 
-interface Loaded { rows: PullRequest[]; errors: string[] }
+/** One project or member that didn't list: `text` names it for the partial list, `error` keeps its `Problem`. */
+interface LoadError { text: string; error: unknown; projectId: string }
+interface Loaded { rows: PullRequest[]; errors: LoadError[] }
 type Filter = 'open' | 'merged' | 'closed' | 'all'
 const FILTERS = [['open', 'Open'], ['merged', 'Merged'], ['closed', 'Closed'], ['all', 'All']] as const
-const cache = new Map<string, { until: number; rows: PullRequest[]; errors: string[] }>()
+const cache = new Map<string, { until: number; rows: PullRequest[]; errors: LoadError[] }>()
 let lastSelection: { project: Project; number: number; repo?: string } | null = null
 /** A group project's members can repeat a pull request number. */
 const refOf = (projectId: string, number: number, repo?: string) => `${projectId}${repo ? `/${repo}` : ''}:${number}`
@@ -62,7 +65,7 @@ function PullRequestsList() {
   const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query)
   const [revision, refresh] = useState(0)
-  const [loaded, setLoaded] = useState<{ scope: string; rows: Row[]; errors: string[] } | null>(null)
+  const [loaded, setLoaded] = useState<{ scope: string; rows: Row[]; errors: LoadError[] } | null>(null)
   const [pending, setPending] = useState(false)
   const [selection, setSelection] = useState(lastSelection)
   const search = useRef<PublicInstance | null>(null)
@@ -91,7 +94,7 @@ function PullRequestsList() {
     let canceled = false
     setPending(true)
     void mapWithConcurrency(targets, 3, async project => {
-      if (canceled) return { rows: [] as Row[], errors: [] as string[] }
+      if (canceled) return { rows: [] as Row[], errors: [] as LoadError[] }
       try {
         const key = `${project.id}:${filter}`
         const cached = cache.get(key)
@@ -100,21 +103,21 @@ function PullRequestsList() {
         else {
           const result = await prCall(project.id, 'github.pr.list', { project_id: project.id, state: filter, limit: 30 })
           // A group project's members that couldn't be listed don't hide the others.
-          const errors = (result.repos ?? []).flatMap(m => m.error && !m.skipped && classifyPrError(m.error) !== 'no-remote' ? [`${project.name} / ${m.name}: ${m.error}`] : [])
+          const errors = (result.repos ?? []).flatMap(m => m.error && !m.skipped && classifyPrError(m.error) !== 'no-remote' ? [{ text: `${project.name} / ${m.name}: ${m.error}`, error: { message: m.error, data: m.problem ? { problem: m.problem } : undefined }, projectId: project.id }] : [])
           loaded = { rows: result.pull_requests, errors }
         }
         cache.set(key, { until: Date.now() + 30_000, ...loaded })
         if (cache.size > 100) cache.delete(cache.keys().next().value!)
         return { rows: loaded.rows.map(pr => ({ pr, project })), errors: loaded.errors }
       } catch (e) {
-        const message = String(e)
-        return { rows: [] as Row[], errors: classifyPrError(message) === 'no-remote' ? [] : [`${project.name}: ${message}`] }
+        const message = errorMessage(e)
+        return { rows: [] as Row[], errors: classifyPrError(message) === 'no-remote' ? [] : [{ text: `${project.name}: ${message}`, error: e, projectId: project.id }] }
       }
     }).then(results => {
       if (canceled) return
       setLoaded({ scope: loadScope, rows: results.flatMap(r => r.rows).sort((a, b) => b.pr.updated_at.localeCompare(a.pr.updated_at)), errors: results.flatMap(r => r.errors) })
       setPending(false)
-    }, e => { if (!canceled) { setLoaded({ scope: loadScope, rows: [], errors: [String(e)] }); setPending(false) } })
+    }, e => { if (!canceled) { setLoaded({ scope: loadScope, rows: [], errors: [{ text: errorMessage(e), error: e, projectId: targets[0]?.id ?? '' }] }); setPending(false) } })
     return () => { canceled = true }
   }, [loadScope, filter, revision, connected])
   const data = loaded?.scope === loadScope ? loaded : null
@@ -143,7 +146,7 @@ function PullRequestsList() {
   const stateWord = filter === 'all' ? '' : `${filter} `
   // A gh problem replaces the list only when nothing listed: one member repository
   // signed out of an organization must not hide the others' pull requests.
-  const failure = data?.rows.length ? undefined : data?.errors.find(e => ['gh-missing', 'gh-auth'].includes(classifyPrError(e)))
+  const failure = data?.rows.length ? undefined : data?.errors.find(e => isGhSetup(ghProblem(e.error))) ?? (data?.errors.length === 1 ? data.errors[0] : undefined)
   return <div {...PR_SCROLL_LAYOUT} testId="page-pulls" onMouseMove={measure} style={{ display: 'flex', flexGrow: 1, minHeight: 0, minWidth: 0 }}>
     {(wide || !selection) && <div style={{ ...column, width: wide ? list.width : '100%', flexShrink: 0, position: 'relative', borderRightWidth: wide ? 1 : 0, borderColor: t.border }}>
       <PullsHeader><ProjectFilter projects={projects.filter(hasPullRequests)} scope={scope} remembered={remembered} counts={counts} onChange={changeScope} compact={wide && list.width < HEADER_COMPACT_PULLS} /><IconButton testId="pr-refresh" icon={N.refresh} label="Refresh" disabled={pending} onClick={() => refresh(n => n + 1)}><SwapOnChange kind="icon" active={pending ? 'busy' : 'idle'} style={{ width: 16, height: 16 }}>{pending ? <SpinIcon testId="pr-refresh-spinner" source={N.refresh} size={16} color={t.iconSecondary}/> : <Icon source={N.refresh} size={16} color={t.iconSecondary}/>}</SwapOnChange></IconButton></PullsHeader>
@@ -155,8 +158,8 @@ function PullRequestsList() {
         </div>
       </div>
       <virtual-list {...PR_SCROLL_LAYOUT} testId="pr-list" estimatedItemHeight={72} style={{ flexGrow: 1, minHeight: 0 }}>
-        {failure ? <div key="gh-error" style={{ padding: 20 }}><Problem error={failure} refresh={() => refresh(n => n + 1)} /></div> : !data ? <div key="loading" style={{ padding: 24 }}><PrLoading label="Loading pull requests…" kind="list" rows={5} /></div> : <>
-          {data.errors.length > 0 && <div key="errors" style={{ padding: 12 }}><Problem error={data.errors.join('\n')} partial={data.rows.length > 0} refresh={() => refresh(n => n + 1)} /></div>}
+        {failure ? <div key="gh-error" style={{ padding: 20 }}><Problem error={failure.error} projectId={failure.projectId} refresh={() => refresh(n => n + 1)} /></div> : !data ? <div key="loading" style={{ padding: 24 }}><PrLoading label="Loading pull requests…" kind="list" rows={5} /></div> : <>
+          {data.errors.length > 0 && <div key="errors" style={{ padding: 12 }}><Problem error={data.errors.map(e => e.text).join('\n')} partial={data.rows.length > 0} refresh={() => refresh(n => n + 1)} /></div>}
           {flat.length === 0 && <div key="empty" style={{ ...column, gap: 10, padding: 24, paddingTop: 64 }}><Label color={t.text} size={16} weight={500}>{!targets.length ? 'No GitHub projects' : query.trim() ? `No results for “${query.trim()}”` : `No ${stateWord}pull requests`}</Label><Label color={t.textSecondary} size={13}>{!targets.length ? 'Add a project with a GitHub remote to review its pull requests here.' : query.trim() ? '' : `Pull requests from ${scope.project ? targets[0]?.name : 'your GitHub projects'} appear here.`}</Label>{query.trim() && <Button size="sm" style={{ alignSelf: 'flex-start' }} onClick={() => setQuery('')}>Clear search</Button>}</div>}
           {groups.flatMap(group => [
             ...(group.label ? [<div key={`group-${group.group ?? 'done'}`} testId={`pr-group-${group.group ?? 'done'}`} style={{ ...row, gap: 6, height: 30, paddingLeft: 16, paddingRight: 8, paddingTop: 8 }}><Label color={t.textSecondary} size={12} lineHeight={16} weight={500}>{group.label}</Label><Label color={t.textTertiary} size={12} lineHeight={16}>{String(group.rows.length)}</Label></div>] : []),

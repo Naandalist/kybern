@@ -62,6 +62,39 @@ export interface RpcError {
   data?: JsonValue;
 }
 
+/**
+ * What went wrong in terms a person can act on: an RPC error's `data.problem`. Clients prefer their own copy keyed
+ * by `kind` and `subject`; `title` and `hint` are the daemon's fallback. Unknown kinds show the error's message.
+ */
+export interface Problem {
+  kind: ProblemKind;
+  /** What it is about, e.g. "gh". */
+  subject?: string;
+  title?: string;
+  hint?: string;
+  action?: ProblemAction;
+  secondary?: ProblemAction;
+  /** The full technical error, for a Details disclosure. */
+  detail?: string;
+  retryable?: boolean;
+}
+export type ProblemKind =
+  | "tool_missing"
+  | "signed_out"
+  | "permission"
+  | "offline"
+  | "conflict"
+  | "invalid_input"
+  | "not_found"
+  | "update_needed"
+  | "internal";
+/** `id`: what the client does (`install_tool`, `sign_in`, `retry`, ...); `params`: what it needs, e.g. `{ tool: "gh" }`. */
+export interface ProblemAction {
+  id: string;
+  label: string;
+  params?: { [key: string]: JsonValue };
+}
+
 export interface RpcResponse {
   jsonrpc: "2.0";
   id: RpcId;
@@ -3118,6 +3151,8 @@ export interface PrListRepo {
   error?: string;
   /** Not on GitHub (no remote `gh` knows): nothing to list, and no error to show. */
   skipped?: boolean;
+  /** What `error` means and how to fix it, when the daemon knows (as an RPC error's `data.problem`). */
+  problem?: Problem;
 }
 
 /** `repo`: the member of a group project (a `PullRequest.repo`); a group project requires it. */

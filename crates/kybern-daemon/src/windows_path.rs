@@ -6,11 +6,16 @@
 //! is read at startup, and the folders the usual Node installs put global commands in are added.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The system Path, then the user's, with `%VAR%` references expanded. Empty off Windows or when
 /// the registry cannot be read.
 pub(crate) fn registry_path() -> Vec<PathBuf> {
+    // Plays a daemon started before an install changed the registry Path (end-to-end checks in
+    // debug builds only; a shipped daemon always reads the registry).
+    if cfg!(debug_assertions) && std::env::var_os("KYBERN_NO_REGISTRY_PATH").is_some() {
+        return Vec::new();
+    }
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -108,6 +113,14 @@ pub(crate) fn tool_dirs(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<PathBu
     dirs
 }
 
+/// `current` with each of `candidates` that `is_dir` and is not on it yet appended, or `None` when
+/// nothing is new.
+pub(crate) fn widened(current: &[PathBuf], candidates: &[PathBuf], is_dir: impl Fn(&Path) -> bool) -> Option<Vec<PathBuf>> {
+    let mut seen: std::collections::HashSet<String> = current.iter().map(|dir| dedupe_key(dir)).collect();
+    let added: Vec<PathBuf> = candidates.iter().filter(|dir| is_dir(dir) && seen.insert(dedupe_key(dir))).cloned().collect();
+    (!added.is_empty()).then(|| current.iter().cloned().chain(added).collect())
+}
+
 /// The key two Path entries share when they name the same folder: Windows paths ignore case and a
 /// trailing separator.
 pub(crate) fn dedupe_key(dir: &std::path::Path) -> String {
@@ -118,8 +131,9 @@ pub(crate) fn dedupe_key(dir: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand, split, tool_dirs};
+    use super::{expand, split, tool_dirs, widened};
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -158,5 +172,15 @@ mod tests {
             assert!(dirs.contains(&PathBuf::from(expected)), "{expected} missing from {dirs:?}");
         }
         assert!(tool_dirs(|_| None).is_empty());
+    }
+
+    #[test]
+    fn widening_adds_only_new_folders_that_exist() {
+        let current = vec![PathBuf::from("/bin"), PathBuf::from("/usr/bin")];
+        let existing: HashSet<PathBuf> = ["/bin", "/gh", "/winget"].into_iter().map(PathBuf::from).collect();
+        let candidates = ["/bin", "/gh", "/missing", "/winget", "/gh"].map(PathBuf::from);
+        let wide = widened(&current, &candidates, |dir| existing.contains(dir)).unwrap();
+        assert_eq!(wide, ["/bin", "/usr/bin", "/gh", "/winget"].map(PathBuf::from));
+        assert!(widened(&current, &[PathBuf::from("/bin"), PathBuf::from("/missing")], |dir| existing.contains(dir)).is_none());
     }
 }

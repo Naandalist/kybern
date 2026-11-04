@@ -7,21 +7,36 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use kybern_git::{Repo, RepoState};
 use kybern_protocol::methods::*;
+use kybern_protocol::rpc::{Problem, ProblemAction, ProblemKind};
 use serde_json::Value;
 use tokio::process::Command;
-use tokio::sync::OnceCell;
 
-static GH_AVAILABLE: OnceCell<bool> = OnceCell::const_new();
+/// Spawn `program` (stdin as `stdin` says, output piped). When the bare `gh` isn't on PATH,
+/// `gh_locate::refresh` looks again where a new terminal would, and the spawn is retried once.
+/// A failure keeps its cause in the message ("run gh: program not found"), which clients show
+/// and `friendly` reads.
+pub(crate) fn spawn(cwd: &Path, program: &str, args: &[&str], stdin: std::process::Stdio) -> Result<tokio::process::Child> {
+    let mut stdin = Some(stdin);
+    let mut start = || {
+        Command::new(program)
+            .no_window()
+            .current_dir(cwd)
+            .args(args)
+            .stdin(stdin.take().unwrap_or_else(std::process::Stdio::null))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+    };
+    let child = match start() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && crate::gh_locate::refresh(program) => start(),
+        other => other,
+    };
+    child.map_err(|error| anyhow!("run {program}: {error}"))
+}
 
 pub(crate) async fn run(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
-    let out = Command::new(program)
-        .no_window()
-        .current_dir(cwd)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("run {program}"))?;
+    let out = spawn(cwd, program, args, std::process::Stdio::null())?.wait_with_output().await.with_context(|| format!("run {program}"))?;
     if !out.status.success() {
         return Err(anyhow!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -30,15 +45,7 @@ pub(crate) async fn run(cwd: &Path, program: &str, args: &[&str]) -> Result<Stri
 
 /// `run`, with `input` written to the program's standard input.
 pub(crate) async fn run_stdin(cwd: &Path, program: &str, args: &[&str], input: &str) -> Result<String> {
-    let mut child = Command::new(program)
-        .no_window()
-        .current_dir(cwd)
-        .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("run {program}"))?;
+    let mut child = spawn(cwd, program, args, std::process::Stdio::piped())?;
     let mut stdin = child.stdin.take().context("program stdin")?;
     tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes()).await.with_context(|| format!("write to {program}"))?;
     drop(stdin);
@@ -47,6 +54,122 @@ pub(crate) async fn run_stdin(cwd: &Path, program: &str, args: &[&str], input: &
         return Err(anyhow!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+/// Why a `gh` call failed, as far as Kybern can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GhErrorKind {
+    GhMissing,
+    GhAuth,
+    Forbidden,
+    NotFound,
+    NoRemote,
+}
+
+/// The `Problem` a client shows for a `gh` failure of `kind`; `detail` is the full error chain.
+pub(crate) fn gh_problem(kind: GhErrorKind, detail: String) -> Problem {
+    let action = |id: &str, label: &str, params: Value| Some(ProblemAction { id: id.into(), label: label.into(), params: Some(params) });
+    let retry = Some(ProblemAction { id: "retry".into(), label: "Check again".into(), params: None });
+    let (problem_kind, subject, title, hint, action, secondary) = match kind {
+        GhErrorKind::GhMissing => (
+            ProblemKind::ToolMissing,
+            "gh",
+            "Install GitHub CLI",
+            "Kybern uses your own GitHub sign-in through the GitHub CLI (gh). Install it, then check again.",
+            action("install_tool", "Install GitHub CLI", serde_json::json!({ "tool": "gh" })),
+            retry,
+        ),
+        GhErrorKind::GhAuth => (
+            ProblemKind::SignedOut,
+            "gh",
+            "Sign in to GitHub",
+            "The GitHub CLI (gh) isn't signed in. Sign in, then check again.",
+            action("sign_in", "Sign in to GitHub", serde_json::json!({ "provider": "gh" })),
+            retry,
+        ),
+        GhErrorKind::Forbidden => (
+            ProblemKind::Permission,
+            "gh",
+            "GitHub refused this",
+            "The signed-in GitHub account can't do this in this repository. Check its access, then try again.",
+            None,
+            None,
+        ),
+        GhErrorKind::NotFound => (
+            ProblemKind::NotFound,
+            "gh",
+            "GitHub couldn't find this",
+            "Check that origin points at GitHub and that the signed-in account can see the repository.",
+            None,
+            None,
+        ),
+        GhErrorKind::NoRemote => (
+            ProblemKind::NotFound,
+            "github_remote",
+            "This project isn't on GitHub",
+            "Add a GitHub remote to this repository, then try again.",
+            None,
+            None,
+        ),
+    };
+    Problem {
+        kind: problem_kind,
+        subject: Some(subject.into()),
+        title: Some(title.into()),
+        hint: Some(hint.into()),
+        action,
+        secondary,
+        detail: Some(detail),
+        retryable: true,
+    }
+}
+
+/// The words `classify` gives a missing `gh`.
+pub(crate) const GH_MISSING: &str =
+    "The GitHub CLI (gh) isn't installed. Install it from cli.github.com, run gh auth login, and try again.";
+
+/// What a `gh` failure means and the words that say what to do next, or `None` when it is none
+/// of the cases Kybern knows. A known case with no client recovery has no kind.
+pub(crate) fn classify(raw: &str) -> Option<(Option<GhErrorKind>, &'static str)> {
+    let lower = raw.to_ascii_lowercase();
+    Some(if lower.contains("program not found") || lower.contains("no such file") || lower.contains("run gh:") {
+        (Some(GhErrorKind::GhMissing), GH_MISSING)
+    } else if lower.contains("gh auth login") || lower.contains("not logged in") || lower.contains("http 401") {
+        (Some(GhErrorKind::GhAuth), "gh isn't signed in. Run gh auth login and try again.")
+    } else if lower.contains("workflow_dispatch") {
+        (None, "This workflow can't be started by hand: its file has no workflow_dispatch trigger on that branch.")
+    } else if lower.contains("http 403") {
+        (
+            Some(GhErrorKind::Forbidden),
+            "GitHub refused this: the signed-in gh account can't do it in this repository. Check its access and try again.",
+        )
+    } else if lower.contains("http 404") {
+        (
+            Some(GhErrorKind::NotFound),
+            "GitHub couldn't find this. Check that origin points at GitHub and that the gh account can see the repository.",
+        )
+    } else if lower.contains("none of the git remotes") || lower.contains("no git remotes") || lower.contains("not a git repository") {
+        (Some(GhErrorKind::NoRemote), "This project has no GitHub remote. Add one, then try again.")
+    } else {
+        return None;
+    })
+}
+
+/// `gh`'s failure in words that say what to do next; the original text follows for the details.
+/// Text that is already friendly is returned as it is.
+pub(crate) fn friendly(error: anyhow::Error) -> anyhow::Error {
+    let raw = format!("{error:#}");
+    match classify(&raw) {
+        Some((_, lead)) if !raw.starts_with(lead) => anyhow!("{lead} ({})", raw.lines().last().unwrap_or_default().trim()),
+        _ => error,
+    }
+}
+
+/// `friendly`'s message and the `Problem` a client recovers by, with the full error chain as its detail.
+pub(crate) fn friendly_problem(error: anyhow::Error) -> (String, Option<Problem>) {
+    let raw = format!("{error:#}");
+    let problem = classify(&raw).and_then(|(kind, _)| kind).map(|kind| gh_problem(kind, raw));
+    (format!("{:#}", friendly(error)), problem)
 }
 
 /// Local branches of a project checkout, most recently committed first.
@@ -95,10 +218,30 @@ pub async fn branches(cwd: &Path, fetch: bool, include_remote: bool) -> Result<G
     Ok(GitBranchesResult { current, branches })
 }
 
+/// How long "gh isn't there" stands before the next ask runs `gh --version` again. A yes stands
+/// for the daemon's life.
+const GH_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub async fn gh_available() -> bool {
-    *GH_AVAILABLE
-        .get_or_init(|| async { Command::new("gh").no_window().arg("--version").output().await.is_ok_and(|o| o.status.success()) })
-        .await
+    static LAST: std::sync::Mutex<Option<(bool, std::time::Instant)>> = std::sync::Mutex::new(None);
+    remembered(&LAST, GH_RECHECK, || async { run(&std::env::temp_dir(), "gh", &["--version"]).await.is_ok() }).await
+}
+
+/// `probe`'s answer, kept in `slot`: a yes for good, a no for `recheck`.
+async fn remembered<F, Fut>(slot: &std::sync::Mutex<Option<(bool, std::time::Instant)>>, recheck: std::time::Duration, probe: F) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let cached = *slot.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((answer, at)) = cached
+        && (answer || at.elapsed() < recheck)
+    {
+        return answer;
+    }
+    let answer = probe().await;
+    *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some((answer, std::time::Instant::now()));
+    answer
 }
 
 pub async fn status(cwd: &Path) -> Result<GitStatus> {
@@ -427,10 +570,19 @@ enum GhAnswer {
 }
 
 async fn gh_api(gh: &str, args: &[&str]) -> GhAnswer {
-    let output = Command::new(gh).no_window().current_dir(std::env::temp_dir()).args(args).stdin(std::process::Stdio::null()).output();
-    let out = match tokio::time::timeout(STAR_TIMEOUT, output).await {
+    // `spawn` finds a gh installed after the daemon started, like every other gh call.
+    let child = match spawn(&std::env::temp_dir(), gh, args, std::process::Stdio::null()) {
+        Ok(child) => child,
+        Err(error) => {
+            let text = format!("{error:#}");
+            return match classify(&text) {
+                Some((Some(GhErrorKind::GhMissing), _)) => GhAnswer::Unavailable,
+                _ => GhAnswer::Failed(text),
+            };
+        }
+    };
+    let out = match tokio::time::timeout(STAR_TIMEOUT, child.wait_with_output()).await {
         Err(_) => return GhAnswer::Failed("gh api timed out".into()),
-        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => return GhAnswer::Unavailable,
         Ok(Err(error)) => return GhAnswer::Failed(format!("run gh: {error}")),
         Ok(Ok(out)) => out,
     };
@@ -520,6 +672,64 @@ mod tests {
         assert_eq!((auto.enabled_by.as_deref(), auto.merge_method.as_str()), (Some("kevin"), "squash"));
         assert_eq!(pr.labels[0].name, "bug");
         assert_eq!(pr.author_avatar_url.as_deref(), Some("https://github.com/ana.png?size=40"));
+    }
+
+    #[test]
+    fn pr_errors_get_a_problem_and_next_steps() {
+        let kind = |text: &str| friendly_problem(anyhow!("{text}")).1.map(|p| (p.kind, p.subject.unwrap_or_default()));
+        let (missing, problem) = friendly_problem(anyhow!("run gh: program not found"));
+        assert!(missing.starts_with(GH_MISSING) && missing.ends_with("(run gh: program not found)"), "{missing}");
+        let problem = problem.unwrap();
+        assert_eq!((problem.kind, problem.subject.as_deref()), (ProblemKind::ToolMissing, Some("gh")));
+        let action = problem.action.unwrap();
+        assert_eq!((action.id.as_str(), action.params), ("install_tool", Some(serde_json::json!({"tool": "gh"}))));
+        assert_eq!(problem.secondary.unwrap().id, "retry");
+        assert_eq!(problem.detail.as_deref(), Some("run gh: program not found"));
+        assert!(problem.retryable);
+        let (auth, problem) = friendly_problem(anyhow!("gh pr list: To get started with GitHub CLI, please run:  gh auth login"));
+        assert!(auth.starts_with("gh isn't signed in"), "{auth}");
+        let problem = problem.unwrap();
+        assert_eq!(problem.kind, ProblemKind::SignedOut);
+        assert_eq!(problem.action.unwrap().params, Some(serde_json::json!({"provider": "gh"})));
+        assert_eq!(kind("gh pr view 3: HTTP 403: Resource not accessible by integration"), Some((ProblemKind::Permission, "gh".into())));
+        assert_eq!(kind("gh api x: HTTP 404: Not Found"), Some((ProblemKind::NotFound, "gh".into())));
+        assert_eq!(
+            kind("gh pr list: none of the git remotes configured for this repository point to a known GitHub host"),
+            Some((ProblemKind::NotFound, "github_remote".into()))
+        );
+        assert_eq!(friendly_problem(anyhow!("gh pr list: boom")), ("gh pr list: boom".to_string(), None));
+        // Friendly text passes through again unchanged, so a second mapping never nests it.
+        assert_eq!(friendly_problem(anyhow!("{missing}")).0, missing);
+    }
+
+    #[tokio::test]
+    async fn a_spawn_failure_keeps_its_cause() {
+        let error = run(&std::env::temp_dir(), "kybern-no-such-program-7f3a", &["--version"]).await.unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.starts_with("run kybern-no-such-program-7f3a: "), "{text}");
+        assert!(text.len() > "run kybern-no-such-program-7f3a: ".len(), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_gh_is_asked_again_after_the_recheck_time() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let slot = std::sync::Mutex::new(None);
+        let probes = AtomicU32::new(0);
+        let ask = |answer: bool| {
+            let probes = &probes;
+            move || async move {
+                probes.fetch_add(1, Ordering::SeqCst);
+                answer
+            }
+        };
+        let long = std::time::Duration::from_secs(3600);
+        assert!(!remembered(&slot, long, ask(false)).await);
+        assert!(!remembered(&slot, long, ask(true)).await, "a fresh no stands");
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        // Once the no is older than the recheck time, gh is asked again, and then the yes stands for good.
+        assert!(remembered(&slot, std::time::Duration::ZERO, ask(true)).await);
+        assert!(remembered(&slot, std::time::Duration::ZERO, ask(false)).await);
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
     }
 
     #[test]

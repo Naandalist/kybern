@@ -1,6 +1,7 @@
 // A job's log (ADE-97), read a page at a time: the window holds at most `LOG_WINDOW` lines and "Show earlier lines" / "Show
 // later lines" read the next page, trimming the far end. A failed job opens a few lines before its last error, the cause above it a click away. Lines are monospace in virtual
 // rows; GitHub's group markers become headings and ANSI colours map to tones, so no escape code is ever drawn.
+import { asError } from '../../../../../packages/kybern-client/src/problem.ts'
 import { useEffect, useMemo, useState } from 'react'
 import { joinPage, LOG_PAGE, nextRead, openingOffset, parseLogLine, runBucket, windowFrom, type ActionsRepo, type LogTone, type LogWindow } from '../../../../../packages/kybern-client/src/actions.ts'
 import { duration, headlineStep, seconds } from '../../../../../packages/kybern-client/src/actionsPipeline.ts'
@@ -39,7 +40,7 @@ export function JobLog({ target, run, job, onRerun, rerunBusy }: { target: Actio
   const done = job.status === 'completed'
   const failed = done && runBucket(job) === 'failed'
   const [window, setWindow] = useState<LogWindow | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | null>(null)
   const [paging, setPaging] = useState<'earlier' | 'later' | null>(null)
   const [fixOpen, setFixOpen] = useState(false)
   const [revision, retry] = useState(0)
@@ -52,7 +53,7 @@ export function JobLog({ target, run, job, onRerun, rerunBusy }: { target: Actio
       const start = openingOffset(first.total_lines, first.error_lines ?? [], failed)
       const page = start > 0 ? await read(start) : first
       if (!canceled) { setWindow(windowFrom(page)); setError(null) }
-    }).catch(e => { if (!canceled) setError(String(e)) })
+    }).catch(e => { if (!canceled) setError(asError(e)) })
     return () => { canceled = true }
   }, [job.id, done, connected, revision])
   const page = (direction: 'earlier' | 'later') => {
@@ -61,7 +62,7 @@ export function JobLog({ target, run, job, onRerun, rerunBusy }: { target: Actio
     setPaging(direction)
     void prCall(target.projectId, 'github.actions.log', { project_id: target.projectId, ...member, job_id: job.id, ...next }).then(result => {
       setWindow(w => w ? joinPage(w, result, direction) : windowFrom(result)); setPaging(null)
-    }, e => { setError(String(e)); setPaging(null) })
+    }, e => { setError(asError(e)); setPaging(null) })
   }
   const lines = useMemo(() => window ? window.lines.map((raw, i) => ({ n: window.offset + i, ...parseLogLine(raw) })).filter(l => !l.hidden) : [], [window])
   const digits = (window ? window.offset + window.lines.length : 1).toLocaleString('en-US').length
@@ -88,7 +89,7 @@ export function JobLog({ target, run, job, onRerun, rerunBusy }: { target: Actio
       {done && <Button size="sm" variant="ghost" testId="actions-rerun-job" busy={rerunBusy} onClick={onRerun}>Rerun job</Button>}
       {job.url && <IconButton icon={N.external} size="sm" label="Open job on GitHub" onClick={() => openUrl(job.url)} />}
     </div>
-    {error && !window ? <div style={{ padding: 20 }}><Problem error={error} refresh={() => retry(n => n + 1)} /></div>
+    {error && !window ? <div style={{ padding: 20 }}><Problem error={error} projectId={target.projectId} noun="this log" refresh={() => retry(n => n + 1)} /></div>
       : !window ? <div style={{ padding: 20 }}><PrLoading label="Loading log…" rows={6} /></div>
       : window.total === 0 ? <Label color={t.textSecondary} size={13} lineHeight={20} style={{ padding: 20 }}>This job wrote no log.</Label>
       : <virtual-list testId="actions-log-lines" estimatedItemHeight={18} style={{ flexGrow: 1, minHeight: 0, paddingTop: 6, paddingBottom: 12 }}>

@@ -4,6 +4,7 @@
 // `needs` graph (`Graph.tsx`); and under it the selected job's steps beside its log. Narrow, the steps sit above the log.
 // The run is read again every 10 s while it is in progress and the window is visible, every 60 s otherwise; a read that
 // changes nothing keeps the previous result, so nothing re-renders.
+import { asError } from '../../../../../packages/kybern-client/src/problem.ts'
 import { useEffect, useMemo, useState } from 'react'
 import { relativeTime } from '@/lib/format'
 import { BUCKET_TONE, eventWord, isActive, refreshDelay, runBucket, runWord, type ActionsRepo } from '../../../../../packages/kybern-client/src/actions.ts'
@@ -57,7 +58,7 @@ export function RunDetail({ target, runId, listed, reference, usual, width, heig
   const connected = useApp(s => s.status === 'open')
   const member = target.repo ? { repo: target.repo } : {}
   const [detail, setDetail] = useState<ActionsRunResult | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | null>(null)
   const [revision, refresh] = useState(0)
   const [jobId, setJobId] = useState<number | null>(null)
   const [attempt, setAttempt] = useState<number | null>(null)
@@ -71,7 +72,7 @@ export function RunDetail({ target, runId, listed, reference, usual, width, heig
       if (canceled) return
       // An unchanged read keeps the previous object: no node, edge or log re-renders.
       setDetail(prev => prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next); setError(null)
-    }, e => { if (!canceled) setError(String(e)) })
+    }, e => { if (!canceled) setError(asError(e)) })
     return () => { canceled = true }
   }, [runId, revision, connected, attempt])
   const run = detail?.run ?? listed
@@ -143,7 +144,7 @@ export function RunDetail({ target, runId, listed, reference, usual, width, heig
         <MenuItem id="github" label="Open on GitHub" onSelect={() => openUrl(run.url)} />
       </Menu>}
     </div>
-    {error && !detail && <div style={{ padding: 24 }}><Problem error={error} refresh={() => refresh(n => n + 1)} /></div>}
+    {error && !detail && <div style={{ padding: 24 }}><Problem error={error} projectId={target.projectId} noun="this run" refresh={() => refresh(n => n + 1)} /></div>}
     {!run && !error && <div style={{ padding: 24 }}><PrLoading label="Loading run…" /></div>}
     {run && <>
       <div style={{ ...row, alignItems: 'flex-start', gap: 16, paddingLeft: PAD, paddingRight: PAD, paddingTop: 18, paddingBottom: 14, flexShrink: 0 }}>

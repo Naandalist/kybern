@@ -8,7 +8,7 @@ import { stateDetail, type PrState } from './verify.states.ts'
 import { ACTION_PULLS, actionRun, actionRuns } from './verify.actions-fixture.ts'
 import type { PrDetailResult, PrFile, PrReviewEntry, PrTimelineEvent, PullRequest, UsageRow } from '../../../../packages/kybern-client/src/types.ts'
 
-export function actionFixture(options: { long?: boolean; horizontal?: boolean; picker?: boolean; paged?: boolean; slowFiles?: boolean; /** Extra running checks beyond the one in the base fixture. */ running?: number; /** A group project of three repositories (ADE-79): api and docs both have #108, web fails, infra is skipped. */ group?: boolean; /** ADE-85 list and Timeline: a group project of three repositories with pull requests in every readiness group, and a timeline history. */ readiness?: boolean; /** 65 distinct files in folders, with short patches (30 a page), for the Changes tab. */ changes?: boolean; /** A verdict state of the detail page (`verify.states.ts`). */ state?: PrState; /** ADE-97: 100 runs over 24 branches and a 40-job run, for the Actions performance check. */ actionsBig?: boolean; /** ADE-112: the linked thread is the project's Coordinator, so the dock has its Project panel. */ coordinator?: boolean } = {}) {
+export function actionFixture(options: { long?: boolean; horizontal?: boolean; picker?: boolean; paged?: boolean; slowFiles?: boolean; /** Extra running checks beyond the one in the base fixture. */ running?: number; /** A group project of three repositories (ADE-79): api and docs both have #108, web fails, infra is skipped. */ group?: boolean; /** ADE-85 list and Timeline: a group project of three repositories with pull requests in every readiness group, and a timeline history. */ readiness?: boolean; /** 65 distinct files in folders, with short patches (30 a page), for the Changes tab. */ changes?: boolean; /** A verdict state of the detail page (`verify.states.ts`). */ state?: PrState; /** ADE-97: 100 runs over 24 branches and a 40-job run, for the Actions performance check. */ actionsBig?: boolean; /** ADE-112: the linked thread is the project's Coordinator, so the dock has its Project panel. */ coordinator?: boolean; /** `github.pr.list` fails this way until `problem(null)`. */ problem?: 'missing' | 'auth' | 'auth-text' | 'other' } = {}) {
   const actionRunList = actionRuns(options.actionsBig)
   const scratch = mkdtempSync(path.join(tmpdir(), 'gpuix-scratch-pages-'))
   const now = new Date().toISOString()
@@ -34,7 +34,12 @@ export function actionFixture(options: { long?: boolean; horizontal?: boolean; p
   }
   const entries: PrReviewEntry[] = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, author: i % 2 ? 'teammate' : 'reviewer', body: `### Finding ${i + 1}\n\nKeep this row stable while streaming.\n\n\`row.id\` should survive a refresh.\n\n- Preserve focus\n- Preserve selection\n- Recheck wrapping`, state: i % 2 ? 'COMMENTED' : 'APPROVED', path: i % 3 ? null : 'src/components/Transcript.tsx', line: i % 3 ? null : i + 1, side: 'RIGHT', url: '', updated_at: now }))
   const usage = (key: string, n: number): UsageRow => ({ key, turns: n, usage: { input_tokens: n * 2400, output_tokens: n * 1200, cache_read_tokens: n * 8000, cache_write_tokens: n * 300 }, cost_usd: n * .52 })
-  let problem: 'missing' | 'auth' | null = null
+  // `missing`/`auth`: a daemon's `data.problem` (`signed-out` text alone, as older daemons sent it, is `auth-text`); `other`: a plain gh failure.
+  let problem: 'missing' | 'auth' | 'auth-text' | 'other' | null = options.problem ?? null
+  const GH_PROBLEMS = {
+    missing: { message: "The GitHub CLI (gh) isn't installed. Install it from cli.github.com, run gh auth login, and try again. (run gh: program not found)", data: { problem: { kind: 'tool_missing', subject: 'gh', action: { id: 'install_tool', label: 'Install GitHub CLI', params: { tool: 'gh' } }, secondary: { id: 'retry', label: 'Check again' }, detail: 'run gh: program not found', retryable: true } } },
+    auth: { message: "gh isn't signed in. Run gh auth login and try again. (gh pr list: To get started with GitHub CLI, please run:  gh auth login)", data: { problem: { kind: 'signed_out', subject: 'gh', action: { id: 'sign_in', label: 'Sign in to GitHub', params: { provider: 'gh' } }, secondary: { id: 'retry', label: 'Check again' }, detail: 'gh pr list: To get started with GitHub CLI, please run:  gh auth login', retryable: true } } },
+  } as const
   const calls: string[] = []
   const actions: Record<string, unknown>[] = []
   let failAction = false
@@ -61,6 +66,7 @@ export function actionFixture(options: { long?: boolean; horizontal?: boolean; p
         params.push({ method: message.method, params: message.params })
         let result: unknown = {}
         let error: string | undefined
+        let errorData: unknown
         switch (message.method) {
           case 'daemon.info': result = { protocol_version: PROTOCOL_VERSION, environment_id: 'pages-fixture', version: 'fixture', scopes: [] }; break
           case 'projects.list': result = { projects: [project, ...(options.picker ? [{...project,id:'other-known',kind:'single',members:[],is_git:true,name:'Other known project',space_id:'other-space',repo:{remote:'github.com/acme/other'}}]:[])] }; break
@@ -80,7 +86,8 @@ export function actionFixture(options: { long?: boolean; horizontal?: boolean; p
           }
           case 'github.pr.list':
             if(options.picker && message.params.project_id==='other-known') {result={pull_requests:[{...pr,url:'https://github.com/acme/other/pull/108',title:'PR from another Space'}]};break}
-            if (problem) error = problem === 'missing' ? 'gh: command not found' : 'authentication required; run gh auth login'
+            if (problem === 'missing' || problem === 'auth') { error = GH_PROBLEMS[problem].message; errorData = GH_PROBLEMS[problem].data }
+            else if (problem) error = problem === 'auth-text' ? 'authentication required; run gh auth login' : 'gh pr list: Post "https://api.github.com/graphql": dial tcp: lookup api.github.com: no such host'
             else if(empty) result = {pull_requests:[]}
             else if (options.readiness) result = { pull_requests: readinessPulls(now, String(message.params.state ?? 'open')) }
             else if (options.group) result = {
@@ -118,7 +125,7 @@ export function actionFixture(options: { long?: boolean; horizontal?: boolean; p
           case 'git.branches': result = { current: 'fix/reading-position', branches: [] }; break
           default: if (!['events.unsubscribe', 'ping'].includes(message.method)) error = `Fixture rejects ${message.method}`
         }
-        const response=JSON.stringify(error ? { jsonrpc: '2.0', id: message.id, error: { code: -32000, message: error } } : { jsonrpc: '2.0', id: message.id, result })
+        const response=JSON.stringify(error ? { jsonrpc: '2.0', id: message.id, error: { code: -32000, message: error, ...(errorData ? { data: errorData } : {}) } } : { jsonrpc: '2.0', id: message.id, result })
         if(options.slowFiles && message.method==='github.pr.page' && message.params.kind==='files' && Number(message.params.page)>1)setTimeout(()=>{try{ws.send(response)}catch{}},300)
         else ws.send(response)
       },

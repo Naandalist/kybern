@@ -271,7 +271,7 @@ async fn group_pull_request_list_tags_members_and_keeps_going_past_a_failing_one
         rows,
         [
             ("api", None, false),
-            ("web", Some("HTTP 401: Bad credentials"), false),
+            ("web", Some("gh isn't signed in. Run gh auth login and try again. (HTTP 401: Bad credentials)"), false),
             ("infra", Some("No GitHub remote"), true),
             ("ops", None, false),
             ("lab", Some("No GitHub remote"), true),
@@ -279,6 +279,10 @@ async fn group_pull_request_list_tags_members_and_keeps_going_past_a_failing_one
             ("docs", Some("docs is missing from fixture. Restore the folder or remove it in the project's settings."), false),
         ]
     );
+    // A known gh failure also says how to fix it; others have no problem.
+    let kinds: Vec<_> = result.repos.iter().map(|r| (r.repo.as_str(), r.problem.as_ref().map(|p| p.kind))).collect();
+    assert_eq!(kinds[1], ("web", Some(kybern_protocol::rpc::ProblemKind::SignedOut)));
+    assert!(kinds.iter().filter(|(repo, _)| *repo != "web").all(|(_, kind)| kind.is_none()), "{kinds:?}");
     // The wire form leaves the new fields out for single projects.
     let single = methods::PrListResult { pull_requests: Vec::new(), repos: Vec::new() };
     assert_eq!(serde_json::to_value(&single).unwrap(), serde_json::json!({"pull_requests": []}));

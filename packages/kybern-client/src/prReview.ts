@@ -6,7 +6,9 @@ import type {
   PrPageResult,
   PrInlineComment,
   PrReviewEntry,
+  Problem,
 } from "./types.ts"
+import { errorMessage, problemOf } from "./problem.ts"
 
 export type ReviewWorkspace = "overview" | "changes" | "conversation"
 export function reviewWorkspaceKind(
@@ -230,11 +232,38 @@ export function repairReviewPrompt(
 export type PrErrorClass = "gh-missing" | "gh-auth" | "no-remote" | "other"
 /** Sorts a daemon error into the recovery the user needs. */
 export function classifyPrError(text: string): PrErrorClass {
-  if (/command not found|No such file|program not found|gh: not found/i.test(text))
+  // `run gh` alone is what daemons before 0.21.2 said when gh wasn't on their PATH.
+  if (/command not found|No such file|program not found|gh: not found|GitHub CLI \(gh\) isn['’]t installed|(^|: )run gh$/im.test(text))
     return "gh-missing"
-  if (/gh auth login|not logged in|authentication required|HTTP 401/i.test(text))
+  if (/gh auth login|not logged in|authentication required|HTTP 401|gh isn['’]t signed in/i.test(text))
     return "gh-auth"
-  if (/no git remotes|not a git repository|could not find|no such remote/i.test(text))
+  if (/no git remotes|not a git repository|could not find|no such remote|no GitHub remote/i.test(text))
     return "no-remote"
   return "other"
 }
+
+/**
+ * The `Problem` of a pull request or Actions call that failed: the daemon's `data.problem`, else one sorted from the
+ * message for daemons that send none. Always has a `detail` with the technical text.
+ */
+export function ghProblem(error: unknown): Problem {
+  const text = errorMessage(error)
+  const sent = problemOf(error)
+  if (sent) return { ...sent, detail: sent.detail ?? text }
+  const retry = { id: "retry", label: "Check again" }
+  switch (classifyPrError(text)) {
+    case "gh-missing":
+      return { kind: "tool_missing", subject: "gh", action: { id: "install_tool", label: "Install GitHub CLI", params: { tool: "gh" } }, secondary: retry, detail: text, retryable: true }
+    case "gh-auth":
+      return { kind: "signed_out", subject: "gh", action: { id: "sign_in", label: "Sign in to GitHub", params: { provider: "gh" } }, secondary: retry, detail: text, retryable: true }
+    case "no-remote":
+      return { kind: "not_found", subject: "github_remote", detail: text, retryable: true }
+    default:
+      if (/HTTP 403/i.test(text)) return { kind: "permission", subject: "gh", detail: text, retryable: true }
+      if (/HTTP 404/i.test(text)) return { kind: "not_found", subject: "gh", detail: text, retryable: true }
+      return { kind: "internal", detail: text, retryable: true }
+  }
+}
+
+/** Whether `problem` is a GitHub CLI that has to be installed or signed in before anything loads. */
+export const isGhSetup = (problem: Problem): boolean => problem.subject === "gh" && (problem.kind === "tool_missing" || problem.kind === "signed_out")

@@ -2664,6 +2664,10 @@ pub struct PrListRepo {
     /// clients show no error for it. `error` still says why.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skipped: bool,
+    /// What `error` means and how to fix it, when Kybern knows (the same shape as an RPC
+    /// error's `data.problem`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<crate::rpc::Problem>,
 }
 method!(PrList, "github.pr.list", Some(Scope::OrchestrationRead), PrListParams, PrListResult);
 

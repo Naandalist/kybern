@@ -2,6 +2,7 @@
 // turn and only the file metadata is kept, so a long pull request costs a list of rows, not its whole diff. The
 // last few pages stay in a small cache so the first selected file needs no second request; any other file's
 // patch is loaded from its page when it is selected (`usePatch`).
+import { asError } from '../../../../../packages/kybern-client/src/problem.ts'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PrFile } from '../../../../../packages/kybern-client/src/types.ts'
 import { useApp } from '../../state.ts'
@@ -17,7 +18,7 @@ const atBurstEnd = (page: number) => page > 1 && (page - 1) % PAGES_PER_BURST ==
 
 export const toMeta = (f: PrFile, page: number): FileMeta => ({ path: f.path, old_path: f.old_path, status: f.status, additions: f.additions, deletions: f.deletions, page, patch_truncated: f.patch_truncated })
 
-interface List { files: FileMeta[]; /** The next page to fetch; null once the last one arrived. */ resume: number | null; error?: string }
+interface List { files: FileMeta[]; /** The next page to fetch; null once the last one arrived. */ resume: number | null; error?: Error }
 /** Lists of the last few pull requests (metadata only), so returning to the tab shows rows at once. */
 const lists = new Map<string, List>()
 const pages = new Map<string, PrFile[]>()
@@ -45,7 +46,7 @@ export function useChangedFiles(projectId: string, number: number, repo: string 
       for (let page = from; page === from || page <= restorePage || !atBurstEnd(page); page++) {
         let data
         try { data = await fetchPage(projectId, number, repo, page) } catch (e) {
-          if (!canceled) { const value = { files, resume: page, error: String(e) }; remember(lists, key, value, REMEMBERED_LISTS); setList({ key, value }) }
+          if (!canceled) { const value = { files, resume: page, error: asError(e) }; remember(lists, key, value, REMEMBERED_LISTS); setList({ key, value }) }
           return
         }
         if (canceled) return

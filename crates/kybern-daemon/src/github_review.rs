@@ -1,12 +1,10 @@
 //! Bounded, native GitHub review reads and explicit human actions.
-use kybern_protocol::process::NoWindow;
 use std::path::Path;
 
 use anyhow::{Result, anyhow, ensure};
 use kybern_protocol::methods::*;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 
 use crate::github::{avatar_url, parse_pr_extended, run};
 
@@ -546,14 +544,7 @@ fn parse_checks(checks: &Value, statuses: &Value, page: u32) -> Result<PrPageRes
 }
 
 async fn write_api(cwd: &Path, endpoint: &str, method: &str, value: Value) -> Result<()> {
-    let mut child = Command::new("gh")
-        .no_window()
-        .current_dir(cwd)
-        .args(["api", endpoint, "--method", method, "--input", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+    let mut child = crate::github::spawn(cwd, "gh", &["api", endpoint, "--method", method, "--input", "-"], std::process::Stdio::piped())?;
     child.stdin.take().ok_or_else(|| anyhow!("Unable to send the GitHub request."))?.write_all(&serde_json::to_vec(&value)?).await?;
     let output = child.wait_with_output().await?;
     ensure!(

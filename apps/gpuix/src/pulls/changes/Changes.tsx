@@ -100,7 +100,7 @@ export function Changes({ projectId, number, repo, review, compact = false, view
   const total = Math.max(review.detail?.changed_files ?? 0, files.length)
 
   return <div testId="pr-changes" style={{ ...column, flexGrow: 1, minHeight: 0, paddingTop: 16, paddingBottom: 16, paddingLeft: compact ? 14 : 24, paddingRight: compact ? 14 : 24, gap: 12 }}>
-    {list.error && !files.length ? <Problem error={list.error} refresh={review.refresh} /> : <>
+    {list.error && !files.length ? <Problem error={list.error} projectId={projectId} noun="this pull request" refresh={review.refresh} /> : <>
       <div style={{ display: 'flex', flexDirection: compact ? 'column' : 'row', flexGrow: 1, minHeight: 0, gap: 16 }}>
         <div testId="pr-files-column" style={{ ...column, ...(compact ? { width: '100%', height: COMPACT_LIST_HEIGHT } : { width: LIST_WIDTH }), flexShrink: 0, minHeight: 0, gap: 8 }}>
           <div style={{ ...column, gap: 8, paddingLeft: 6, paddingRight: 6, flexShrink: 0 }}>
@@ -119,7 +119,7 @@ export function Changes({ projectId, number, repo, review, compact = false, view
             {list.loaded && !rows.length && <div key="empty" style={{ padding: 8 }}><Label color={t.textSecondary} size={13}>{filtering ? 'No files match this filter.' : 'No changed files.'}</Label></div>}
             {list.loaded && !list.done && !list.paused && !list.error && <div key="more" style={{ ...row, height: ROW_HEIGHT, paddingLeft: 8 }}><Label color={t.textTertiary} size={12} style={num()}>{`Loading more files… ${fmt(files.length)} of ${fmt(total)}`}</Label></div>}
             {(list.paused || (list.error && files.length > 0)) && <div key="resume" style={{ ...column, gap: 6, padding: 8 }}>
-              {list.error && <Label color={t.warning} size={12}>{`Could not load more files. ${list.error}`}</Label>}
+              {list.error && <Label color={t.warning} size={12}>{`Could not load more files. ${list.error.message}`}</Label>}
               <Button testId="pr-files-more" size="sm" onClick={list.more}>{list.error ? 'Try again' : `Load more files (${fmt(files.length)} of ${fmt(total)})`}</Button>
             </div>}
           </virtual-list>

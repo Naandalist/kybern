@@ -80,16 +80,21 @@ impl Orchestrator {
                         if not_on_github(&reason) { ("No GitHub remote".to_string(), true) } else { (reason, false) }
                     }),
                 };
-                let (pull_requests, error, skipped) = match listed {
+                // A `gh` failure gets `friendly`'s words and the kind clients recover by.
+                let listed = listed.map_err(|(reason, skipped)| match github::friendly_problem(anyhow::anyhow!("{reason}")) {
+                    (words, Some(problem)) if !skipped => (words, skipped, Some(problem)),
+                    _ => (reason, skipped, None),
+                });
+                let (pull_requests, error, skipped, problem) = match listed {
                     Ok(mut prs) => {
                         for pr in &mut prs {
                             pr.repo = Some(member.path.clone());
                         }
-                        (prs, None, false)
+                        (prs, None, false, None)
                     }
-                    Err((reason, skipped)) => (Vec::new(), Some(reason), skipped),
+                    Err((reason, skipped, kind)) => (Vec::new(), Some(reason), skipped, kind),
                 };
-                (methods::PrListRepo { repo: member.path, name: member.name, error, skipped }, pull_requests)
+                (methods::PrListRepo { repo: member.path, name: member.name, error, skipped, problem }, pull_requests)
             })
             .buffered(PARALLEL)
             .collect()

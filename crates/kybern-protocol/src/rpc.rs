@@ -108,9 +108,74 @@ pub mod codes {
     pub const NOT_AVAILABLE: i32 = -32013;
 }
 
+/// What went wrong in terms a person can act on, sent as an RPC error's `data.problem` (and in
+/// results that report per-item failures). Additive: `message` stays the readable fallback, and
+/// clients that don't know a `kind` show `message`. Clients prefer their own copy keyed by
+/// `kind` and `subject`; `title` and `hint` are the daemon's fallback copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Problem {
+    pub kind: ProblemKind,
+    /// What the problem is about, e.g. `gh` for the GitHub CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// The one action that fixes it, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ProblemAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<ProblemAction>,
+    /// The full technical error, for a Details disclosure; never the headline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Trying the same call again can succeed once the cause is fixed.
+    #[serde(default)]
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemKind {
+    /// A program Kybern needs isn't installed or can't be found.
+    ToolMissing,
+    /// Nobody is signed in where the call needs an account.
+    SignedOut,
+    /// The account is signed in but not allowed to do this.
+    Permission,
+    /// A machine or service can't be reached.
+    Offline,
+    Conflict,
+    InvalidInput,
+    NotFound,
+    UpdateNeeded,
+    Internal,
+}
+
+/// A button a client can offer. `id` is what the client does (`install_tool`, `sign_in`,
+/// `retry`, ...); `params` carry what it needs, e.g. `{ "tool": "gh" }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProblemAction {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+}
+
 impl RpcError {
     pub fn new(code: i32, message: impl Into<String>) -> Self {
         Self { code, message: message.into(), data: None }
+    }
+    /// Attach `problem` as `data.problem`, keeping any other `data` fields.
+    pub fn with_problem(mut self, problem: &Problem) -> Self {
+        let mut data = match self.data.take() {
+            Some(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        data.insert("problem".into(), serde_json::to_value(problem).unwrap_or(Value::Null));
+        self.data = Some(Value::Object(data));
+        self
     }
     pub fn with_data(mut self, data: Value) -> Self {
         self.data = Some(data);

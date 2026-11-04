@@ -78,6 +78,7 @@ import { ThreadRequests, useBlockingRequest } from './transcript/Requests.tsx'
 import { Label, REDUCED_MOTION, useMaterial, useTheme } from './ui.tsx'
 import { RAIL, TITLEBAR } from './nav/TitleBar.tsx'
 import { ResizeEdges } from './nav/WindowControls.tsx'
+import { GhSetupSheet } from './pulls/PrStates.tsx'
 import { SINGLE_FILL } from './platform/translucency.ts'
 
 const INSET = 8
@@ -265,6 +266,7 @@ function Workspace() {
       <CloseGuard />
       <CloseDirtyDialog />
       <WebPageUi />
+      <GhSetupSheet />
       <Toaster />
       <AppUpdateSurface />
       <NetworkIntroSurface />

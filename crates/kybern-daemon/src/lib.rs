@@ -17,6 +17,7 @@ mod cursor_setup;
 mod discovery;
 mod exposure;
 mod files;
+mod gh_locate;
 mod github;
 mod github_actions;
 mod github_review;
@@ -441,7 +442,7 @@ async fn purge_expired_notes(state: state::AppState) {
 /// thin Path still finds what a new terminal finds (`windows_path`).
 fn widen_path() {
     let current = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
+    let entries: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(std::path::PathBuf::from);
     let mut candidates: Vec<std::path::PathBuf> = windows_path::registry_path();
     if let Some(home) = &home {
@@ -454,16 +455,13 @@ fn widen_path() {
     }
     if cfg!(windows) {
         candidates.extend(windows_path::tool_dirs(|name| std::env::var_os(name)));
+        candidates.extend(gh_locate::install_dirs(|name| std::env::var_os(name)));
     } else {
         candidates.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(std::path::PathBuf::from));
     }
-    let mut seen: std::collections::HashSet<String> = entries.iter().map(|entry| windows_path::dedupe_key(entry)).collect();
-    for candidate in candidates {
-        if candidate.is_dir() && seen.insert(windows_path::dedupe_key(&candidate)) {
-            entries.push(candidate);
-        }
-    }
-    if let Ok(joined) = std::env::join_paths(entries) {
+    if let Some(entries) = windows_path::widened(&entries, &candidates, std::path::Path::is_dir)
+        && let Ok(joined) = std::env::join_paths(entries)
+    {
         // SAFETY: called once at startup before any thread is spawned.
         unsafe { std::env::set_var("PATH", joined) };
     }

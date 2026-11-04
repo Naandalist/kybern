@@ -65,10 +65,10 @@ export function Timeline({ projectId, number, repo, review, onSend, viewKey }: {
       <div style={{ flexGrow: 1 }} />
       <PickerChip size="sm" quiet chevron={false} selected={inline} neutral testId="pr-timeline-inline" onClick={() => { setInline(!inline); if (viewKey) saveView(viewKey, { inline: !inline }) }}>Inline comments</PickerChip>
     </div>
-    {error && !loaded.length ? <div style={{ padding: 24 }}><Problem error={error} refresh={review.refresh} /></div> : <virtual-list ref={scroll} {...PR_SCROLL_LAYOUT} testId="pr-timeline-entries" estimatedItemHeight={96} style={{ flexGrow: 1, minHeight: 0 }}>
+    {error && !loaded.length ? <div style={{ padding: 24 }}><Problem error={error} projectId={projectId} noun="this pull request" refresh={review.refresh} /></div> : <virtual-list ref={scroll} {...PR_SCROLL_LAYOUT} testId="pr-timeline-entries" estimatedItemHeight={96} style={{ flexGrow: 1, minHeight: 0 }}>
       {!pr || (loading && !loaded.length) ? <div key="loading" style={{ padding: 24 }}><PrLoading label="Loading timeline…" rows={5} /></div> : items.length === 0 ? <div key="empty" style={{ padding: 24 }}><Label color={t.textSecondary} size={13}>{filter === 'all' ? 'Nothing has happened on this pull request yet.' : `No ${filter} ${hasMore ? 'in what has loaded so far.' : 'on this pull request.'}`}</Label></div> : items.map((item, i) => <TimelineRow key={item.id} item={item} last={i === items.length - 1 && !hasMore && !full} inline={inline} selectable={selectable} selected={selected} onToggle={toggle} onAddress={selectable ? select : undefined} />)}
       {pr && <div key="more" style={{ ...row, gap: 8, paddingLeft: 24, paddingRight: 24, paddingBottom: 24, paddingTop: 4 }}>
-        {error && <Label color={t.warning} size={12}>{error.slice(0, 160)}</Label>}
+        {error && <Label color={t.warning} size={12}>{error.message.slice(0, 160)}</Label>}
         {hasMore && <Button testId="pr-timeline-more" size="sm" busy={loading} disabled={loading} onClick={more}>{loading ? 'Loading…' : 'Load more'}</Button>}
         {full && <Button size="sm" variant="ghost" onClick={() => openUrl(pr.url)}>Open on GitHub to read the rest</Button>}
       </div>}
