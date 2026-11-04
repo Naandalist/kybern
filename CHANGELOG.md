@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.21.7
+
+<!-- kybern-release-title: Faster typing on Windows and Linux, clearer errors -->
+<!-- kybern-release-summary: Typing stays quick while an answer streams, the model picker keeps focus, and errors now say what to do with a button to fix it. -->
+
+- On Windows and Linux, typing in the composer while an answer streams no longer waits on the UI thread for every key. The slowest key presses on a test laptop got about a third faster.
+- The model picker's search field takes your typing every time it opens, and long model lists scroll and filter smoothly. With 600 models, keys show up about five times faster.
+- Errors are in plain words and tell you what to do next. Without the GitHub CLI, the Pull requests page offers **Install GitHub CLI**, which types the install command into a terminal for you, and **Check again**. When gh isn't signed in it offers **Sign in to GitHub**. Technical details are under **Show details**.
+- On Windows, a GitHub CLI installed while Kybern was running is found without restarting Kybern.
+- On Windows, adding a second account no longer fails with "Unable to share … skills" on PCs without Developer Mode. Shared skill and plugin folders now use junctions, which need no special permission.
+- On Windows, stopping an agent also stops the processes its launcher started, so no OpenCode or npm-launched helpers are left running.
+- Images pasted as TIFF (as macOS does when you copy an image from most apps) or BMP are saved as PNG, so they show in the conversation instead of "Preview unavailable".
+
 ## 0.21.6
 
 <!-- kybern-release-title: Faster typing on Windows, Oh My Pi without sign-in -->
