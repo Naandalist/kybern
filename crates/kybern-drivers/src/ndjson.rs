@@ -27,7 +27,7 @@ impl NdjsonChild {
         #[cfg(unix)]
         cmd.process_group(0);
         let mut child = cmd.spawn()?;
-        let tree = crate::process_tree::ProcessTree(child.id().expect("spawned provider"));
+        let tree = crate::process_tree::ProcessTree::new(child.id().expect("spawned provider"));
         let stdin = child.stdin.take().ok_or_else(|| DriverError::Protocol("no stdin".into()))?;
         let stdout = child.stdout.take().ok_or_else(|| DriverError::Protocol("no stdout".into()))?;
         let stderr = child.stderr.take().ok_or_else(|| DriverError::Protocol("no stderr".into()))?;
@@ -111,7 +111,7 @@ impl NdjsonChild {
             let _ = child.kill().await;
             return;
         };
-        let pid = tree.0;
+        let pid = tree.pid();
         // A writer blocked on a full pipe holds stdin; the signal still stops it.
         if let Ok(mut stdin) = self.stdin.try_lock() {
             stdin.take();

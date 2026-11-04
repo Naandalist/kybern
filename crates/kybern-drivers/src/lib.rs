@@ -698,7 +698,7 @@ mod lifecycle_tests {
             let pids: Vec<u32> = pids.split_whitespace().map(|pid| pid.parse().unwrap()).collect();
             // Also clean up if an assertion fails; only this fixture's isolated
             // group is owned by the guard.
-            let _cleanup = crate::process_tree::ProcessTree(pids[0]);
+            let _cleanup = crate::process_tree::ProcessTree::new(pids[0]);
             assert!(process_is_running(pids[1]).await, "{kind} descendant was not live before cancellation");
             // Claude can finish its non-blocking startup; the others wait for
             // a protocol handshake. Both ownership paths must close descendants.

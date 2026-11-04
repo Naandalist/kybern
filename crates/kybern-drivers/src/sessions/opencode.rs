@@ -24,7 +24,7 @@ impl Server {
         #[cfg(unix)]
         cmd.process_group(0);
         let mut child = cmd.spawn()?;
-        let tree = crate::process_tree::ProcessTree(child.id().expect("spawned opencode"));
+        let tree = crate::process_tree::ProcessTree::new(child.id().expect("spawned opencode"));
         let stdout = child.stdout.take().ok_or_else(|| DriverError::Protocol("OpenCode session reader has no output.".into()))?;
         let mut lines = AsyncBufReader::new(stdout).lines();
         let base = tokio::time::timeout(Duration::from_secs(30), async {

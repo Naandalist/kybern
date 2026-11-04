@@ -126,7 +126,7 @@ async fn run_with_timeout(plan: &UpdateCommand, env: &BTreeMap<String, String>, 
         command.process_group(0);
     }
     let mut child = command.spawn()?;
-    let tree = ProcessTree(child.id().expect("spawned updater"));
+    let tree = ProcessTree::new(child.id().expect("spawned updater"));
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let result = tokio::time::timeout(timeout, async { tokio::join!(child.wait(), tail(stdout), tail(stderr)) }).await;

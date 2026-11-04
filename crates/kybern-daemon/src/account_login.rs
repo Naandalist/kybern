@@ -925,7 +925,7 @@ fn spawn_attempt(state: &AppState, spec: &Spec, visible_terminal: bool) -> Resul
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn()?;
-    let tree = kybern_drivers::process_tree::ProcessTree(child.id().expect("spawned login"));
+    let tree = kybern_drivers::process_tree::ProcessTree::interactive(child.id().expect("spawned login"));
     let stdin = child.stdin.take().map(|stdin| Arc::new(tokio::sync::Mutex::new(stdin)));
     let (tx, rx) = mpsc::channel(256);
     let read = |stream: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>, tx: mpsc::Sender<Event>| {

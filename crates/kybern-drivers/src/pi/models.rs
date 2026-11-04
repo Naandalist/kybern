@@ -49,7 +49,7 @@ async fn discover_inner(bin: &Path, context: &ProbeContext) -> Result<Discovery>
     command.process_group(0);
 
     let mut child = command.spawn()?;
-    let tree = crate::process_tree::ProcessTree(child.id().expect("spawned Pi discovery process"));
+    let tree = crate::process_tree::ProcessTree::new(child.id().expect("spawned Pi discovery process"));
     let mut stdin = child.stdin.take().ok_or_else(|| DriverError::Protocol("Pi RPC discovery did not provide stdin".into()))?;
     let stdout = child.stdout.take().ok_or_else(|| DriverError::Protocol("Pi RPC discovery did not provide stdout".into()))?;
     let mut lines = BufReader::new(stdout).lines();

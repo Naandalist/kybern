@@ -290,7 +290,7 @@ impl AgentDriver for OpencodeDriver {
         #[cfg(unix)]
         cmd.process_group(0);
         let mut child = cmd.spawn()?;
-        let tree = crate::process_tree::ProcessTree(child.id().expect("spawned opencode"));
+        let tree = crate::process_tree::ProcessTree::new(child.id().expect("spawned opencode"));
         let stdout = child.stdout.take().ok_or_else(|| DriverError::Protocol("no stdout".into()))?;
         let stderr = child.stderr.take().ok_or_else(|| DriverError::Protocol("no stderr".into()))?;
         tokio::spawn(async move {

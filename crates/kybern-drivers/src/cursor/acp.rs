@@ -356,7 +356,7 @@ async fn run_connection(
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = cmd.spawn()?;
-    let _tree = crate::process_tree::ProcessTree(child.id().expect("spawned cursor"));
+    let _tree = crate::process_tree::ProcessTree::new(child.id().expect("spawned cursor"));
     let stdin = child.stdin.take().ok_or_else(|| DriverError::Protocol("no stdin".into()))?;
     let stdout = child.stdout.take().ok_or_else(|| DriverError::Protocol("no stdout".into()))?;
     if let Some(stderr) = child.stderr.take() {
