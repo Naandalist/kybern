@@ -59,7 +59,14 @@ export interface RpcNotification {
 export interface RpcError {
   code: number;
   message: string;
+  /** Current daemons put `data.problem` on every error (`RpcErrorData`); other keys (`code`, `kind`, …) stay as they were. */
   data?: JsonValue;
+}
+
+/** The `data` of a daemon error: `problem` (on every error from current daemons) next to any method-specific keys. */
+export interface RpcErrorData {
+  problem?: Problem;
+  [key: string]: JsonValue | Problem | undefined;
 }
 
 /**

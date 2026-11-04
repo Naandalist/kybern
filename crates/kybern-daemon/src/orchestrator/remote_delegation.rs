@@ -102,6 +102,8 @@ impl std::fmt::Display for CallFailure {
     }
 }
 
+impl std::error::Error for CallFailure {}
+
 /// What remote delegation needs from the machine network.
 #[async_trait]
 pub trait RemoteHub: Send + Sync {

@@ -1,0 +1,30 @@
+---
+source: crates/kybern-protocol/tests/schema_snapshot.rs
+expression: error
+---
+{
+  "code": -32010,
+  "message": "The GitHub CLI (gh) isn't installed.",
+  "data": {
+    "kind": "fork_queued",
+    "problem": {
+      "kind": "tool_missing",
+      "subject": "gh",
+      "title": "Install GitHub CLI",
+      "hint": "Kybern uses your own GitHub sign-in through the GitHub CLI (gh).",
+      "action": {
+        "id": "install_tool",
+        "label": "Install GitHub CLI",
+        "params": {
+          "tool": "gh"
+        }
+      },
+      "secondary": {
+        "id": "retry",
+        "label": "Check again"
+      },
+      "detail": "run gh: program not found",
+      "retryable": true
+    }
+  }
+}

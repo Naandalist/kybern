@@ -106,6 +106,7 @@ import type { LayoutRect } from './native/layout.ts'
 import type { PaintTransformProps } from '@gpuix/native/host'
 
 import { hoverPressTransform } from './motion/press.ts'
+import { describeProblem } from '../../../packages/kybern-client/src/problems.ts'
 import {
   launchNewChat,
   ensureLoaded,
@@ -846,7 +847,9 @@ export function ComposerView(input: ComposerViewProps) {
       // Only into an empty composer: what was typed meanwhile is never overwritten.
       setText((current) => current || draft.text)
       setAttachments((current) => (current.length ? current : draft.attachments))
-      setError(`Unable to send: ${errorText(e)}`)
+      // Plain words for what went wrong and what to do; the draft is back in the box, so say so.
+      const problem = describeProblem(e, { action: 'send your message' })
+      setError(`${problem.title}. ${problem.body} Your message is saved.`)
     } finally {
       setSending(false)
     }

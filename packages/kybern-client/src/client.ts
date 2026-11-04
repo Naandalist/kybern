@@ -18,8 +18,10 @@ import {
   type RpcResponse,
   type SubscriptionId,
   type ThreadEvent,
+  type Problem,
 } from "./types.ts";
 import { httpBase } from "./address.ts";
+import { problemOf } from "./problem.ts";
 
 export interface Endpoint {
   url: string;
@@ -31,11 +33,19 @@ export type ConnectionStatus =
 export class RpcCallError extends Error {
   readonly code: number;
   readonly data: unknown;
+  /** What went wrong in terms a person can act on (`data.problem`), when the daemon sent one. */
+  readonly problem?: Problem;
   constructor(error: RpcError) {
     super(error.message);
     this.name = "RpcCallError";
     this.code = error.code;
     this.data = error.data;
+    const problem = problemOf(error);
+    if (problem) this.problem = problem;
+  }
+  /** Only the message, so a stray `String(error)` never shows "RpcCallError:" to a person. */
+  toString(): string {
+    return this.message;
   }
 }
 export class ConnectionClosedError extends Error {

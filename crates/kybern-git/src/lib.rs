@@ -9,7 +9,7 @@
 //! `SNAPSHOT_SKIP_BYTES` or more are left out (named in the commit message)
 //! and kept when a snapshot is restored.
 
-use kybern_protocol::process::NoWindow;
+use kybern_protocol::process::{NoWindow, SpawnError};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -186,6 +186,12 @@ pub struct LogEntryWithFiles {
 
 pub use kybern_protocol::{Diff, DiffStat, FileChange, FileStatus};
 
+/// Git could not be started (not installed, not on PATH, not allowed to run), as a typed error
+/// the daemon turns into "Install Git" rather than a failed command.
+fn spawn_error(error: std::io::Error) -> SpawnError {
+    SpawnError::new("git", error)
+}
+
 impl Repo {
     pub fn new(workdir: impl Into<PathBuf>) -> Self {
         Self { workdir: workdir.into(), env: Vec::new() }
@@ -208,7 +214,7 @@ impl Repo {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let out = cmd.output().await.context("run git")?;
+        let out = cmd.output().await.map_err(spawn_error)?;
         if !out.status.success() {
             return Err(anyhow!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
         }
@@ -224,7 +230,7 @@ impl Repo {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        cmd.output().await.context("run git")?;
+        cmd.output().await.map_err(spawn_error)?;
         Ok(())
     }
 
@@ -271,7 +277,7 @@ impl Repo {
             .stderr(Stdio::piped())
             .output()
             .await
-            .context("run git")?;
+            .map_err(spawn_error)?;
         match out.status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
@@ -293,7 +299,7 @@ impl Repo {
             .stderr(Stdio::null())
             .output()
             .await
-            .context("run git")?;
+            .map_err(spawn_error)?;
         Ok(out.status.success())
     }
 
@@ -603,11 +609,11 @@ impl Repo {
         cmd.envs(self.env.iter().map(|(k, v)| (k, v)));
         cmd.envs(env.iter().copied());
         cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().context("run git")?;
+        let mut child = cmd.spawn().map_err(spawn_error)?;
         let mut stdin = child.stdin.take().context("git stdin")?;
         tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes()).await.context("write git index info")?;
         drop(stdin);
-        let out = child.wait_with_output().await.context("run git")?;
+        let out = child.wait_with_output().await.map_err(spawn_error)?;
         if !out.status.success() {
             return Err(anyhow!("git update-index --index-info failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
@@ -866,7 +872,7 @@ impl Repo {
             .stdin(Stdio::null())
             .output()
             .await
-            .context("run git")?;
+            .map_err(spawn_error)?;
         match out.status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
@@ -929,7 +935,7 @@ impl Repo {
             Some(limit) => tokio::time::timeout(limit, run).await.map_err(|_| anyhow!("git {} timed out", args.join(" ")))?,
             None => run.await,
         }
-        .context("run git")?;
+        .map_err(spawn_error)?;
         Ok(GitOutput {
             success: out.status.success(),
             stdout: String::from_utf8_lossy(&out.stdout).trim_end().to_string(),

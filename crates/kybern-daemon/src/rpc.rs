@@ -1701,8 +1701,15 @@ fn pr_dir(project: &Project, repo: Option<&str>) -> Result<std::path::PathBuf, R
     crate::orchestrator::pr_repo_dir(project, repo).map_err(RpcError::invalid_params)
 }
 
-fn internal(e: impl std::fmt::Display) -> RpcError {
-    RpcError::internal(e)
+/// An unexpected failure: the whole error chain as the message, and as `data.problem` the
+/// typed meaning of an `anyhow::Error` (a missing program, an offline machine, ...) or `internal`.
+fn internal<E: std::fmt::Display + 'static>(e: E) -> RpcError {
+    if let Some(error) = (&e as &dyn std::any::Any).downcast_ref::<anyhow::Error>() {
+        return crate::problem::rpc_error(codes::INTERNAL_ERROR, error);
+    }
+    let text = format!("{e:#}");
+    RpcError::new(codes::INTERNAL_ERROR, text.clone())
+        .with_problem(&kybern_protocol::rpc::Problem::new(kybern_protocol::rpc::ProblemKind::Internal, text))
 }
 
 /// Preview failures keep a stable machine code in `data.code`.
@@ -1718,10 +1725,9 @@ fn preview_error(error: crate::previews::PreviewError) -> RpcError {
 /// A save that lost the race with another writer is a conflict, so clients can
 /// offer Reload instead of showing a plain error.
 fn write_error(e: anyhow::Error) -> RpcError {
-    if e.is::<crate::files::WriteConflict>() { RpcError::new(codes::CONFLICT, e.to_string()) } else { bad(e) }
+    if e.is::<crate::files::WriteConflict>() { crate::problem::rpc_error(codes::CONFLICT, &e) } else { bad(e) }
 }
 
-/// User-facing failures from the orchestrator: not found, busy, bad input.
 /// A `gh` call's failure: `friendly`'s words, with the `Problem` a client recovers by as `data.problem`.
 fn gh_bad(e: anyhow::Error) -> RpcError {
     match crate::github::friendly_problem(e) {
@@ -1746,15 +1752,25 @@ fn gh_missing() -> RpcError {
     gh_error(crate::github::GH_MISSING.to_string(), &problem)
 }
 
+/// User-facing failures from the orchestrator: not found, busy, bad input. A typed cause picks the
+/// code and `data.problem` (a missing program is `PROVIDER_UNAVAILABLE`, not "not found"); text
+/// decides only what nothing typed says. The message is the whole error chain.
 fn bad(e: anyhow::Error) -> RpcError {
-    let msg = e.to_string();
-    if msg.contains("not found") {
-        RpcError::new(codes::NOT_FOUND, msg)
-    } else if msg.contains("not available") || msg.contains("not found:") {
-        RpcError::new(codes::PROVIDER_UNAVAILABLE, msg)
-    } else {
-        RpcError::new(codes::INVALID_PARAMS, msg)
+    use kybern_protocol::rpc::{Problem, ProblemKind};
+    if let Some(problem) = crate::problem::typed(&e) {
+        let code = crate::problem::code_for(problem.kind).unwrap_or(codes::INVALID_PARAMS);
+        return crate::problem::rpc_error(code, &e);
     }
+    let message = crate::problem::detail(&e);
+    let outer = e.to_string();
+    let (code, kind) = if outer.contains("not found") {
+        (codes::NOT_FOUND, ProblemKind::NotFound)
+    } else if outer.contains("not available") {
+        (codes::PROVIDER_UNAVAILABLE, ProblemKind::Internal)
+    } else {
+        (codes::INVALID_PARAMS, ProblemKind::Internal)
+    };
+    RpcError::new(code, message.clone()).with_problem(&Problem::new(kind, message))
 }
 
 /// Notes failures: a stale revision is a CONFLICT the client can resolve, the rest
@@ -1762,9 +1778,9 @@ fn bad(e: anyhow::Error) -> RpcError {
 fn note_err(e: anyhow::Error) -> RpcError {
     use kybern_store::NoteError;
     match e.downcast_ref::<NoteError>() {
-        Some(NoteError::Conflict) => RpcError::new(codes::CONFLICT, e.to_string()),
-        Some(NoteError::NotFound(_)) => RpcError::new(codes::NOT_FOUND, e.to_string()),
-        Some(NoteError::Deleted | NoteError::Invalid(_)) => RpcError::new(codes::INVALID_PARAMS, e.to_string()),
+        Some(NoteError::Conflict) => crate::problem::rpc_error(codes::CONFLICT, &e),
+        Some(NoteError::NotFound(_)) => crate::problem::rpc_error(codes::NOT_FOUND, &e),
+        Some(NoteError::Deleted | NoteError::Invalid(_)) => crate::problem::rpc_error(codes::INVALID_PARAMS, &e),
         None => internal(e),
     }
 }
@@ -1775,9 +1791,9 @@ fn note_err(e: anyhow::Error) -> RpcError {
 fn task_err(e: anyhow::Error) -> RpcError {
     use kybern_store::TaskError;
     match e.downcast_ref::<TaskError>() {
-        Some(TaskError::Conflict) => RpcError::new(codes::CONFLICT, e.to_string()),
-        Some(TaskError::NotFound(_)) => RpcError::new(codes::NOT_FOUND, e.to_string()),
-        Some(TaskError::Invalid(_)) => RpcError::new(codes::INVALID_PARAMS, e.to_string()),
+        Some(TaskError::Conflict) => crate::problem::rpc_error(codes::CONFLICT, &e),
+        Some(TaskError::NotFound(_)) => crate::problem::rpc_error(codes::NOT_FOUND, &e),
+        Some(TaskError::Invalid(_)) => crate::problem::rpc_error(codes::INVALID_PARAMS, &e),
         None if e.downcast_ref::<kybern_store::NoteError>().is_some() => note_err(e),
         // Starting the agent can fail for provider reasons (unknown model, no binary).
         None => bad(e),
@@ -1785,7 +1801,7 @@ fn task_err(e: anyhow::Error) -> RpcError {
 }
 
 fn provider_err(e: anyhow::Error) -> RpcError {
-    RpcError::new(codes::PROVIDER_ERROR, e.to_string())
+    crate::problem::rpc_error(codes::PROVIDER_ERROR, &e)
 }
 
 pub(crate) fn hostname() -> String {
@@ -1843,7 +1859,9 @@ mod gh_error_tests {
     #[test]
     fn other_gh_errors_stay_plain() {
         let error = gh_bad(anyhow::anyhow!("gh pr list: boom"));
-        assert_eq!((error.message.as_str(), error.data), ("gh pr list: boom", None));
+        assert_eq!(error.message, "gh pr list: boom");
+        let problem = error.problem().unwrap();
+        assert_eq!((problem.kind, problem.detail.as_deref()), (kybern_protocol::rpc::ProblemKind::Internal, Some("gh pr list: boom")));
         let signed_out = gh_bad(anyhow::anyhow!("gh pr list: not logged in to any GitHub hosts"));
         assert_eq!(signed_out.data.unwrap()["problem"]["action"]["id"], "sign_in");
     }

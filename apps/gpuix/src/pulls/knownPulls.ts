@@ -1,4 +1,6 @@
 import { classifyPrError } from '@/state/prReviewModel'
+import { errorMessage } from '../../../../packages/kybern-client/src/problem.ts'
+import { describeProblem } from '../../../../packages/kybern-client/src/problems.ts'
 import { mapWithConcurrency } from '@/lib/workload'
 import type { Project } from '../../../../packages/kybern-client/src/types.ts'
 import type { prCall } from './client.ts'
@@ -31,7 +33,11 @@ export async function loadKnownPulls(projects: readonly Project[], call: typeof 
         for (const member of result.members) if (member.status === 'ok') add(member.remote_url, member.path)
       })] : []),
     ])
-    for (const result of results) if (result.status === 'rejected' && classifyPrError(String(result.reason)) !== 'no-remote') errors.push(`${project.name}: ${String(result.reason)}`)
+    for (const result of results) {
+      if (result.status !== 'rejected' || classifyPrError(errorMessage(result.reason)) === 'no-remote') continue
+      // The headline only ("Install GitHub CLI to load pull requests"): the raw text never reaches the page.
+      errors.push(`${project.name}: ${describeProblem(result.reason, { action: 'load pull requests' }).title}`)
+    }
     return { repos, rows, errors }
   })
   return { repos: loaded.flatMap(r => r.repos), rows: loaded.flatMap(r => r.rows), errors: loaded.flatMap(r => r.errors) }

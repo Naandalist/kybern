@@ -189,7 +189,14 @@ fn named_unreachable(wanted: &Wanted, asking: &Asking) -> Result<(), RpcError> {
             SkipReason::TimedOut => "did not answer in time",
             SkipReason::Failed => "could not be read",
         };
-        return Err(RpcError::new(codes::NOT_AVAILABLE, format!("{} {why}.", skipped.machine_name)));
+        let message = format!("{} {why}.", skipped.machine_name);
+        let error = RpcError::new(codes::NOT_AVAILABLE, message.clone());
+        return Err(match skipped.reason {
+            SkipReason::Offline | SkipReason::TimedOut => {
+                error.with_problem(&crate::problem::machine_offline(&skipped.machine_name, message))
+            }
+            _ => error,
+        });
     }
     Ok(())
 }

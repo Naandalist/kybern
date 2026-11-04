@@ -35,6 +35,7 @@ mod orchestrator;
 mod pick;
 mod power;
 mod previews;
+mod problem;
 mod project_map;
 mod provider_accounts;
 mod provider_assets;

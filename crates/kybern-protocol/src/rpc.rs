@@ -163,9 +163,98 @@ pub struct ProblemAction {
     pub params: Option<Value>,
 }
 
+/// The longest `Problem::detail` Kybern sends. A failed command's text can quote all of its
+/// arguments (a pull request's whole body); the start says what failed.
+pub const PROBLEM_DETAIL_MAX: usize = 4000;
+
+impl Problem {
+    /// A problem of `kind` with `detail` (the full technical text) and nothing else.
+    pub fn new(kind: ProblemKind, detail: impl Into<String>) -> Self {
+        let mut detail: String = detail.into();
+        if detail.len() > PROBLEM_DETAIL_MAX {
+            let mut end = PROBLEM_DETAIL_MAX;
+            while !detail.is_char_boundary(end) {
+                end -= 1;
+            }
+            detail.truncate(end);
+            detail.push('…');
+        }
+        Self {
+            kind,
+            subject: None,
+            title: None,
+            hint: None,
+            action: None,
+            secondary: None,
+            detail: Some(detail),
+            retryable: kind.retryable(),
+        }
+    }
+    pub fn with_subject(self, subject: impl Into<String>) -> Self {
+        Self { subject: Some(subject.into()), ..self }
+    }
+    /// The daemon's fallback headline and sentence; clients prefer their own copy.
+    pub fn with_copy(self, title: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self { title: Some(title.into()), hint: Some(hint.into()), ..self }
+    }
+    pub fn with_action(self, action: ProblemAction) -> Self {
+        Self { action: Some(action), ..self }
+    }
+    pub fn with_secondary(self, action: ProblemAction) -> Self {
+        Self { secondary: Some(action), ..self }
+    }
+}
+
+impl ProblemKind {
+    /// Whether the same call can work later without the user changing what they asked for.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::ToolMissing | Self::SignedOut | Self::Permission | Self::Offline | Self::Conflict | Self::Internal)
+    }
+
+    /// The kind an error with only a JSON-RPC `code` most likely is. Codes that several
+    /// failures share (`PROVIDER_UNAVAILABLE`, `NOT_AVAILABLE`) are `Internal`: the daemon
+    /// attaches a typed problem where it knows better.
+    pub fn for_code(code: i32) -> Self {
+        match code {
+            codes::PARSE_ERROR | codes::INVALID_REQUEST | codes::INVALID_PARAMS => Self::InvalidInput,
+            codes::METHOD_NOT_FOUND => Self::UpdateNeeded,
+            codes::UNAUTHORIZED | codes::FORBIDDEN => Self::Permission,
+            codes::NOT_FOUND => Self::NotFound,
+            codes::CONFLICT | codes::THREAD_BUSY => Self::Conflict,
+            _ => Self::Internal,
+        }
+    }
+}
+
+impl ProblemAction {
+    pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { id: id.into(), label: label.into(), params: None }
+    }
+    pub fn with_params(self, params: Value) -> Self {
+        Self { params: Some(params), ..self }
+    }
+    /// "Check again" / "Try again": the client repeats what failed.
+    pub fn retry(label: impl Into<String>) -> Self {
+        Self::new("retry", label)
+    }
+}
+
 impl RpcError {
     pub fn new(code: i32, message: impl Into<String>) -> Self {
         Self { code, message: message.into(), data: None }
+    }
+    /// The `data.problem` this error carries, if any.
+    pub fn problem(&self) -> Option<Problem> {
+        self.data.as_ref()?.get("problem").and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+    /// This error with a `data.problem`: the one it has, or one read from its `code` with the
+    /// message as the detail. Every error the daemon answers with goes through this.
+    pub fn ensure_problem(self) -> Self {
+        if self.data.as_ref().and_then(|data| data.get("problem")).is_some() {
+            return self;
+        }
+        let problem = Problem::new(ProblemKind::for_code(self.code), self.message.clone());
+        self.with_problem(&problem)
     }
     /// Attach `problem` as `data.problem`, keeping any other `data` fields.
     pub fn with_problem(mut self, problem: &Problem) -> Self {

@@ -1,5 +1,6 @@
-// The words a pull request, Actions or review surface shows for a `Problem`, keyed by its kind and subject. The daemon's
-// `title` and `hint` are only the fallback for kinds this client has no copy for.
+// The words a pull request, Actions or review surface shows for a `Problem`. The copy itself lives in the shared
+// `describeProblem`; this maps its view onto the PR page's gh fixes (install or sign in through the terminal sheet).
+import { describeProblem } from '../../../../packages/kybern-client/src/problems.ts'
 import type { Problem } from '../../../../packages/kybern-client/src/types.ts'
 
 export interface ProblemCopy {
@@ -12,26 +13,14 @@ export interface ProblemCopy {
   retryLabel: string
 }
 
-/** `noun`: what the surface shows, e.g. "pull requests", "workflow runs", "this pull request". */
+/**
+ * `noun`: what the surface shows, e.g. "pull requests", "workflow runs", "this pull request". The technical text stays
+ * behind Details (the problem's `detail`), so only the problem itself is described.
+ */
 export function problemCopy(problem: Problem, noun: string): ProblemCopy {
-  const gh = problem.subject === 'gh'
-  if (gh && problem.kind === 'tool_missing') {
-    return { title: `Install GitHub CLI to see ${noun}`, body: 'Kybern uses your own GitHub sign-in through the GitHub CLI (gh). Install it once and every project can use it.', action: 'install-gh', primaryLabel: 'Install GitHub CLI', retryLabel: 'Check again' }
-  }
-  if (gh && problem.kind === 'signed_out') {
-    return { title: `Sign in to GitHub to see ${noun}`, body: 'The GitHub CLI (gh) is installed but isn’t signed in. Kybern uses your own GitHub sign-in through it.', action: 'sign-in-gh', primaryLabel: 'Sign in to GitHub', retryLabel: 'Check again' }
-  }
-  if (problem.kind === 'permission') {
-    return { title: 'GitHub refused access', body: 'The signed-in GitHub account can’t see or change this repository. Check its access on GitHub, then try again.', action: null, retryLabel: 'Try again' }
-  }
-  if (problem.kind === 'not_found' && problem.subject === 'github_remote') {
-    return { title: 'This project isn’t on GitHub', body: 'Add a GitHub remote to this repository, then try again.', action: null, retryLabel: 'Try again' }
-  }
-  if (problem.kind === 'not_found') {
-    return { title: 'GitHub couldn’t find this', body: 'Check that origin points at GitHub and that the signed-in account can see the repository, then try again.', action: null, retryLabel: 'Try again' }
-  }
-  if (problem.kind === 'internal' || !problem.title) {
-    return { title: `Unable to load ${noun}`, body: 'Something went wrong while talking to GitHub. Try again. If it keeps happening, copy the details and report them.', action: null, retryLabel: 'Try again' }
-  }
-  return { title: problem.title, body: problem.hint ?? 'Try again.', action: null, retryLabel: 'Try again' }
+  const view = describeProblem({ message: '', data: { problem } }, { action: `load ${noun}`, goal: `see ${noun}` })
+  const gh = view.subject === 'gh'
+  const action = gh && view.action?.id === 'install_tool' ? 'install-gh' : gh && view.action?.id === 'sign_in' ? 'sign-in-gh' : null
+  const retry = [view.action, view.secondary].find(a => a?.id === 'retry')
+  return { title: view.title, body: view.body, action, ...(action ? { primaryLabel: view.action!.label } : {}), retryLabel: retry?.label ?? 'Try again' }
 }

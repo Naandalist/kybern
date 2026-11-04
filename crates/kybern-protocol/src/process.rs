@@ -8,6 +8,9 @@
 //!
 //! `write_executable` writes a program this process is about to start, such as a test fixture,
 //! so that Linux cannot refuse to run it as busy.
+//!
+//! `SpawnError` is a program that could not be started at all (not installed, not on PATH, not
+//! allowed), so callers can tell "git is missing" from "git ran and failed" by type, not by text.
 
 /// Start a child process without a console window (Windows `CREATE_NO_WINDOW`).
 pub trait NoWindow: Sized {
@@ -37,6 +40,46 @@ impl NoWindow for tokio::process::Command {
         self
     }
 }
+
+/// A program could not be started: `source` says why (`NotFound` when it isn't installed or isn't
+/// on PATH, `PermissionDenied` when it may not run). Its text keeps the cause, e.g.
+/// "run gh: program not found".
+#[derive(Debug)]
+pub struct SpawnError {
+    pub program: String,
+    pub source: std::io::Error,
+}
+
+impl SpawnError {
+    pub fn new(program: impl Into<String>, source: std::io::Error) -> Self {
+        Self { program: program.into(), source }
+    }
+
+    /// The program's short name, the same for `gh`, `/usr/bin/gh` and `C:\…\gh.exe`: `gh`.
+    pub fn tool(&self) -> String {
+        tool_name(&self.program)
+    }
+
+    pub fn kind(&self) -> std::io::ErrorKind {
+        self.source.kind()
+    }
+}
+
+/// A program's short name: its file name without a Windows executable extension, in lower case.
+pub fn tool_name(program: &str) -> String {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let lower = name.to_ascii_lowercase();
+    [".exe", ".cmd", ".bat", ".ps1"].iter().find_map(|ext| lower.strip_suffix(ext).map(str::to_string)).unwrap_or(lower)
+}
+
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "run {}: {}", self.program, self.source)
+    }
+}
+
+// The cause is part of the text above, so it is not repeated as a `source`.
+impl std::error::Error for SpawnError {}
 
 /// Write `contents` to `path` as an executable file (mode 0755 on Unix), replacing any file there.
 ///
@@ -85,6 +128,16 @@ pub fn write_executable(path: &std::path::Path, contents: impl AsRef<[u8]>) -> s
 #[cfg(test)]
 mod tests {
     use super::NoWindow;
+
+    #[test]
+    fn spawn_errors_name_the_tool_and_keep_the_cause() {
+        let error = super::SpawnError::new("gh", std::io::Error::new(std::io::ErrorKind::NotFound, "program not found"));
+        assert_eq!(error.to_string(), "run gh: program not found");
+        assert_eq!((error.tool(), error.kind()), ("gh".to_string(), std::io::ErrorKind::NotFound));
+        assert_eq!(super::tool_name(r"C:\Program Files\GitHub CLI\gh.EXE"), "gh");
+        assert_eq!(super::tool_name("/usr/local/bin/git"), "git");
+        assert_eq!(super::tool_name("npm.cmd"), "npm");
+    }
 
     #[test]
     fn leaves_the_command_usable() {

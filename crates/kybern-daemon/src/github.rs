@@ -1,7 +1,7 @@
 //! Git status and GitHub pull requests through the user's `gh` CLI, which
 //! already holds their credentials.
 
-use kybern_protocol::process::NoWindow;
+use kybern_protocol::process::{NoWindow, SpawnError};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -13,8 +13,8 @@ use tokio::process::Command;
 
 /// Spawn `program` (stdin as `stdin` says, output piped). When the bare `gh` isn't on PATH,
 /// `gh_locate::refresh` looks again where a new terminal would, and the spawn is retried once.
-/// A failure keeps its cause in the message ("run gh: program not found"), which clients show
-/// and `friendly` reads.
+/// A failure is a `SpawnError` that keeps its cause ("run gh: program not found"), which
+/// `friendly` and `problem::problem_from` read by type.
 pub(crate) fn spawn(cwd: &Path, program: &str, args: &[&str], stdin: std::process::Stdio) -> Result<tokio::process::Child> {
     let mut stdin = Some(stdin);
     let mut start = || {
@@ -32,13 +32,26 @@ pub(crate) fn spawn(cwd: &Path, program: &str, args: &[&str], stdin: std::proces
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && crate::gh_locate::refresh(program) => start(),
         other => other,
     };
-    child.map_err(|error| anyhow!("run {program}: {error}"))
+    child.map_err(|error| SpawnError::new(program, error).into())
+}
+
+/// `args` for an error message: each one cut to a few words, so a failed `gh pr create` doesn't
+/// quote the whole title and body of the pull request.
+fn shown_args(args: &[&str]) -> String {
+    const MAX: usize = 60;
+    args.iter()
+        .map(|arg| match arg.char_indices().nth(MAX) {
+            Some((end, _)) => format!("{}…", &arg[..end]),
+            None => arg.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) async fn run(cwd: &Path, program: &str, args: &[&str]) -> Result<String> {
     let out = spawn(cwd, program, args, std::process::Stdio::null())?.wait_with_output().await.with_context(|| format!("run {program}"))?;
     if !out.status.success() {
-        return Err(anyhow!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(anyhow!("{program} {}: {}", shown_args(args), String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
@@ -51,7 +64,7 @@ pub(crate) async fn run_stdin(cwd: &Path, program: &str, args: &[&str], input: &
     drop(stdin);
     let out = child.wait_with_output().await.with_context(|| format!("run {program}"))?;
     if !out.status.success() {
-        return Err(anyhow!("{program} {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(anyhow!("{program} {}: {}", shown_args(args), String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
@@ -155,11 +168,23 @@ pub(crate) fn classify(raw: &str) -> Option<(Option<GhErrorKind>, &'static str)>
     })
 }
 
+/// `classify` for an error: a `gh` that could not be started is read from its `SpawnError` type,
+/// anything else from its text (which older paths and `gh`'s own stderr only have as text).
+pub(crate) fn classify_error(error: &anyhow::Error) -> Option<(Option<GhErrorKind>, &'static str)> {
+    let spawn = error.chain().find_map(|cause| cause.downcast_ref::<SpawnError>());
+    match spawn {
+        Some(spawn) if spawn.tool() == "gh" && spawn.kind() == std::io::ErrorKind::NotFound => {
+            Some((Some(GhErrorKind::GhMissing), GH_MISSING))
+        }
+        _ => classify(&format!("{error:#}")),
+    }
+}
+
 /// `gh`'s failure in words that say what to do next; the original text follows for the details.
 /// Text that is already friendly is returned as it is.
 pub(crate) fn friendly(error: anyhow::Error) -> anyhow::Error {
     let raw = format!("{error:#}");
-    match classify(&raw) {
+    match classify_error(&error) {
         Some((_, lead)) if !raw.starts_with(lead) => anyhow!("{lead} ({})", raw.lines().last().unwrap_or_default().trim()),
         _ => error,
     }
@@ -168,7 +193,7 @@ pub(crate) fn friendly(error: anyhow::Error) -> anyhow::Error {
 /// `friendly`'s message and the `Problem` a client recovers by, with the full error chain as its detail.
 pub(crate) fn friendly_problem(error: anyhow::Error) -> (String, Option<Problem>) {
     let raw = format!("{error:#}");
-    let problem = classify(&raw).and_then(|(kind, _)| kind).map(|kind| gh_problem(kind, raw));
+    let problem = classify_error(&error).and_then(|(kind, _)| kind).map(|kind| gh_problem(kind, raw));
     (format!("{:#}", friendly(error)), problem)
 }
 

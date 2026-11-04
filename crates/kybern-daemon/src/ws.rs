@@ -928,7 +928,7 @@ async fn handle_text(state: &AppState, ctx: &Arc<ConnectionCtx>, text: &str) {
     let frame: ClientFrame = match serde_json::from_str(text) {
         Ok(f) => f,
         Err(e) => {
-            let resp = RpcResponse::err(RpcId::Number(0), RpcError::new(codes::PARSE_ERROR, e.to_string()));
+            let resp = RpcResponse::err(RpcId::Number(0), RpcError::new(codes::PARSE_ERROR, e.to_string()).ensure_problem());
             let _ = ctx.out.send(ServerFrame::Response(resp)).await;
             return;
         }
@@ -940,7 +940,10 @@ async fn handle_text(state: &AppState, ctx: &Arc<ConnectionCtx>, text: &str) {
     if !principal_is_active(state, &ctx.principal) {
         let _ = ctx
             .out
-            .send(ServerFrame::Response(RpcResponse::err(req.id, RpcError::new(codes::UNAUTHORIZED, "Device access was revoked"))))
+            .send(ServerFrame::Response(RpcResponse::err(
+                req.id,
+                RpcError::new(codes::UNAUTHORIZED, "Device access was revoked").ensure_problem(),
+            )))
             .await;
         return;
     }
@@ -957,7 +960,8 @@ async fn handle_text(state: &AppState, ctx: &Arc<ConnectionCtx>, text: &str) {
     };
     let resp = match result {
         Ok(v) => RpcResponse::ok(req.id, v),
-        Err(e) => RpcResponse::err(req.id, e),
+        // Every error a client sees carries `data.problem`, so it can show plain words and a fix.
+        Err(e) => RpcResponse::err(req.id, e.ensure_problem()),
     };
     let _ = ctx.out.send(ServerFrame::Response(resp)).await;
 }

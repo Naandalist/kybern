@@ -15,7 +15,7 @@ test('known-network discovery keeps partial/offline results and uses member remo
  const data=await knownPulls(projects,call)
  expect(resolvePull('https://github.com/acme/docs/pull/999',data.repos)).toEqual({projectId:'group',repo:'docs',number:999})
  expect(resolvePull('https://github.com/acme/remote/pull/123',data.repos)).toEqual({projectId:'foreign',number:123})
- expect(data.errors).toEqual(['Offline: Error: offline'])
+ expect(data.errors).toEqual(["Offline: Couldn't load pull requests"])
  expect(calls).toContainEqual({project:'foreign',method:'github.pr.list'})
  expect(calls).toContainEqual({project:'group',method:'projects.members.status'})
 })
@@ -28,4 +28,12 @@ test('identified transcript PR targets avoid a network-wide GitHub list scan',as
  expect(calls).toEqual([])
  expect(await resolveKnownPull('https://github.com/acme/docs/pull/108',projects,call)).toEqual({projectId:'group',repo:'docs',number:108})
  expect(calls).toEqual(['group:projects.members.status'])
+})
+
+test('a failed project says what to do, never the raw daemon error', async () => {
+  const { RpcCallError } = await import('../../../../packages/kybern-client/src/client.ts')
+  const projects = [{ id: 'p', name: 'Kybern', is_git: true }] as Project[]
+  const call = (async () => { throw new RpcCallError({ code: -32602, message: 'run gh' }) }) as Parameters<typeof knownPulls>[1]
+  const data = await knownPulls(projects, call)
+  expect(data.errors).toEqual(['Kybern: Install GitHub CLI to load pull requests'])
 })

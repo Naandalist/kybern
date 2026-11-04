@@ -1,0 +1,123 @@
+---
+source: crates/kybern-protocol/tests/schema_snapshot.rs
+expression: schema_for!(Problem)
+---
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Problem",
+  "description": "What went wrong in terms a person can act on, sent as an RPC error's `data.problem` (and in\nresults that report per-item failures). Additive: `message` stays the readable fallback, and\nclients that don't know a `kind` show `message`. Clients prefer their own copy keyed by\n`kind` and `subject`; `title` and `hint` are the daemon's fallback copy.",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "$ref": "#/$defs/ProblemKind"
+    },
+    "subject": {
+      "description": "What the problem is about, e.g. `gh` for the GitHub CLI.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hint": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "action": {
+      "description": "The one action that fixes it, when there is one.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProblemAction"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "secondary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ProblemAction"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "detail": {
+      "description": "The full technical error, for a Details disclosure; never the headline.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "retryable": {
+      "description": "Trying the same call again can succeed once the cause is fixed.",
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "kind"
+  ],
+  "$defs": {
+    "ProblemKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "conflict",
+            "invalid_input",
+            "not_found",
+            "update_needed",
+            "internal"
+          ]
+        },
+        {
+          "description": "A program Kybern needs isn't installed or can't be found.",
+          "type": "string",
+          "const": "tool_missing"
+        },
+        {
+          "description": "Nobody is signed in where the call needs an account.",
+          "type": "string",
+          "const": "signed_out"
+        },
+        {
+          "description": "The account is signed in but not allowed to do this.",
+          "type": "string",
+          "const": "permission"
+        },
+        {
+          "description": "A machine or service can't be reached.",
+          "type": "string",
+          "const": "offline"
+        }
+      ]
+    },
+    "ProblemAction": {
+      "description": "A button a client can offer. `id` is what the client does (`install_tool`, `sign_in`,\n`retry`, ...); `params` carry what it needs, e.g. `{ \"tool\": \"gh\" }`.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "params": true
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    }
+  }
+}

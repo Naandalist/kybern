@@ -577,3 +577,39 @@ fn spaces_sync_contract_is_stable() {
     insta::assert_json_snapshot!("peer_space_logo_params", schema_for!(PeerSpaceLogoParams));
     insta::assert_json_snapshot!("peer_space_logo_result", schema_for!(PeerSpaceLogoResult));
 }
+
+#[test]
+fn problem_schema_is_stable() {
+    insta::assert_json_snapshot!("problem_schema", schema_for!(Problem));
+}
+
+/// An RPC error with `data.problem`: the shape every client reads to show plain words and a fix.
+#[test]
+fn rpc_error_problem_wire_example() {
+    let problem = Problem::new(ProblemKind::ToolMissing, "run gh: program not found")
+        .with_subject("gh")
+        .with_copy("Install GitHub CLI", "Kybern uses your own GitHub sign-in through the GitHub CLI (gh).")
+        .with_action(ProblemAction::new("install_tool", "Install GitHub CLI").with_params(serde_json::json!({ "tool": "gh" })))
+        .with_secondary(ProblemAction::retry("Check again"));
+    let error = RpcError::new(codes::PROVIDER_UNAVAILABLE, "The GitHub CLI (gh) isn't installed.")
+        .with_data(serde_json::json!({ "kind": "fork_queued" }))
+        .with_problem(&problem);
+    insta::assert_json_snapshot!("rpc_error_problem", error);
+    assert_eq!(error.problem(), Some(problem));
+    // Other `data` fields stay next to the problem.
+    assert_eq!(error.data.as_ref().unwrap()["kind"], "fork_queued");
+
+    // An error without one gets a problem from its code, with the message as the detail.
+    let plain = RpcError::invalid_params("missing field `thread_id`").ensure_problem().problem().unwrap();
+    assert_eq!((plain.kind, plain.detail.as_deref()), (ProblemKind::InvalidInput, Some("invalid params: missing field `thread_id`")));
+    assert!(!plain.retryable);
+    assert_eq!(RpcError::not_found("terminal").ensure_problem().problem().unwrap().kind, ProblemKind::NotFound);
+    assert_eq!(RpcError::method_not_found("x.y").ensure_problem().problem().unwrap().kind, ProblemKind::UpdateNeeded);
+    assert_eq!(RpcError::internal("boom").ensure_problem().problem().unwrap().kind, ProblemKind::Internal);
+    // One already there is kept.
+    assert_eq!(error.clone().ensure_problem().problem().unwrap().kind, ProblemKind::ToolMissing);
+
+    // A very long detail (a command quoting a whole PR body) is cut.
+    let long = Problem::new(ProblemKind::Internal, "é".repeat(PROBLEM_DETAIL_MAX));
+    assert!(long.detail.unwrap().len() <= PROBLEM_DETAIL_MAX + '…'.len_utf8());
+}

@@ -30,10 +30,10 @@ describe('problem copy', () => {
     expect(forbidden.detail).toBe('HTTP 403: Resource not accessible')
     expect(problemCopy({ kind: 'not_found', subject: 'github_remote' }, 'pull requests').title).toBe('This project isn’t on GitHub')
     const other = ghProblem(new Error('gh pr list: boom'))
-    expect(problemCopy(other, 'pull requests')).toMatchObject({ title: 'Unable to load pull requests', action: null })
+    expect(problemCopy(other, 'pull requests')).toMatchObject({ title: "Couldn't load pull requests", action: null })
     expect(other.detail).toBe('gh pr list: boom')
-    // A kind this client has no copy for uses the daemon's fallback words.
-    expect(problemCopy({ kind: 'offline', title: 'Your Mac is asleep', hint: 'Wake it, then try again.' }, 'pull requests')).toMatchObject({ title: 'Your Mac is asleep', body: 'Wake it, then try again.' })
+    // A case this client has no words for (a tool it doesn't know) uses the daemon's fallback words.
+    expect(problemCopy({ kind: 'tool_missing', title: 'Install the helper', hint: 'Kybern needs a helper. Install it, then try again.' }, 'pull requests')).toMatchObject({ title: 'Install the helper', body: 'Kybern needs a helper. Install it, then try again.' })
   })
 })
 

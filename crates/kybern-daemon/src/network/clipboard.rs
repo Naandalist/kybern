@@ -302,7 +302,9 @@ impl Clipboard {
 
 fn failure(name: &str, failure: CallFailure) -> RpcError {
     match failure {
-        CallFailure::Offline(reason) => RpcError::new(codes::NOT_AVAILABLE, reason),
+        CallFailure::Offline(reason) => {
+            RpcError::new(codes::NOT_AVAILABLE, reason.clone()).with_problem(&crate::problem::machine_offline(name, reason))
+        }
         CallFailure::Gone(reason) => RpcError::new(codes::NOT_FOUND, reason),
         CallFailure::Remote(error) if error.code == codes::FORBIDDEN => RpcError::new(
             codes::FORBIDDEN,
