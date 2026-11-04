@@ -30,6 +30,28 @@ pub fn make(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(output.into_inner())
 }
 
+/// A PNG copy of a TIFF or BMP upload, or `None` for any other format. macOS
+/// often puts only TIFF on the clipboard when an image is copied from an app,
+/// and neither clients nor most providers can show TIFF or BMP.
+pub fn portable_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+    if !matches!(reader.format(), Some(ImageFormat::Tiff | ImageFormat::Bmp)) {
+        return None;
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(MAX_DECODE_BYTES * 4);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder).ok()?;
+    image.apply_orientation(orientation);
+    let mut output = Cursor::new(Vec::new());
+    image.write_to(&mut output, ImageFormat::Png).ok()?;
+    Some(output.into_inner())
+}
+
 /// Edge of the square logo derived for a space.
 pub const LOGO_EDGE: u32 = 128;
 
@@ -61,6 +83,24 @@ pub fn square_logo(bytes: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tiff_and_bmp_uploads_become_pngs_and_others_are_left_alone() {
+        let source = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(30, 20, image::Rgba([200, 10, 10, 255])));
+        for format in [ImageFormat::Tiff, ImageFormat::Bmp] {
+            let mut original = Cursor::new(Vec::new());
+            source.write_to(&mut original, format).unwrap();
+            let png = portable_png(original.get_ref()).unwrap();
+            assert_eq!(image::guess_format(&png).unwrap(), ImageFormat::Png, "{format:?}");
+            let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
+            assert_eq!((decoded.width(), decoded.height()), (30, 20));
+            assert_eq!(decoded.get_pixel(5, 5), &image::Rgba([200, 10, 10, 255]));
+        }
+        let mut png = Cursor::new(Vec::new());
+        source.write_to(&mut png, ImageFormat::Png).unwrap();
+        assert!(portable_png(png.get_ref()).is_none());
+        assert!(portable_png(b"II*\0 not really a tiff").is_none());
+        assert!(portable_png(b"plain text").is_none());
+    }
     #[test]
     fn previews_fit_bounds_preserve_alpha_and_aspect_ratio() {
         for (width, height) in [(1800, 600), (600, 1800), (80, 40)] {

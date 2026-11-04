@@ -93,8 +93,19 @@ async fn upload_asset_inner(state: &AppState, headers: &HeaderMap, body: Bytes) 
     if body.len() > MAX_ASSET_BYTES {
         return (StatusCode::PAYLOAD_TOO_LARGE, "attachments are limited to 50 MB").into_response();
     }
-    let name = headers.get("x-kybern-filename").and_then(|v| v.to_str().ok()).unwrap_or("attachment").to_string();
-    let media_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_string();
+    let mut name = headers.get("x-kybern-filename").and_then(|v| v.to_str().ok()).unwrap_or("attachment").to_string();
+    let mut media_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_string();
+    // TIFF (what macOS puts on the clipboard for an image copied from most apps)
+    // and BMP are stored as PNG: transcripts and providers take PNG, not these.
+    let mut body = body;
+    if matches!(body.get(..4), Some(b"II*\0" | b"MM\0*")) || body.starts_with(b"BM") {
+        let bytes = body.clone();
+        if let Ok(Some(png)) = tokio::task::spawn_blocking(move || crate::thumbnail::portable_png(&bytes)).await {
+            body = Bytes::from(png);
+            media_type = "image/png".into();
+            name = png_name(&name);
+        }
+    }
     let id = Uuid::now_v7();
     if let Err(e) = std::fs::create_dir_all(&state.paths.assets) {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
@@ -107,6 +118,12 @@ async fn upload_asset_inner(state: &AppState, headers: &HeaderMap, body: Bytes) 
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
     Json(info).into_response()
+}
+
+/// `name.tiff` → `name.png`; a name without an extension gains one.
+fn png_name(name: &str) -> String {
+    let stem = std::path::Path::new(name).file_stem().and_then(|stem| stem.to_str()).filter(|stem| !stem.is_empty()).unwrap_or("image");
+    format!("{stem}.png")
 }
 
 /// Browser WebViews preflight uploads because they carry the daemon token and
@@ -180,8 +197,16 @@ async fn get_asset_inner(state: AppState, headers: HeaderMap, id: Uuid) -> Respo
 
 #[cfg(test)]
 mod tests {
-    use super::{allowed_asset_origin, asset_preflight};
+    use super::{allowed_asset_origin, asset_preflight, png_name};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+
+    #[test]
+    fn converted_uploads_are_named_png() {
+        assert_eq!(png_name("Screenshot 2026-11-04.tiff"), "Screenshot 2026-11-04.png");
+        assert_eq!(png_name("scan.bmp"), "scan.png");
+        assert_eq!(png_name("attachment"), "attachment.png");
+        assert_eq!(png_name(""), "image.png");
+    }
 
     fn headers(origin: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
