@@ -3,13 +3,13 @@
 // nextest's `ci` profile retries a failed test once. A test that then passes
 // does not fail the job; it is "flaky" and appears in the JUnit report as a
 // passing test case with <flakyFailure> attempts. This script lists those tests
-// in the job summary. On pushes to main only, it also files a GitHub issue per
-// test (labelled `flaky`, titled after the test, deduplicated by title against
-// open and closed issues), or comments on the existing one and reopens it if it
-// was closed; at most MAX_ISSUES a run, so a broken runner cannot flood the
-// tracker. Pull requests and other branches only get the summary: a flake there
-// may come from the change under review. A test that failed every attempt is a
-// failure, not a flake, and never gets an issue. Reporting never fails the job:
+// in the job summary and as a warning annotation. It files no GitHub issues by
+// default: the maintainer tracks flakes outside the issue tracker. With
+// FLAKY_FILE_ISSUES=1 on a push to main it files one issue per test (labelled
+// `flaky`, titled after the test, deduplicated by title against open and closed
+// issues), or comments on the existing one and reopens it; at most MAX_ISSUES a
+// run, so a broken runner cannot flood the tracker. A test that failed every
+// attempt is a failure, not a flake, and never gets an issue. Reporting never fails the job:
 // a missing report (the build failed) or an API error only leaves a warning.
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
@@ -19,8 +19,8 @@ import { fileURLToPath } from 'node:url'
 export const LABEL = 'flaky'
 export const MAX_ISSUES = 5
 
-/** Issues are filed only from pushes to main; everything else gets the job summary alone. */
-export const filesIssues = env => env.GITHUB_EVENT_NAME === 'push' && env.GITHUB_REF === 'refs/heads/main'
+/** Issues are filed only when FLAKY_FILE_ISSUES=1 on a push to main (CI does not set it); otherwise the summary alone. */
+export const filesIssues = env => env.FLAKY_FILE_ISSUES === '1' && env.GITHUB_EVENT_NAME === 'push' && env.GITHUB_REF === 'refs/heads/main'
 const EXCERPT_LINES = 40
 
 const decode = text => text.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_, entity) => {
@@ -90,7 +90,7 @@ export function summary(report, results, filing = true) {
   const count = report.flaky.length
   const rows = report.flaky.map((test, index) => {
     const result = results[index]
-    const issue = !filing ? 'not filed from this run' : result?.url ? `[#${result.number}](${result.url}) ${result.action}`
+    const issue = !filing ? 'not filed' : result?.url ? `[#${result.number}](${result.url}) ${result.action}`
       : result?.skipped ? 'not filed (over the limit)' : `not filed: ${result?.error ?? 'unknown error'}`
     return `| \`${test.suite}\` \`${test.name}\` | ${test.attempts} | ${issue} |`
   })
@@ -99,7 +99,7 @@ export function summary(report, results, filing = true) {
     '### Flaky tests',
     '',
     `${count} test${count === 1 ? '' : 's'} failed and then passed on retry. They are quarantined: the job does not fail, but each one has to be fixed.`,
-    ...(filing ? [] : ['', 'Issues are filed only from pushes to main; this run lists them here.']),
+    ...(filing ? [] : ['', 'Flaky tests are listed here and in the run annotations; no issues are filed.']),
     ...(skipped ? ['', `${skipped} more flaky test${skipped === 1 ? ' was' : 's were'} not filed: a run files at most ${MAX_ISSUES} issues. So many flakes at once usually means a broken runner or a shared cause; look at the run first.`] : []),
     '',
     '| Test | Failed attempts | Issue |',

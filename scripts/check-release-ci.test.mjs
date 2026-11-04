@@ -95,13 +95,13 @@ test('every required job is a job of ci.yml, with manual full runs and tested pa
   // Affected main checks still populate caches PRs and releases can restore.
   assert.match(workflow, /shared-key: check\n\s+save-if: \$\{\{ github.ref == 'refs\/heads\/main' \}\}/)
   // The test jobs quarantine flaky tests: nextest's ci profile retries once and the reporter
-  // files their issues, while a test that fails both attempts still fails the job.
+  // lists them in the job summary (no issues), while a test that fails both attempts still fails the job.
   const testJob = jobs.find(job => job.trimStart().startsWith('test:'))
   assert.match(testJob, /run: cargo nextest run --workspace --profile ci\n/)
   assert.match(testJob, /tool: cargo-nextest@\d+\.\d+\.\d+\n/)
   assert.match(testJob, /uses: taiki-e\/install-action@[0-9a-f]{40} /)
   assert.match(testJob, /if: \$\{\{ !cancelled\(\) \}\}[\s\S]*run: node scripts\/report-flaky-tests\.mjs target\/nextest\/ci\/junit\.xml/)
-  assert.match(testJob, /issues: write/)
+  assert.doesNotMatch(testJob, /issues: write/)
   assert.doesNotMatch(testJob, /continue-on-error/)
   const nextest = readFileSync(new URL('../.config/nextest.toml', import.meta.url), 'utf8')
   const profile = name => nextest.split(`\n[profile.${name}]\n`)[1].split('\n[')[0]

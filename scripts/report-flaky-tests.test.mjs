@@ -84,9 +84,11 @@ test('issues are deduplicated by title: filed once, then commented on, and reope
   assert.deepEqual(fileIssues([], client, 'run'), [])
 })
 
-test('only pushes to main file issues; pull requests, other branches and manual runs only get the summary', () => {
-  assert.equal(filesIssues({ GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main' }), true)
+test('CI files no issues: only FLAKY_FILE_ISSUES=1 on a push to main does', () => {
+  assert.equal(filesIssues({ FLAKY_FILE_ISSUES: '1', GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main' }), true)
   for (const env of [
+    { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/main' },
+    { FLAKY_FILE_ISSUES: '1', GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/189/merge' },
     { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/189/merge' },
     { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/heads/main' },
     { GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/ci/nextest-quarantine' },
@@ -95,8 +97,8 @@ test('only pushes to main file issues; pull requests, other branches and manual 
     {},
   ]) assert.equal(filesIssues(env), false, JSON.stringify(env))
   const text = summary(parseJUnit(junit), [], false)
-  assert.match(text, /Issues are filed only from pushes to main/)
-  assert.match(text, /\| `kybern-daemon` `network::ports::tests::flaky_<port>` \| 1 \| not filed from this run \|/)
+  assert.match(text, /no issues are filed/)
+  assert.match(text, /\| `kybern-daemon` `network::ports::tests::flaky_<port>` \| 1 \| not filed \|/)
 })
 
 test('a run files at most MAX_ISSUES issues; the rest are listed as over the limit', () => {
