@@ -2439,3 +2439,24 @@ The JS side releases once the window has spent 60 s not key or hidden (`src/plat
 full `Bun.gc(true)`; `Bun.shrink()` is opt-in (`KYBERN_IDLE_SHRINK=1`) because it discards compiled JS and slowed the
 next opens. Measurements and the remaining driver-owned `IOAccelerator` memory: `../perf/ramfix/README.md`.
 
+
+## Focus handles before an island or row builds (#218, 2026-11-04)
+
+gpuix `issue-218` (one commit on c9647c3; applies cleanly on `issue-215`). A text input takes its focus handle on its
+first render: the renderer's handle for its element (`sync_focus_handles`, run by `GpuixView::render` before it builds),
+or, when there is none yet, a private one it keeps. In the frame a popup mounts, a virtual-list row (the sidebar's, in
+the app) or a cached island can build before the root view renders, so the root's sync has not run for the new
+elements. The model picker's search then rendered first with a private handle: autoFocus and `focusElement` focused
+the renderer's handle, which nothing tracks (`context_stack()` was empty), and every key went to the window root. Seen
+on Windows from the second open of the picker on. The island and virtual-list paths are shared with macOS; whether
+macOS reaches the same frame order is not verified.
+
+`sync_focus_handles_before_build` now runs at the start of `build_island_subtree` and `build_virtual_child`: when a
+focusable element has no handle it creates the missing handles and runs their autoFocus, as `render` does; otherwise it
+is only the lookups. Typing after a reopen: 1 of 4 opens before, 8 of 8 after; clicks in the field followed by a key
+(`src/composer/picker-focus.verify.ts`, the real app on a scratch daemon): 10 of 30 lost before, 0 of 60 after, and
+4 of 30 still lost with the JS change alone.
+
+Separately, GPUI activates an `on_focus` listener on a deferred effect, so an element autoFocused in the frame its
+subscription is created gets no `focus` event (every platform). `TextField` therefore no longer trusts a remembered
+focus flag: a click on its box always asks for focus, which is a no-op for the focused input.

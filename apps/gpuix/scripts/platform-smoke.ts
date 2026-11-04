@@ -32,7 +32,7 @@
  * while a synthetic answer streams, timed from each key's input to its paint; every key must land and no error may
  * reach the process. Off macOS one intercepted key is then answered while the UI thread is held busy (4.5 s) past the
  * bridge's 2 s timeout (0.21.5 threw "Timed out after 2 seconds waiting for a window update" from resolveKeyEvent):
- * it must land without an error. Writes `typing.json`.
+ * it must land without an error. Off macOS the app may make no waited UI-thread call per typed key (#215). Writes `typing.json`.
  */
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -322,7 +322,7 @@ async function scrollBridge() {
 
 /** Keys into the composer while an answer streams, then one key answered across a UI-thread stall (`bridge-probe-app.ts`). */
 async function typing(port: string) {
-  type Typed = { error?: string; keys: number; missed: string[]; latencyMs: Record<string, number | null>; appWaitedPerKey: number | null; drawnFramesPerKey: number | null; uncaught: string[] }
+  type Typed = { error?: string; keys: number; missed: string[]; latencyMs: Record<string, number | null>; appWaitedPerKey: number | null; drawnFramesPerKey: number | null; uncaught: string[]; appCalls?: Record<string, unknown> }
   const post = async (body: Record<string, unknown>) => {
     const typed = await (await fetch(`http://127.0.0.1:${port}/`, { method: 'POST', body: JSON.stringify(body) })).json() as Typed
     if (typed.error) throw new Error(`typing probe: ${typed.error} ${JSON.stringify(typed)}`)
@@ -337,6 +337,11 @@ async function typing(port: string) {
   await step('typing: every key reaches the composer while an answer streams', () => {
     assert.deepEqual(streamed.missed, [], `keys never painted: ${JSON.stringify(streamed.missed)}`)
     assert.deepEqual(streamed.uncaught, [], 'errors reached the process')
+  })
+  // #215: the composer reads its selection from the key's own event and the addon's mirror, so off macOS typing makes no
+  // waited UI-thread call (0.21.6 made 2.33 per key, all getInputSelection; each costs about a frame while an answer streams).
+  if (platform !== 'macos' && streamed.appWaitedPerKey != null) await step('typing: no waited UI-thread call per key while an answer streams', () => {
+    assert.equal(streamed.appWaitedPerKey, 0, `${streamed.appWaitedPerKey!.toFixed(2)} waited calls per key: ${JSON.stringify(streamed.appCalls)}`)
   })
   if (platform !== 'macos') {
     // 4.5 s: the key handler's own selection read can wait out 2 s of it, and the answer must still start more than 2 s

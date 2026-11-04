@@ -40,6 +40,10 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
   const history = useRef(new RichHistory({ doc: historyDoc(props.value), start: props.value.length, end: props.value.length }))
   const nativeReplacement = useRef<string | null>(null)
   const lastEmitted = useRef(props.value)
+  /** Values this editor emitted that the host has not committed back yet. A key handled before the host's render (Ctrl+Z
+   * right after a Backspace, off macOS) emits again, and the late commit of the earlier value is this editor's own edit,
+   * not an outside change: recording it would drop the history after it. */
+  const uncommitted = useRef<string[]>([])
   const caret = useRef<Pick<InputSelection, 'start' | 'end' | 'reversed'> | null>(null)
   const composing = useRef(false)
   const lastRange = useRef<InputSelection | null>(null)
@@ -61,13 +65,24 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
     queueMicrotask(() => { if (eventRange.current === read) eventRange.current = null })
     return range
   }
+  /** Off macOS the addon sends each input event with the selection as of that event (#215): the reads of this event (this
+   * editor's and the composer's handlers) use it instead of asking the UI thread. Older addons and macOS send none. */
+  const adopt = (event: object) => {
+    const range = (event as { selection?: InputSelection | null }).selection, id = node.current?.id
+    if (!range || id == null) return
+    lastRange.current = range
+    const read = eventRange.current = { id, range }
+    queueMicrotask(() => { if (eventRange.current === read) eventRange.current = null })
+  }
   const read = (): InputSelection => {
     if (!node.current) return { start: 0, end: 0, composing: false, reversed: false }
     const range = nativeSelection(node.current.id), doc = live.current
     return { ...range, start: tokenSourceOffset(doc, range.start), end: tokenSourceOffset(doc, range.end, true) }
   }
   const emit = (value: string, at: number, typed: boolean, record = true, refs: readonly TokenReference[] = references) => {
-    lastEmitted.current = value; caret.current = { start: at, end: at, reversed: false }
+    lastEmitted.current = value; uncommitted.current.push(value)
+    if (uncommitted.current.length > 32) uncommitted.current.shift()
+    caret.current = { start: at, end: at, reversed: false }
     live.current = tokenText(value, refs)
     if (record) history.current.record({ doc: historyDoc(value), start: at, end: at }, typed)
     props.onChange?.({ value, elementId: node.current?.id ?? 0, eventType: 'change' })
@@ -102,7 +117,9 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
     return install(value.slice(0, start) + text + value.slice(end), start + text.length, true, undefined, added)
   } }))
   useEffect(() => {
-    if (props.value !== lastEmitted.current) {
+    const own = uncommitted.current.indexOf(props.value)
+    if (own >= 0) uncommitted.current.splice(0, own + 1)
+    else if (props.value !== lastEmitted.current) {
       lastEmitted.current = props.value
       history.current.record({ doc: historyDoc(props.value), start: props.value.length, end: props.value.length }, false)
     }
@@ -137,6 +154,7 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
     }), ...washDecoration(projection, wash, accent)]}
     interceptKeys={[...new Set([...(props.interceptKeys ?? []), 'c', 'x', 'z', 'y', 'backspace', 'delete'])]}
     onChange={event => {
+      adopt(event)
       const value = event.value ?? ''
       if (nativeReplacement.current === value) { nativeReplacement.current = null; return }
       const previous = live.current, range = node.current ? nativeSelection(node.current.id) : null
@@ -148,8 +166,9 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
       composing.current = !!range?.composing
       caret.current = null
     }}
-    onClick={event => { rememberSelection(); props.onClick?.(event) }}
+    onClick={event => { adopt(event); rememberSelection(); props.onClick?.(event) }}
     onKeyUp={event => {
+      adopt(event)
       const range = read()
       if (composing.current && !range.composing) {
         composing.current = false
@@ -159,6 +178,7 @@ export function TokenTextarea({ references, editorRef, nativeRef, onEditorError,
       props.onKeyUp?.(event)
     }}
     onKeyDown={event => {
+      adopt(event)
       const range = read(), mod = event.modifiers?.cmd || event.modifiers?.ctrl
       const saved = history.current.entries[history.current.index]!
       if ((event as typeof event & { requestId?: number }).requestId != null && (saved.start !== range.start || saved.end !== range.end || saved.reversed !== range.reversed)) history.current.selection(range.start, range.end, range.reversed)

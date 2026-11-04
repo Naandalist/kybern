@@ -57,7 +57,13 @@ for (const variant of ['dark', 'light']) {
     await until(async () => (await app.getByTestId('rpc-record').textContent()).includes('coordinator.open'))
     assert.equal(JSON.parse(await app.getByTestId('rpc-record').textContent()).params.opening_message, 'Set up this project with focused checks.')
     console.log('CHECK coordinator switch')
+    // Enter moves the composer, and the picker button with it. Off macOS a click uses the last painted bounds, which on
+    // software renderers can still be the old layout: wait until two reads a frame apart agree before clicking.
+    let last = ''
+    await until(async () => { const now = JSON.stringify(await app.getByTestId('model-picker').bounds()); const same = now === last; last = now; return same })
     await app.getByTestId('model-picker').click()
+    // The picker opens on the next frame or later (software rendering in CI): wait for the tab before clicking it.
+    await app.getByTestId('model-tab-codex:default').waitFor()
     await app.getByTestId('model-tab-codex:default').click()
     await until(async () => (await app.getByTestId('rpc-record').textContent()).includes('coordinator.switch_harness'))
     assert.equal(JSON.parse(await app.getByTestId('rpc-record').textContent()).params.provider.kind, 'codex')

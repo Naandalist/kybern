@@ -5,7 +5,7 @@
 // card of the selected model. The pure list logic comes from the shared
 // `packages/kybern-client/src/models.ts` and the desktop's `lib/accountUi.ts`.
 import { motion, useGpuix, useGpuixRequired, type PublicInstance } from '@gpuix/react'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { followLine, nextTabIndex, pickerTabs, type PickerTab } from '@/lib/accountUi'
 import { Tabs as KitTabs, type TabsItem } from '../kit/Tabs.tsx'
 import { formatEffort, PROVIDER_LABEL } from '@/lib/format'
@@ -64,6 +64,12 @@ const PANEL_WIDTH = 320
 const THUMB = 28
 const TRACK = PANEL_WIDTH - 2 - 24
 const ROW_RADIUS = 6.4
+/** Row heights in the list: a plain row, a row with its description line (4 + 18 + 17 + 4), a section header. */
+const ROW_HEIGHT = 28
+const DESCRIBED_ROW_HEIGHT = 43
+const HEADER_HEIGHT = 35
+/** The list's top and bottom padding. */
+const LIST_PAD = 4
 
 type Row =
   | { kind: 'default'; key: string }
@@ -72,6 +78,9 @@ type Row =
   | { kind: 'custom'; key: string; id: string }
 
 type Block = { key: string; label: string | null; icon?: ProviderKind; rows: Row[] }
+
+/** One item of the virtual list (#218): a section header or a row. */
+type ListEntry = { kind: 'header'; key: string; block: Block } | { kind: 'row'; key: string; row: Row }
 
 export interface ModelPickerProps {
   /** The thread runs on another machine: its tabs list only the agents installed there and mark the signed-out ones. */
@@ -277,6 +286,7 @@ function ModelPickerPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canPickProvider, catalog, current, expanded, favorites, large, model, multiBackend, provider.kind, provider.instance, providers, instances, query, recents, results, showFavorites])
 
+  const listHeight = Math.min(336, 0.5 * 820)
   const isSelected = (row: Row) =>
     row.kind === 'default' ? !selectedId : row.kind === 'model' ? row.harness === provider.kind && row.model.id === selectedId : row.kind === 'custom' && row.id === selectedId
   const rows = useMemo(() => blocks.flatMap((block) => block.rows), [blocks])
@@ -284,6 +294,54 @@ function ModelPickerPanel({
   const [activeKey, setActiveKey] = useState<string | null>(null)
   const activeRow = rows.find((row) => row.key === activeKey) ?? (query.trim() ? rows[0] : rows[selectedIndex] ?? rows[0])
   const shortcutRows = useMemo(() => rows.filter((row): row is Extract<Row, { kind: 'model' }> => row.kind === 'model').slice(0, 9), [rows])
+  const shortcutOf = useMemo(() => new Map(shortcutRows.map((row, index) => [row.key, index + 1])), [shortcutRows])
+
+  // A large catalog's list already has a fixed height: it is a native virtual list, which lays out and paints only the
+  // rows near its viewport (#218). Small catalogs and Favorites keep the plain scroll box, which sizes to its content.
+  const virtual = large && !showFavorites
+  const entries = useMemo<ListEntry[]>(
+    () =>
+      virtual
+        ? blocks.flatMap((block): ListEntry[] => [
+            ...(block.label ? [{ kind: 'header' as const, key: `header:${block.key}`, block }] : []),
+            ...block.rows.map((row) => ({ kind: 'row' as const, key: row.key, row })),
+          ])
+        : [],
+    [virtual, blocks],
+  )
+  const listRef = useRef<PublicInstance | null>(null)
+  /** The list items in view, as the native list last reported them (its first item is the top padding). */
+  const visibleRange = useRef({ first: 0, last: 0 })
+  /** Keep the row the arrow keys moved to in view: the virtual list lays out only what is near its viewport. */
+  const reveal = (key: string) => {
+    const list = listRef.current
+    if (!virtual || !list) return
+    const at = entries.findIndex((entry) => entry.key === key)
+    if (at < 0) return
+    const item = at + 1
+    const { first, last } = visibleRange.current
+    if (item > first && item < last - 1) return
+    const height = (index: number) => {
+      if (index === 0) return LIST_PAD
+      const entry = entries[index - 1]
+      if (!entry) return 0
+      if (entry.kind === 'header') return HEADER_HEIGHT
+      return entry.row.kind === 'model' && entry.row.model.description ? DESCRIBED_ROW_HEIGHT : ROW_HEIGHT
+    }
+    if (item <= first) {
+      // Upward: the row at the top, with its section header when it is the section's first row.
+      const above = item - 1
+      renderer?.scrollToItem?.(list.id, above === 0 || entries[above - 1]?.kind === 'header' ? above : item)
+      return
+    }
+    // Downward: the row's bottom edge on the list's bottom edge.
+    let top = 0
+    for (let index = 0; index < item; index++) top += height(index)
+    let target = top + height(item) - listHeight
+    let index = 0
+    while (index < item && target >= height(index)) target -= height(index++)
+    renderer?.scrollToItem?.(list.id, index, Math.max(0, target))
+  }
 
   const star = (row: Row) => {
     if (row.kind !== 'model') return
@@ -331,7 +389,9 @@ function ModelPickerPanel({
     if (key === 'down' || key === 'up') {
       const step = key === 'down' ? 1 : -1
       const index = activeRow ? rows.indexOf(activeRow) : -1
-      setActiveKey(rows[(index + step + rows.length) % rows.length]!.key)
+      const next = rows[(index + step + rows.length) % rows.length]!.key
+      setActiveKey(next)
+      reveal(next)
     } else if (key === 'enter' && activeRow) {
       void pick(activeRow)
     } else if (key === 'd' && cmd && activeRow?.kind === 'model') {
@@ -393,7 +453,58 @@ function ModelPickerPanel({
   }
 
   const divider = <div style={{ height: 1, marginLeft: 12, marginRight: 12, flexShrink: 0, backgroundColor: ink(t, 0.07) }} />
-  const listHeight = Math.min(336, 0.5 * 820)
+
+  // Rows keep their React output while their inputs hold (#218): the handlers are stable and call the latest closures.
+  const latest = useRef({ pick, star })
+  latest.current = { pick, star }
+  const onRowHover = useCallback((key: string) => setActiveKey(key), [])
+  const onRowPick = useCallback((row: Row) => void latest.current.pick(row), [])
+  const onRowStar = useCallback((row: Row) => latest.current.star(row), [])
+  const renderRow = (row: Row) => (
+    <ModelRow
+      key={row.key}
+      row={row}
+      agentName={agentName}
+      active={row.key === activeRow?.key}
+      shortcut={shortcutOf.get(row.key)}
+      selected={isSelected(row)}
+      favorite={row.kind === 'model' && isFavoriteModel(favorites, row.harness, row.model, instanceOf(row.harness))}
+      starOnHover={showFavorites}
+      onHover={onRowHover}
+      onPick={onRowPick}
+      onStar={onRowStar}
+    />
+  )
+  // The empty states and the result cap, after the rows in either list.
+  const notes: [string, ReactNode][] = []
+  if (showFavorites && !rows.length)
+    notes.push(['note:favorites', (
+      <div style={{ display: 'flex', justifyContent: 'center', paddingLeft: 24, paddingRight: 24, paddingTop: 28, paddingBottom: 28 }}>
+        <Label color={muted(t, 0.7)} style={{ textAlign: 'center' }}>
+          {query.trim() ? `No favorites match “${query.trim()}”` : 'Star a model to keep it here, whichever agent it belongs to.'}
+        </Label>
+      </div>
+    )])
+  if (!showFavorites && query.trim() && results.length === 0 && !blocks.some((b) => b.key === 'custom'))
+    notes.push(['note:none', (
+      <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 24, paddingBottom: 24 }}>
+        <Label color={muted(t, 0.7)}>{`No models match “${query.trim()}”`}</Label>
+      </div>
+    )])
+  if (!showFavorites && results.length > SEARCH_RESULT_LIMIT)
+    notes.push(['note:limit', (
+      <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8, paddingBottom: 6 }}>
+        <Label color={muted(t, 0.5)} size={13}>{`Showing ${SEARCH_RESULT_LIMIT} of ${results.length}. Add a word to narrow the list.`}</Label>
+      </div>
+    )])
+  if (!showFavorites && catalog.length === 0 && !query.trim())
+    notes.push(['note:empty', (
+      <div style={{ display: 'flex', paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 8 }}>
+        <Label color={muted(t, 0.6)} size={13} lineHeight={17.875} style={{ flexShrink: 1, minWidth: 0 }}>
+          {loading ? 'Loading models…' : `${agentName} didn’t list any models. It uses its own setting until you reload or enter an ID.`}
+        </Label>
+      </div>
+    )])
 
   return (
     <>
@@ -446,67 +557,55 @@ function ModelPickerPanel({
             />
           </div>
           {divider}
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              padding: 4,
-              overflowY: 'scroll',
-              ...(large && !showFavorites ? { height: listHeight } : { maxHeight: listHeight }),
-            }}
-          >
-            {blocks.map((block) => (
-              <div key={block.key} style={{ display: 'flex', flexDirection: 'column' }}>
-                {block.label && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 8, paddingRight: 8, paddingTop: 10, paddingBottom: 4 }}>
-                    {block.icon && <ProviderMark kind={block.icon} size={11} />}
-                    <Label color={muted(t, 0.5)} size={13} truncate>
-                      {block.label}
-                    </Label>
-                  </div>
-                )}
-                {block.rows.map((row) => (
-                  <ModelRow
-                    key={row.key}
-                    row={row}
-                    agentName={agentName}
-                    active={row === activeRow}
-                    shortcut={row.kind === 'model' && shortcutRows.includes(row) ? shortcutRows.indexOf(row) + 1 : undefined}
-                    selected={isSelected(row)}
-                    favorite={row.kind === 'model' && isFavoriteModel(favorites, row.harness, row.model, instanceOf(row.harness))}
-                    starOnHover={showFavorites}
-                    onHover={() => setActiveKey(row.key)}
-                    onPick={() => void pick(row)}
-                    onStar={() => star(row)}
-                  />
-                ))}
-              </div>
-            ))}
-            {showFavorites && !rows.length && (
-              <div style={{ display: 'flex', justifyContent: 'center', paddingLeft: 24, paddingRight: 24, paddingTop: 28, paddingBottom: 28 }}>
-                <Label color={muted(t, 0.7)} style={{ textAlign: 'center' }}>
-                  {query.trim() ? `No favorites match “${query.trim()}”` : 'Star a model to keep it here, whichever agent it belongs to.'}
-                </Label>
-              </div>
-            )}
-            {!showFavorites && query.trim() && results.length === 0 && !blocks.some((b) => b.key === 'custom') && (
-              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 24, paddingBottom: 24 }}>
-                <Label color={muted(t, 0.7)}>{`No models match “${query.trim()}”`}</Label>
-              </div>
-            )}
-            {!showFavorites && results.length > SEARCH_RESULT_LIMIT && (
-              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8, paddingBottom: 6 }}>
-                <Label color={muted(t, 0.5)} size={13}>{`Showing ${SEARCH_RESULT_LIMIT} of ${results.length}. Add a word to narrow the list.`}</Label>
-              </div>
-            )}
-            {!showFavorites && catalog.length === 0 && !query.trim() && (
-              <div style={{ display: 'flex', paddingLeft: 8, paddingRight: 8, paddingTop: 4, paddingBottom: 8 }}>
-                <Label color={muted(t, 0.6)} size={13} lineHeight={17.875} style={{ flexShrink: 1, minWidth: 0 }}>
-                  {loading ? 'Loading models…' : `${agentName} didn’t list any models. It uses its own setting until you reload or enter an ID.`}
-                </Label>
-              </div>
-            )}
-          </div>
+          {virtual ? (
+            <virtual-list
+              ref={(el: PublicInstance | null) => {
+                listRef.current = el
+              }}
+              testId="model-list"
+              estimatedItemHeight={ROW_HEIGHT}
+              onVisibleRange={(event: { startIndex?: number; endIndex?: number }) => {
+                visibleRange.current = { first: event.startIndex ?? 0, last: event.endIndex ?? 0 }
+              }}
+              style={{ width: '100%', height: listHeight, flexShrink: 0 }}
+            >
+              <div key="pad:top" style={{ height: LIST_PAD, flexShrink: 0 }} />
+              {entries.map((entry) => (
+                <div key={entry.key} style={{ display: 'flex', flexDirection: 'column', width: '100%', paddingLeft: LIST_PAD, paddingRight: LIST_PAD }}>
+                  {entry.kind === 'header' ? <SectionHeader label={entry.block.label!} icon={entry.block.icon} /> : renderRow(entry.row)}
+                </div>
+              ))}
+              {notes.map(([key, note]) => (
+                <div key={key} style={{ display: 'flex', flexDirection: 'column', width: '100%', paddingLeft: LIST_PAD, paddingRight: LIST_PAD }}>
+                  {note}
+                </div>
+              ))}
+              <div key="pad:bottom" style={{ height: LIST_PAD, flexShrink: 0 }} />
+            </virtual-list>
+          ) : (
+            <div
+              testId="model-list"
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                padding: LIST_PAD,
+                overflowY: 'scroll',
+                ...(large && !showFavorites ? { height: listHeight } : { maxHeight: listHeight }),
+              }}
+            >
+              {blocks.map((block) => (
+                <div key={block.key} style={{ display: 'flex', flexDirection: 'column' }}>
+                  {block.label && <SectionHeader label={block.label} icon={block.icon} />}
+                  {block.rows.map(renderRow)}
+                </div>
+              ))}
+              {notes.map(([key, note]) => (
+                <div key={key} style={{ display: 'flex', flexDirection: 'column' }}>
+                  {note}
+                </div>
+              ))}
+            </div>
+          )}
           <ModelFooter
             current={current}
             model={model}
@@ -585,8 +684,54 @@ function Tabs({
   )
 }
 
+/** A section's label over its rows ("Favorites", "Recent", a backend). */
+const SectionHeader = memo(function SectionHeader({ label, icon }: { label: string; icon?: ProviderKind }) {
+  const t = useTheme()
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 8, paddingRight: 8, paddingTop: 10, paddingBottom: 4 }}>
+      {icon && <ProviderMark kind={icon} size={11} />}
+      <Label color={muted(t, 0.5)} size={13} truncate>
+        {label}
+      </Label>
+    </div>
+  )
+})
+
+/** Same row content: a rebuilt `Row` for the same model (every keystroke rebuilds the list) keeps the rendered row. */
+function sameRowData(a: Row, b: Row): boolean {
+  if (a === b) return true
+  if (a.kind !== b.kind || a.key !== b.key) return false
+  switch (a.kind) {
+    case 'model': {
+      const other = b as typeof a
+      return a.model === other.model && a.harness === other.harness && a.showBackend === other.showBackend
+    }
+    case 'more': return a.hidden === (b as typeof a).hidden && a.section === (b as typeof a).section
+    case 'custom': return a.id === (b as typeof a).id
+    case 'default': return true
+  }
+}
+
+interface ModelRowProps {
+  row: Row
+  agentName: string
+  active: boolean
+  shortcut?: number
+  selected: boolean
+  favorite: boolean
+  starOnHover: boolean
+  onHover: (key: string) => void
+  onPick: (row: Row) => void
+  onStar: (row: Row) => void
+}
+
+const sameModelRow = (a: ModelRowProps, b: ModelRowProps) =>
+  a.active === b.active && a.shortcut === b.shortcut && a.selected === b.selected && a.favorite === b.favorite &&
+  a.starOnHover === b.starOnHover && a.agentName === b.agentName && a.onHover === b.onHover && a.onPick === b.onPick &&
+  a.onStar === b.onStar && sameRowData(a.row, b.row)
+
 /** `PickerRow`: the selected model keeps a soft fill; the trailing edge holds ⌘N and the star. */
-function ModelRow({
+const ModelRow = memo(function ModelRow({
   row,
   agentName,
   active,
@@ -597,18 +742,7 @@ function ModelRow({
   onHover,
   onPick,
   onStar,
-}: {
-  row: Row
-  agentName: string
-  active: boolean
-  shortcut?: number
-  selected: boolean
-  favorite: boolean
-  starOnHover: boolean
-  onHover: () => void
-  onPick: () => void
-  onStar: () => void
-}) {
+}: ModelRowProps) {
   const t = useTheme()
   const starClicked = useRef(false)
   const base = {
@@ -624,7 +758,7 @@ function ModelRow({
   }
   if (row.kind === 'more') {
     return (
-      <div onMouseMove={onHover} onClick={onPick} style={{ ...base, height: 28 }}>
+      <div onMouseMove={() => onHover(row.key)} onClick={() => onPick(row)} style={{ ...base, height: ROW_HEIGHT }}>
         <Label color={muted(t, 0.6)} truncate>{`Show ${Math.min(row.hidden, SECTION_STEP)} more`}</Label>
       </div>
     )
@@ -647,15 +781,15 @@ function ModelRow({
   return (
     <div
       testId={row.kind === 'model' ? `model-row-${row.model.id}` : `model-row-${row.kind}`}
-      onMouseMove={() => !active && onHover()}
+      onMouseMove={() => !active && onHover(row.key)}
       onClick={() => {
         if (starClicked.current) {
           starClicked.current = false
           return
         }
-        onPick()
+        onPick(row)
       }}
-      style={{ ...base, ...(description ? { minHeight: 38, paddingTop: 4, paddingBottom: 4 } : { height: 28 }) }}
+      style={{ ...base, ...(description ? { minHeight: 38, paddingTop: 4, paddingBottom: 4 } : { height: ROW_HEIGHT }) }}
     >
       <div style={{ display: 'flex', flexDirection: 'column', flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, minWidth: 0 }}>
@@ -680,7 +814,7 @@ function ModelRow({
           onMouseDown={() => {
             starClicked.current = true
           }}
-          onClick={() => onStar()}
+          onClick={() => onStar(row)}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -698,7 +832,7 @@ function ModelRow({
       )}
     </div>
   )
-}
+}, sameModelRow)
 
 const isFastParameter = (parameter: ModelParameter) => !!parameterSwitch(parameter) && /fast|speed/i.test(`${parameter.id} ${parameter.label}`)
 

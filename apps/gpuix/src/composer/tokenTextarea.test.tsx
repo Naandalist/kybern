@@ -10,10 +10,11 @@ import { textEdit } from '../notes/rich-text.ts'
 
 const entry = createRequire(import.meta.url).resolve('@gpuix/react')
 const { createRoot, flushSync } = await import(pathToFileURL(path.join(path.dirname(entry), 'reconciler/reconciler.js')).href)
+const { handleGpuixEvent } = await import(pathToFileURL(path.join(path.dirname(entry), 'reconciler/event-registry.js')).href)
 
 /** A renderer that records what the editor writes natively and the `value` React last committed for the textarea. */
 function harness() {
-  const native = { text: '', edits: [] as string[], selection: null as null | { start: number; end: number }, rejected: 0 }
+  const native = { text: '', edits: [] as string[], selection: null as null | { start: number; end: number }, rejected: 0, reads: 0 }
   let committed: string | null = null
   const renderer = {
     applyBatch(json: string) {
@@ -24,7 +25,7 @@ function harness() {
     },
     setWindowKeyEvents() {}, setWindowSelectionChange() {},
     registerFont() {}, getTextSelection() { return null }, setTextSelection() {},
-    getInputSelection() { const at = native.selection ?? { start: native.text.length, end: native.text.length }; return { ...at, reversed: false, composing: false } },
+    getInputSelection() { native.reads++; const at = native.selection ?? { start: native.text.length, end: native.text.length }; return { ...at, reversed: false, composing: false } },
     // The native rule (`input_api.rs` `checked_range`): ordered offsets on UTF-16 character boundaries of the current buffer.
     setInputSelection(_id: number, start: number, end: number) {
       const split = (at: number) => /[\uDC00-\uDFFF]/.test(native.text[at] ?? '') && /[\uD800-\uDBFF]/.test(native.text[at - 1] ?? '')
@@ -39,7 +40,8 @@ function harness() {
     addLayoutObserver() { return 1 }, removeLayoutObserver() {}, isLayoutObserverActive() { return false },
   }
   const root = createRoot(renderer)
-  return { native, committed: () => committed, render: (node: React.ReactNode) => { flushSync(() => root.render(node)) } }
+  return { native, committed: () => committed, render: (node: React.ReactNode) => { flushSync(() => root.render(node)) },
+    fire: (payload: Record<string, unknown>) => flushSync(() => handleGpuixEvent(payload, renderer)) }
 }
 
 const skill = skillReference({ name: 'review-ui', display_name: 'Review UI', path: '/skills/review-ui/SKILL.md', scope: 'user' })
@@ -211,4 +213,27 @@ test('removing one of two adjacent chips, a chip at either end, and re-inserting
   step(0, 12, '', '👍🏽 x ')
   expect(native.widened).toBe(0)
   root.unmount()
+})
+
+test('an event that carries its selection is read from the event, not from the native input (#215)', async () => {
+  const h = harness()
+  h.native.text = 'hello world'
+  h.native.selection = { start: 11, end: 11 }
+  let id = 0
+  const seen: unknown[] = []
+  const ref: { current: TokenTextareaHandle | null } = { current: null }
+  const node = <TokenTextarea testId="composer" editorRef={ref} nativeRef={element => { if (element) id = element.id }} value="hello world" references={[]}
+    onKeyDown={() => seen.push(ref.current!.selection())} onKeyUp={() => seen.push(ref.current!.selection())} onChange={() => {}} />
+  h.render(node)
+  const at = { start: 5, end: 5, reversed: false, composing: false }
+  // The handler and the composer's own read in the same event: one selection, the event's, and no native read.
+  h.fire({ elementId: id, eventType: 'keyDown', key: 'left', selection: at })
+  h.fire({ elementId: id, eventType: 'keyUp', key: 'left', selection: { ...at, start: 4, end: 4 } })
+  expect(seen).toEqual([at, { ...at, start: 4, end: 4 }])
+  expect(h.native.reads).toBe(0)
+  // An addon that sends no selection (macOS, older builds) is still read natively, in a later event.
+  await Promise.resolve()
+  h.fire({ elementId: id, eventType: 'keyUp', key: 'left' })
+  expect(seen.at(-1)).toEqual({ start: 11, end: 11, reversed: false, composing: false })
+  expect(h.native.reads).toBe(1)
 })

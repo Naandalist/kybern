@@ -48,6 +48,10 @@ const CHECKS: Record<string, Check> = {
     description: 'Tab and Shift+Tab move focus one stop; a consumed Tab stays; the image preview traps Tab (no pixels)',
     runs: () => [{ name: 'focus', args: [native('focus-check.ts')], minutes: 10 }],
   },
+  picker: {
+    description: 'The model picker (#218) on a 600-model catalog: 30 clicks anywhere in its search field each leave it focused (a key filters the list), arrows/Enter/Escape, 150 results in one native virtual list that the wheel scrolls',
+    runs: ({ capture }) => capture === 'none' ? [] : [{ name: 'picker', args: [script('model-picker-check.ts')], minutes: 10 }],
+  },
   clip: {
     description: 'Rounded overflow clip: hit tests, painted corners, cached replay, virtual list, code scroll/wrap, dark/light x motion',
     runs: () => [{ name: 'clip', args: [native('clip-check.ts')], minutes: 25 }],
@@ -139,6 +143,17 @@ const CHECKS: Record<string, Check> = {
       minutes: 5,
     })),
   },
+  // The composer's selection-dependent behaviour (#215) through its own verify scripts, on the conversation fixture (no
+  // daemon); each writes its PNGs to KYBERN_VERIFY_OUTPUT. Not under a display nothing can grab.
+  ...Object.fromEntries(([
+    ['editor', 'Composer: a picked mention is one atomic token (one Backspace removes it), undo/redo walk the edits, Enter sends structured parts'],
+    ['skill-pick', 'Composer: a skill picked from the $ menu (Enter or a click, at the end or before text) becomes its chip with the caret after it'],
+    ['skill-token', 'Composer: a picked skill paints as its accent chip on the first frame, before any further typing'],
+    ['conversation', 'Composer: note, task and Computer mentions, a completion in the middle of text, the Coordinator draft and harness switch'],
+  ] as const).map(([name, description]): [string, Check] => [name, {
+    description,
+    runs: ({ capture }) => capture === 'none' ? [] : [{ name, args: [path.join(root, 'src', 'composer', `${name}.verify.ts`)], minutes: 10 }],
+  }])),
 }
 
 if (flag('list')) {

@@ -163,6 +163,16 @@ Evidence:
    105 to 55 ms. `platform-smoke.ts` measures it and checks that a key
    answered across a 4.5 s UI-thread stall (`stallUiThread`) lands without an
    error.
+   **Selection mirror (#215, fork `issue-215`):** input events carry the
+   input's selection as the UI thread emitted them (`event.selection`), and
+   `getInputSelection` answers from a mirror the UI thread writes before each
+   input event, on renders that moved the selection and inside the waited
+   `setInputSelection`/`editInput`. While intercepted keys wait for JS (until
+   each replay is published) it takes the waited path, which runs behind their
+   answers, so a key queued behind them still sees them applied; such a key's
+   keyDown carries no selection. Typing makes 0 waited calls per key (3 runs on
+   the same PC, same workload: key-to-paint p50 18–22 ms, p90 35–45 ms, from
+   18–23 / 48–66 ms), and `platform-smoke.ts` asserts the 0.
 4. **Option 2 has real costs that option 1 does not.** Main-thread pumping
    needs an embedded mode in `gpui_linux` (X11 and Wayland calloop dispatch
    from a Bun-polled fd) and `gpui_windows` (a `PeekMessage` pump, with

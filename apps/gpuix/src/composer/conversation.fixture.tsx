@@ -42,7 +42,7 @@ const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req, s) {
     case 'files.search': result = { files: process.env.KYBERN_FIXTURE_FILES?.split(',') ?? [] }; break
     case 'threads.search': result = { threads: [] }; break
     case 'notes.list': result = { notes: [{ id: 'note', title: 'Release notes', project_id: project.id, scope: 'project', updated_at: at, preview: '' }] }; break
-    case 'tasks.items.list': result = { tasks: [{ id: 'task', key: 'KYB-1', title: 'Release checklist', project_id: project.id, scope: 'project', status: 'todo', updated_at: at }] }; break
+    case 'tasks.items.list': result = { tasks: [{ id: 'task', key: 'KYB-1', title: 'Release checklist', project_id: project.id, scope: 'project', status: 'todo', updated_at: at, runs: [] }] }; break
   }
   ws.send(JSON.stringify({ jsonrpc: '2.0', id, result }))
   set({ statusDetail: `${method}:${Date.now()}` })

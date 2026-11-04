@@ -87,16 +87,16 @@ export function TextField({ label, value, onChange, size = 'md', width, invalid 
   const { renderer } = useGpuix()
   const [focused, setFocused] = useState(false)
   // The whole box is the field, as in the desktop: a click on its glyph or padding focuses the input (the PR list's
-  // narrow search read as a search button that did nothing). A focused input keeps its caret.
+  // narrow search read as a search button that did nothing). A focused input keeps its caret: focusing it again is a no-op.
+  // Always ask, rather than skip on a remembered focus: a press on the box moves focus away on mouse down, and off macOS
+  // that blur reaches JS after this click (#218), so a flag would still say "focused" and the input would stay blurred.
   const input = useRef<PublicInstance | null>(null)
-  // Focus lands on mouse down, before the click, and a render may not have happened yet: read it from a ref.
-  const hasFocus = useRef(false)
   const attach = (el: PublicInstance | null) => {
     input.current = el
     if (typeof ref === 'function') ref(el)
     else if (ref) (ref as { current: PublicInstance | null }).current = el
   }
-  const focusInput = () => { if (!disabled && !hasFocus.current && input.current) renderer?.focusElement?.(input.current.id) }
+  const focusInput = () => { if (!disabled && input.current) renderer?.focusElement?.(input.current.id) }
   const font = mono ? FONT_MONO : FONT_UI
   const fontSize = typeof style?.fontSize === 'number' ? style.fontSize : size === 'lg' ? 14 : 13
   return (
@@ -118,8 +118,8 @@ export function TextField({ label, value, onChange, size = 'md', width, invalid 
           value={value}
           readOnly={disabled}
           onChange={(e) => onChange(e.value ?? '')}
-          onFocus={(e) => { hasFocus.current = true; setFocused(true); onFocus?.(e) }}
-          onBlur={() => { hasFocus.current = false; setFocused(false); onBlur?.() }}
+          onFocus={(e) => { setFocused(true); onFocus?.(e) }}
+          onBlur={() => { setFocused(false); onBlur?.() }}
           style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, height: '100%', borderWidth: 0, fontFamily: font, fontSize, color: disabled ? t.textTertiary : t.text, backgroundColor: 'rgba(0, 0, 0, 0)', ...style }}
         />
       </div>
