@@ -208,9 +208,19 @@ impl Orchestrator {
         let Some(status) = statuses.iter().find(|status| status.kind == provider.kind) else { return Ok(()) };
         let selected_model = model.filter(|model| !model.trim().is_empty());
         let catalog_model = selected_model.and_then(|selected| status.models.iter().find(|candidate| candidate.id == selected));
-        if let (Some(catalog_model), Some(effort)) = (catalog_model, effort.filter(|effort| !effort.trim().is_empty())) {
-            let supported = catalog_model.efforts.as_slice();
-            let supported = if supported.is_empty() { status.supported_efforts.as_slice() } else { supported };
+        if let Some(effort) = effort.filter(|effort| !effort.trim().is_empty()) {
+            let supported = match catalog_model {
+                Some(catalog_model) if !catalog_model.efforts.is_empty() => catalog_model.efforts.as_slice(),
+                Some(_) if !status.supported_efforts.is_empty() => status.supported_efforts.as_slice(),
+                Some(_) => {
+                    return Err(anyhow!(
+                        "Model {} on {} does not list effort variants. Pick an effort-supported model or clear the effort.",
+                        selected_model.unwrap_or_default(),
+                        provider.kind
+                    ));
+                }
+                None => status.supported_efforts.as_slice(),
+            };
             if !supported.is_empty() && !supported.iter().any(|candidate| candidate == effort) {
                 let choices = supported.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
                 return Err(anyhow!("Unknown effort '{}' for {}. Available efforts: {}.", effort, provider.kind, choices));
@@ -5314,6 +5324,85 @@ pub(crate) fn worktree_label(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn effort_selection_validates_against_the_model_s_own_list() {
+        let fixture = Fixture::new();
+        let thread = fixture.thread_with_provider(ThreadStatus::Idle, ProviderKind::Opencode);
+        let model = |id: &str, efforts: Vec<&str>| ProviderModel {
+            id: id.into(),
+            display_name: id.into(),
+            resolved_id: None,
+            description: None,
+            provider: None,
+            efforts: efforts.into_iter().map(String::from).collect(),
+            default_effort: None,
+            is_default: false,
+            parameters: Vec::new(),
+            variants: Vec::new(),
+        };
+        let status = ProviderStatus {
+            kind: ProviderKind::Opencode,
+            display_name: "OpenCode".into(),
+            available: true,
+            binary_path: None,
+            version: None,
+            unavailable_reason: None,
+            supported_permission_modes: PermissionMode::ALL.to_vec(),
+            supports_fork: true,
+            supports_model_switch: true,
+            supports_effort_switch: true,
+            supported_efforts: vec![],
+            models: vec![model("p/m-with", vec!["low", "high"]), model("p/m-without", vec![])],
+            instances: vec!["default".into()],
+        };
+        let cache_key =
+            serde_json::to_string(&(Some(thread.project_id), Some(&thread.cwd), &fixture.orchestrator.inner.settings.get().providers))
+                .unwrap();
+        fixture.orchestrator.inner.provider_catalogs.get_or_refresh(cache_key.clone(), false, || async { vec![status.clone()] }).await;
+        let instance = thread.provider.clone();
+        let validate = |model: &'static str, effort: Option<&'static str>| {
+            fixture.orchestrator.validate_provider_selection(thread.project_id, &instance, Some(model), effort)
+        };
+        assert!(validate("p/m-with", Some("low")).await.is_ok());
+        assert!(validate("p/m-with", Some("xhigh")).await.is_err());
+        let error = validate("p/m-without", Some("high")).await.unwrap_err().to_string();
+        assert!(error.contains("does not list effort variants"), "{error}");
+        assert!(validate("p/m-without", None).await.is_ok());
+        let legacy = status_models_with_global_list();
+        fixture.orchestrator.inner.provider_catalogs.get_or_refresh(cache_key, true, || async { vec![legacy.clone()] }).await;
+        assert!(validate("p/m-without", Some("high")).await.is_ok());
+        assert!(validate("p/m-without", Some("low")).await.is_err());
+    }
+
+    fn status_models_with_global_list() -> ProviderStatus {
+        ProviderStatus {
+            kind: ProviderKind::Opencode,
+            display_name: "OpenCode".into(),
+            available: true,
+            binary_path: None,
+            version: None,
+            unavailable_reason: None,
+            supported_permission_modes: PermissionMode::ALL.to_vec(),
+            supports_fork: true,
+            supports_model_switch: true,
+            supports_effort_switch: true,
+            supported_efforts: vec!["high".into()],
+            models: vec![ProviderModel {
+                id: "p/m-without".into(),
+                display_name: "p/m-without".into(),
+                resolved_id: None,
+                description: None,
+                provider: None,
+                efforts: vec![],
+                default_effort: None,
+                is_default: false,
+                parameters: Vec::new(),
+                variants: Vec::new(),
+            }],
+            instances: vec!["default".into()],
+        }
+    }
+
     #[test]
     fn a_generated_title_loses_talk_about_the_title_and_keeps_sentence_case() {
         use super::clean_title;

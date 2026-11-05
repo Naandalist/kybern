@@ -2,6 +2,7 @@
 /dist
 **/*.rs.bk
 .DS_Store
+/.idea/
 /apps/mobile/node_modules
 /apps/mobile/.expo
 *.snap.new

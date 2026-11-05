@@ -81,6 +81,93 @@ async fn opencode_models(bin: &std::path::Path, context: &ProbeContext) -> Vec<P
     models
 }
 
+/// Efforts a model accepts: the ids of its v2 variants. Listing variant ids
+/// directly covers variants that do not map `settings.reasoningEffort`, and
+/// keeps what the picker shows in sync with what a session accepts.
+fn variant_efforts(variants: &[Value]) -> Vec<String> {
+    let mut efforts: Vec<String> = Vec::new();
+    for variant in variants {
+        let Some(id) = variant["id"].as_str().map(str::trim).filter(|id| !id.is_empty()) else { continue };
+        if !efforts.iter().any(|seen| seen == id) {
+            efforts.push(id.to_string());
+        }
+    }
+    efforts
+}
+
+const VARIANT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const VARIANT_CACHE_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+type VariantCacheKey = (PathBuf, BTreeMap<String, String>);
+type VariantCache = HashMap<VariantCacheKey, (std::time::Instant, HashMap<String, Vec<Value>>)>;
+
+fn cached_variants(cache: &VariantCache, key: &VariantCacheKey, now: std::time::Instant) -> Option<HashMap<String, Vec<Value>>> {
+    cache.get(key).and_then(|(at, catalog)| {
+        let ttl = if catalog.is_empty() { VARIANT_CACHE_MISS_TTL } else { VARIANT_CACHE_TTL };
+        (now.duration_since(*at) < ttl).then(|| catalog.clone())
+    })
+}
+
+async fn variant_catalog(bin: &Path, context: &ProbeContext) -> HashMap<String, Vec<Value>> {
+    static CACHE: std::sync::Mutex<Option<VariantCache>> = std::sync::Mutex::new(None);
+    static PROBE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let key = (bin.to_path_buf(), context.env.clone());
+    if let Some(catalog) = CACHE.lock().unwrap().as_ref().and_then(|cache| cached_variants(cache, &key, std::time::Instant::now())) {
+        return catalog;
+    }
+    let _flight = PROBE.lock().await;
+    if let Some(catalog) = CACHE.lock().unwrap().as_ref().and_then(|cache| cached_variants(cache, &key, std::time::Instant::now())) {
+        return catalog;
+    }
+    let catalog = read_variant_catalog(bin, &context.env).await.unwrap_or_default();
+    CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, (std::time::Instant::now(), catalog.clone()));
+    catalog
+}
+
+/// Parse `/api/model` variants into a catalog keyed by `providerID/id`.
+fn parse_model_catalog(models: &[Value]) -> HashMap<String, Vec<Value>> {
+    let mut catalog = HashMap::new();
+    for model in models {
+        let Some(id) = model["id"].as_str() else { continue };
+        let key = match model["providerID"].as_str() {
+            Some(provider) if !provider.is_empty() => format!("{provider}/{id}"),
+            _ => id.to_string(),
+        };
+        if let Some(variants) = model["variants"].as_array() {
+            catalog.insert(key, variants.clone());
+        }
+    }
+    catalog
+}
+
+async fn read_variant_catalog(bin: &Path, env: &BTreeMap<String, String>) -> Option<HashMap<String, Vec<Value>>> {
+    let folder = std::env::temp_dir().join(format!("kybern-opencode-probe-{}", uuid::Uuid::new_v4().simple()));
+    tokio::fs::create_dir_all(&folder).await.ok()?;
+    let models = tokio::time::timeout(MODEL_DISCOVERY_TIMEOUT, async {
+        let env = env.iter().collect::<Vec<_>>();
+        let server = v2::Server::start(bin, Some(&folder), env, &[]).await.ok()?;
+        server.call(reqwest::Method::GET, "/api/model", None).await.ok()?["data"].as_array().cloned()
+    })
+    .await
+    .ok()
+    .flatten();
+    let _ = tokio::fs::remove_dir_all(&folder).await;
+    Some(parse_model_catalog(models.unwrap_or_default().as_slice()))
+}
+
+/// Merge v2 variant efforts into the CLI model catalog. Rows join on the
+/// full `provider/model` id; v1 and failed probes keep the plain catalog.
+fn merge_efforts(models: &mut [ProviderModel], catalog: &HashMap<String, Vec<Value>>) {
+    for model in models {
+        if !model.efforts.is_empty() {
+            continue;
+        }
+        let efforts = catalog.get(&model.id).map(|variants| variant_efforts(variants)).unwrap_or_default();
+        if !efforts.is_empty() {
+            model.efforts = efforts;
+        }
+    }
+}
 /// Which server API an installed OpenCode speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Api {
@@ -170,6 +257,16 @@ impl OpencodeDriver {
                 status.version = Some(v);
                 if ok {
                     status.models = opencode_models(&bin, context).await;
+                    if matches!(api_of(&bin).await, Ok(Api::V2)) {
+                        let catalog = variant_catalog(&bin, context).await;
+                        merge_efforts(&mut status.models, &catalog);
+                        // Per-model efforts only: a global fallback list would
+                        // accept an effort for models without variants, and a
+                        // probe-time union changes order run to run.
+                        if status.models.iter().any(|model| !model.efforts.is_empty()) {
+                            status.supports_effort_switch = true;
+                        }
+                    }
                 }
             }
             None => status.unavailable_reason = Some("could not run `opencode --version`".into()),
@@ -2174,5 +2271,77 @@ mod orchestration_part_tests {
         let mut message = orchestration_message();
         message.parts.insert(0, ContentPart::Skill { name: "review".into(), path: "/s/SKILL.md".into() });
         assert_flattened(&skill_command(&message).unwrap().arguments);
+    }
+
+    #[test]
+    fn parse_model_catalog_joins_variants_on_provider_and_id() {
+        let models = vec![
+            json!({"id": "m1", "providerID": "prov", "variants": [{"id": "high"}]}),
+            json!({"id": "m2", "providerID": "", "variants": []}),
+            json!({"id": "m3", "providerID": "prov"}),
+            json!({"providerID": "prov", "variants": [{"id": "x"}]}),
+            json!({"id": "m5", "providerID": "prov", "variants": "not-an-array"}),
+        ];
+        let catalog = parse_model_catalog(&models);
+        assert_eq!(catalog.get("prov/m1").unwrap(), &[json!({"id": "high"})]);
+        assert_eq!(catalog.get("m2").unwrap(), &Vec::<Value>::new());
+        assert!(!catalog.contains_key("prov/m3"));
+        assert!(!catalog.contains_key("prov/m5"));
+        assert_eq!(catalog.len(), 2);
+    }
+
+    #[test]
+    fn variant_cache_ages_full_reads_and_misses_differently() {
+        let key: VariantCacheKey = ("/bin/opencode".into(), BTreeMap::new());
+        let now = std::time::Instant::now();
+        let mut cache: VariantCache = HashMap::new();
+        cache.insert(key.clone(), (now, HashMap::from([("prov/m".to_string(), vec![json!({"id": "high"})])])));
+        assert!(cached_variants(&cache, &key, now).is_some());
+        assert!(cached_variants(&cache, &key, now + VARIANT_CACHE_TTL).is_none());
+        cache.insert(key.clone(), (now, HashMap::new()));
+        assert!(cached_variants(&cache, &key, now + VARIANT_CACHE_MISS_TTL - std::time::Duration::from_secs(1)).is_some());
+        assert!(cached_variants(&cache, &key, now + VARIANT_CACHE_MISS_TTL).is_none());
+        let other_env = (key.0.clone(), BTreeMap::from([("OTHER".to_string(), "1".to_string())]));
+        assert!(cached_variants(&cache, &other_env, now).is_none());
+    }
+
+    #[test]
+    fn variant_efforts_lists_variant_ids_in_order_without_duplicates() {
+        let variants = vec![
+            json!({ "id": "max", "settings": { "reasoningEffort": "max" } }),
+            json!({ "id": "low", "settings": { "reasoningEffort": "low" } }),
+            json!({ "id": "low2", "settings": { "reasoningEffort": "low" } }),
+            json!({ "id": "off", "settings": { "reasoningEffort": "" } }),
+            json!({ "id": "bare", "settings": {} }),
+        ];
+        // Variant ids, not their reasoningEffort values: what a session
+        // accepts is the variant, and ids cover variants without an effort.
+        assert_eq!(variant_efforts(&variants), ["max", "low", "low2", "off", "bare"]);
+        assert!(variant_efforts(&[]).is_empty());
+    }
+
+    #[test]
+    fn merge_efforts_joins_on_the_full_catalog_id_and_keeps_plain_rows() {
+        let catalog = HashMap::from([
+            ("prov/m1".to_string(), vec![json!({"id": "high", "settings": {"reasoningEffort": "high"}})]),
+            ("prov/bare".to_string(), vec![]),
+        ]);
+        let row = |id: &str, provider: &str| ProviderModel {
+            id: id.into(),
+            display_name: id.into(),
+            resolved_id: None,
+            description: None,
+            provider: Some(provider.into()),
+            efforts: Vec::new(),
+            default_effort: None,
+            is_default: false,
+            parameters: Vec::new(),
+            variants: Vec::new(),
+        };
+        let mut models = vec![row("prov/m1", "prov"), row("prov/bare", "prov"), row("other/m2", "other")];
+        merge_efforts(&mut models, &catalog);
+        assert_eq!(models[0].efforts, ["high"]);
+        assert!(models[1].efforts.is_empty());
+        assert!(models[2].efforts.is_empty());
     }
 }

@@ -237,12 +237,12 @@ fn restriction_rules(bridge: Option<&NativeToolBridge>) -> Vec<Value> {
     rules
 }
 
-/// `provider/model#variant` as a v2 model reference.
-fn model_ref(model: &str) -> Option<Value> {
+fn model_ref(model: &str, effort: Option<&str>) -> Option<Value> {
     let (model, variant) = model.split_once('#').map_or((model, None), |(model, variant)| (model, Some(variant)));
+    let variant = effort.map(str::trim).filter(|effort| !effort.is_empty()).or_else(|| variant.filter(|v| !v.is_empty()));
     let (provider, id) = split_model(model)?;
     let mut value = json!({ "providerID": provider, "id": id });
-    if let Some(variant) = variant.filter(|v| !v.is_empty()) {
+    if let Some(variant) = variant {
         value["variant"] = json!(variant);
     }
     Some(value)
@@ -313,7 +313,7 @@ pub(super) async fn spawn(bin: &Path, config: SessionConfig) -> Result<SpawnedSe
                 "location": { "directory": dir },
                 "permissions": permissions(config.permission_mode),
             });
-            if let Some(model) = config.model.as_deref().and_then(model_ref) {
+            if let Some(model) = config.model.as_deref().and_then(|model| model_ref(model, config.effort.as_deref())) {
                 body["model"] = model;
             }
             let value = server.call(Method::POST, "/api/session", Some(body)).await?;
@@ -330,7 +330,7 @@ pub(super) async fn spawn(bin: &Path, config: SessionConfig) -> Result<SpawnedSe
         server
             .call(Method::PATCH, &format!("/api/session/{session_id}"), Some(json!({ "permissions": permissions(config.permission_mode) })))
             .await?;
-        if let Some(model) = config.model.as_deref().and_then(model_ref) {
+        if let Some(model) = config.model.as_deref().and_then(|model| model_ref(model, config.effort.as_deref())) {
             server.call(Method::POST, &format!("/api/session/{session_id}/model"), Some(json!({ "model": model }))).await?;
         }
     }
@@ -352,7 +352,12 @@ pub(super) async fn spawn(bin: &Path, config: SessionConfig) -> Result<SpawnedSe
         server: Api { http, base, password },
         child: Mutex::new(child),
         events: tx,
-        state: Mutex::new(State::new(session_id.clone(), restrictions)),
+        state: {
+            let mut state = State::new(session_id.clone(), restrictions);
+            state.model = config.model.clone().filter(|model| split_model(model).is_some());
+            state.effort = config.effort.clone();
+            Mutex::new(state)
+        },
     });
     session.emit(DriverEvent::SessionBound { session_id, model: config.model.clone() }).await;
     let reader = session.clone();
@@ -402,6 +407,9 @@ struct State {
     context_windows: HashMap<String, u64>,
     /// Model of the latest step, for its context window.
     step_model: Option<String>,
+    /// The model the session runs (`provider/model`), for effort switches.
+    model: Option<String>,
+    effort: Option<String>,
     active: bool,
     turn_usage: Usage,
     turn_cost: f64,
@@ -424,6 +432,8 @@ impl State {
             commands: Vec::new(),
             context_windows: HashMap::new(),
             step_model: None,
+            model: None,
+            effort: None,
             active: false,
             turn_usage: Usage::default(),
             turn_cost: 0.0,
@@ -1194,14 +1204,31 @@ impl AgentSession for Handle {
 
     async fn set_model(&self, model: &str) -> Result<()> {
         let s = &self.0;
-        let reference =
-            model_ref(model).ok_or_else(|| DriverError::Unsupported(format!("OpenCode models are named provider/model, got {model}")))?;
+        let effort = s.state.lock().await.effort.clone();
+        let reference = model_ref(model, effort.as_deref())
+            .ok_or_else(|| DriverError::Unsupported(format!("OpenCode models are named provider/model, got {model}")))?;
         let session_id = s.state.lock().await.session_id.clone();
-        s.call(Method::POST, &format!("/api/session/{session_id}/model"), Some(json!({ "model": reference }))).await.map(|_| ())
+        s.call(Method::POST, &format!("/api/session/{session_id}/model"), Some(json!({ "model": reference }))).await.map(|_| ())?;
+        let bare = model.split('#').next().unwrap_or(model).to_string();
+        s.state.lock().await.model = Some(bare);
+        Ok(())
     }
 
-    async fn set_effort(&self, _effort: &str) -> Result<()> {
-        Err(DriverError::Unsupported("OpenCode did not report effort controls for this model".into()))
+    async fn set_effort(&self, effort: &str) -> Result<()> {
+        let s = &self.0;
+        let current = s.state.lock().await.model.clone();
+        let Some(model) = current else {
+            return Err(DriverError::Unsupported("OpenCode needs a named model before its effort can change".into()));
+        };
+        let bare = model.split('#').next().unwrap_or(&model).to_string();
+        let reference = model_ref(&bare, Some(effort))
+            .ok_or_else(|| DriverError::Unsupported(format!("OpenCode models are named provider/model, got {model}")))?;
+        let session_id = s.state.lock().await.session_id.clone();
+        s.call(Method::POST, &format!("/api/session/{session_id}/model"), Some(json!({ "model": reference }))).await?;
+        let mut state = s.state.lock().await;
+        state.model = Some(bare);
+        state.effort = Some(effort.to_string());
+        Ok(())
     }
 
     async fn respond_permission(&self, request_id: &str, decision: &ApprovalDecision) -> Result<()> {
