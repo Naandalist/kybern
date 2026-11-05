@@ -56,7 +56,17 @@ pub async fn identity(kind: ProviderKind, context: &ProbeContext) -> (AccountSta
         ProviderKind::Opencode => opencode_identity(context),
         ProviderKind::Pi => pi_identity(context),
         ProviderKind::Antigravity => antigravity_identity(context).await,
+        ProviderKind::GrokBuild => grok_identity(context),
     }
+}
+
+// ---- Grok Build ----
+
+fn grok_identity(context: &ProbeContext) -> (AccountStatus, Option<AccountIdentity>) {
+    if env_value(context, "XAI_API_KEY").is_some() {
+        return (AccountStatus::SignedIn, Some(AccountIdentity { email: None, plan: Some("API key".into()), organization: None }));
+    }
+    (AccountStatus::Unknown, None)
 }
 
 // ---- Antigravity ----

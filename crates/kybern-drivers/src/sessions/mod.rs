@@ -45,6 +45,7 @@ pub async fn list(kind: ProviderKind, context: &ProbeContext, cursor: Option<&st
         ProviderKind::Pi | ProviderKind::Omp => pi::list(kind, context, cursor, query).await,
         ProviderKind::Cursor => cursor::list(context, cursor, query).await,
         ProviderKind::Antigravity => antigravity::list(context, cursor, query).await,
+        ProviderKind::GrokBuild => Ok(SessionsListResult { sessions: vec![], next_cursor: None }),
     }
 }
 
@@ -59,6 +60,7 @@ pub async fn read(kind: ProviderKind, context: &ProbeContext, id: &str) -> Resul
         ProviderKind::Pi | ProviderKind::Omp => pi::read(kind, context, id).await,
         ProviderKind::Cursor => cursor::read(context, id).await,
         ProviderKind::Antigravity => antigravity::read(context, id).await,
+        ProviderKind::GrokBuild => Err(DriverError::Unsupported("Grok Build session history is not implemented yet".into())),
     }
 }
 
@@ -84,6 +86,7 @@ pub async fn reader(kind: ProviderKind, context: &ProbeContext) -> Result<Box<dy
         ProviderKind::Opencode => Box::new(opencode::Reader::start(context).await?),
         ProviderKind::Cursor => Box::new(cursor::Reader::new(context)),
         ProviderKind::Antigravity => Box::new(antigravity::Reader::new(context)?),
+        ProviderKind::GrokBuild => return Err(DriverError::Unsupported("Grok Build session reader is not implemented yet".into())),
     })
 }
 

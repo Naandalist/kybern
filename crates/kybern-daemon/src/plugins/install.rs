@@ -57,6 +57,7 @@ async fn run(state: &AppState, ctx: &Context, provider: ProviderKind, args: Vec<
                     ProviderKind::Opencode => "opencode",
                     ProviderKind::Cursor => "agent",
                     ProviderKind::Antigravity => "agy",
+                    ProviderKind::GrokBuild => "grok",
                 })
             },
         )
@@ -284,6 +285,7 @@ async fn apply(
         ProviderKind::Cursor => return Err("Install this plugin in Cursor’s marketplace.".into()),
         // Kybern never edits the user's Antigravity plugins, hooks or settings.
         ProviderKind::Antigravity => return Err("Install this plugin with `agy plugin install` on the target.".into()),
+        ProviderKind::GrokBuild => return Err("Plugin install is not supported for Grok Build yet.".into()),
     }
     Ok(())
 }

@@ -94,7 +94,7 @@ fn forwards_transcript(provider: ProviderKind, task: &RuntimeTask) -> bool {
         ProviderKind::Opencode => task.provider_thread_id.is_some(),
         ProviderKind::Cursor => task.id.starts_with("cursor-sdk:"),
         // Antigravity's subagents show as tool cards only.
-        ProviderKind::Pi | ProviderKind::Omp | ProviderKind::Antigravity => false,
+        ProviderKind::Pi | ProviderKind::Omp | ProviderKind::Antigravity | ProviderKind::GrokBuild => false,
     }
 }
 

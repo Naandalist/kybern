@@ -35,6 +35,7 @@ impl Context {
             ProviderKind::Omp => SkillHome::Omp,
             ProviderKind::Cursor => SkillHome::Cursor,
             ProviderKind::Antigravity => SkillHome::Agents,
+            ProviderKind::GrokBuild => SkillHome::Agents,
         };
         crate::skills::user_skill_home(kind, &self.env, &self.home)
             .and_then(|p| p.parent().map(Path::to_path_buf))

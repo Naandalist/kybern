@@ -88,6 +88,7 @@ fn layout(kind: ProviderKind, env: &BTreeMap<String, String>, home: &Path) -> (P
         ProviderKind::Cursor => (home.join(".cursor"), skills),
         // Kybern links nothing into `agy`'s storage.
         ProviderKind::Antigravity => (home.join(".gemini/antigravity-cli"), vec![]),
+        ProviderKind::GrokBuild => (home.join(".grok"), vec![]),
         ProviderKind::Pi => (
             configured("PI_CODING_AGENT_DIR", home.join(".pi/agent")),
             vec![("skills", "skills", true), ("extensions", "extensions", true)],

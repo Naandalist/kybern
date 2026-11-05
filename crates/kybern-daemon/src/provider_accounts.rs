@@ -57,6 +57,7 @@ pub fn credential_keys(kind: ProviderKind) -> &'static [&'static str] {
         ProviderKind::Codex => &["OPENAI_API_KEY", "CODEX_API_KEY"],
         ProviderKind::Cursor => &["CURSOR_API_KEY"],
         ProviderKind::Antigravity => &["GEMINI_API_KEY"],
+        ProviderKind::GrokBuild => &["XAI_API_KEY"],
         ProviderKind::Pi | ProviderKind::Omp | ProviderKind::Opencode => &[
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
@@ -121,6 +122,8 @@ fn build_environment(settings: &ProviderSettings, kind: ProviderKind, instance: 
         }
         // `agy` has no supported config-root override, so a second account cannot be isolated.
         ProviderKind::Antigravity => return Err(anyhow!(ANTIGRAVITY_ONE_ACCOUNT)),
+        // Grok Build uses XAI_API_KEY or grok login; named accounts not supported yet.
+        ProviderKind::GrokBuild => return Err(anyhow!("Grok Build does not support named accounts yet")),
     }
     Ok(env)
 }
@@ -228,6 +231,7 @@ pub fn sign_in(state: &AppState, instance: ProviderInstance) -> Result<TerminalI
             ProviderKind::Omp => &["auth-broker", "login"],
             ProviderKind::Cursor => unreachable!(),
             ProviderKind::Antigravity => return Err(anyhow!(ANTIGRAVITY_ONE_ACCOUNT)),
+            ProviderKind::GrokBuild => return Err(anyhow!("Grok Build does not support named accounts yet")),
         };
         std::iter::once(binary.to_string_lossy().into_owned()).chain(args.iter().map(|s| s.to_string())).collect()
     };

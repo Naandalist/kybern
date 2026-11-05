@@ -50,6 +50,7 @@ pub mod codex;
 pub mod codex_integrations;
 pub mod cursor;
 pub mod edit_paths;
+pub mod grok;
 pub mod login_lend;
 pub mod login_recipes;
 pub mod models;

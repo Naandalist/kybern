@@ -41,10 +41,11 @@ pub enum ProviderKind {
     Omp,
     Cursor,
     Antigravity,
+    GrokBuild,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 7] = [
+    pub const ALL: [ProviderKind; 8] = [
         ProviderKind::ClaudeCode,
         ProviderKind::Codex,
         ProviderKind::Opencode,
@@ -52,6 +53,7 @@ impl ProviderKind {
         ProviderKind::Omp,
         ProviderKind::Cursor,
         ProviderKind::Antigravity,
+        ProviderKind::GrokBuild,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -63,6 +65,7 @@ impl ProviderKind {
             ProviderKind::Omp => "omp",
             ProviderKind::Cursor => "cursor",
             ProviderKind::Antigravity => "antigravity",
+            ProviderKind::GrokBuild => "grok-build",
         }
     }
 
@@ -75,6 +78,7 @@ impl ProviderKind {
             ProviderKind::Omp => "Oh My Pi",
             ProviderKind::Cursor => "Cursor",
             ProviderKind::Antigravity => "Antigravity",
+            ProviderKind::GrokBuild => "Grok Build",
         }
     }
 
@@ -88,6 +92,7 @@ impl ProviderKind {
             ProviderKind::Omp => "omp",
             ProviderKind::Cursor => "agent",
             ProviderKind::Antigravity => "agy",
+            ProviderKind::GrokBuild => "grok",
         }
     }
 }

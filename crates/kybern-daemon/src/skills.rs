@@ -126,6 +126,12 @@ fn roots(cwd: &Path, provider: ProviderKind, env: &BTreeMap<String, String>, hom
                 add(home.join(".gemini/antigravity-cli/skills"), SkillScope::User, MAX_DEPTH);
             }
         }
+        ProviderKind::GrokBuild => {
+            add(cwd.join(".agents/skills"), SkillScope::Project, MAX_DEPTH);
+            if let Some(home) = home {
+                add(home.join(".agents/skills"), SkillScope::User, MAX_DEPTH);
+            }
+        }
         ProviderKind::Opencode => {
             for relative in [".opencode/skills", ".claude/skills", ".agents/skills"] {
                 add(cwd.join(relative), SkillScope::Project, MAX_DEPTH);

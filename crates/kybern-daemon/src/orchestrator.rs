@@ -844,7 +844,7 @@ fn instructions_key(session_id: &str) -> String {
 
 /// Harnesses with no system channel: Kybern's instructions block is the start of the first prompt.
 fn carries_instructions_in_conversation(kind: ProviderKind) -> bool {
-    matches!(kind, ProviderKind::Cursor | ProviderKind::Antigravity)
+    matches!(kind, ProviderKind::Cursor | ProviderKind::Antigravity | ProviderKind::GrokBuild)
 }
 
 /// How `send_with_id` took a message.
@@ -5183,6 +5183,7 @@ fn generic_runtime_task_for_provider(provider: ProviderKind, call: &ToolCall) ->
         ProviderKind::ClaudeCode | ProviderKind::Codex | ProviderKind::Omp => None,
         // Antigravity's subagent calls stay tool cards: no guessed task rows or child threads.
         ProviderKind::Antigravity => None,
+        ProviderKind::GrokBuild => None,
         ProviderKind::Opencode if task.kind == RuntimeTaskKind::Agent => None,
         // pi and Cursor currently expose only tool-scoped observation through
         // the protocols Kybern drives. OpenCode still uses the conservative

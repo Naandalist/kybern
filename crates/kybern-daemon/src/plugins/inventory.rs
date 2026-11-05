@@ -390,6 +390,7 @@ pub(super) fn read(ctx: &Context) -> PluginInventory {
             ProviderKind::Cursor => Ok(cursor(ctx)),
             // Kybern does not read or change the user's Antigravity plugins.
             ProviderKind::Antigravity => Ok(Vec::new()),
+            ProviderKind::GrokBuild => Ok(Vec::new()),
         };
         match items {
             Ok(items) => result.plugins.extend(items),
