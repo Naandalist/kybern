@@ -77,8 +77,8 @@ export function Account({ close, provider, instance }: { close: () => void; prov
   // Signing in again: opened for an account, or "Sign in again to Work" from the duplicate step.
   const reauthInstance = login?.instance ?? instance
   const reauth = !!reauthInstance
-  // Antigravity has one account per machine: no pick step, no name or colour, and nothing to add.
-  const single = (kind ?? provider) === 'antigravity'
+  // Antigravity and Grok Build have one account per machine: no pick step, no name or colour, and nothing to add.
+  const single = (kind ?? provider) === 'antigravity' || (kind ?? provider) === 'grok-build'
   const accounts = useAccounts(kind)
   const { settings } = useSettings()
   const environment = activeEnvironment()
@@ -194,7 +194,7 @@ export function Account({ close, provider, instance }: { close: () => void; prov
   if (step === 'pick' || (!step && !reauth)) {
     const ready = !!kind && providers.some((p) => p.kind === kind && p.available)
     // Antigravity signs in with `agy` on its own sheet; omp has no account (it runs on the providers set up inside it).
-    body = <PickStep providers={providers.filter((p) => p.kind !== 'antigravity' && !withoutSignIn(p.kind))} kind={kind} onKind={(next) => {
+    body = <PickStep providers={providers.filter((p) => p.kind !== 'antigravity' && p.kind !== 'grok-build' && !withoutSignIn(p.kind))} kind={kind} onKind={(next) => {
       const status = providers.find((p) => p.kind === next)
       if (status && !status.available) { setNav({ settingsOpen: true }); close(); void import('../settings/SettingsScreen.tsx').then((m) => m.openSettingsTab('agents')); return }
       setKind(next)
@@ -304,7 +304,7 @@ export function Account({ close, provider, instance }: { close: () => void; prov
     </Body>
     footer = <><Button size="lg" testId="account-cancel" variant="ghost" onClick={dismiss}>Cancel</Button>{login?.mode !== 'terminal' && kind && !legacy && <Button size="lg" testId="account-show-terminal" onClick={showTerminal}>Show terminal</Button>}<Button size="lg" testId="account-retry" variant="primary" onClick={() => void tryAgain()}>Try again</Button></>
   } else {
-    body = <Body><Title>{single ? 'Sign in to Antigravity' : 'Add an account'}</Title><div style={{ height: 64, marginTop: 12, borderRadius: 6, backgroundColor: t.buttonSecondary }} /></Body>
+    body = <Body><Title>{single ? `Sign in to ${agent || 'Antigravity'}` : 'Add an account'}</Title><div style={{ height: 64, marginTop: 12, borderRadius: 6, backgroundColor: t.buttonSecondary }} /></Body>
     footer = <Button size="lg" testId="account-cancel" variant="ghost" onClick={dismiss}>Cancel</Button>
   }
   return <Dialog onClose={dismiss} width={448} testId="add-account">

@@ -425,6 +425,7 @@ mod tests {
             ProviderKind::Omp,
             ProviderKind::Cursor,
             ProviderKind::Antigravity,
+            ProviderKind::GrokBuild,
         ] {
             assert!(!roots(&cwd, provider, &BTreeMap::new(), Some(&home)).is_empty(), "{provider} has no skill roots");
         }

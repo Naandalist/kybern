@@ -84,6 +84,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   pi: 'pi',
   omp: 'Oh My Pi',
   cursor: 'Cursor',
+  'grok-build': 'Grok Build',
 }
 export const providerLabel = (kind: string) => PROVIDER_LABEL[kind] ?? kind
 

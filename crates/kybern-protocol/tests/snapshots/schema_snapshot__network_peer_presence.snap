@@ -96,7 +96,8 @@ expression: schema_for!(PeerPresence)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     }
   }

@@ -99,6 +99,7 @@ const HARNESS_NAME: Record<ProviderKind, string> = {
   omp: "omp",
   cursor: "Cursor",
   antigravity: "Antigravity",
+  "grok-build": "Grok Build",
 };
 
 /** "2.1.312 (Claude Code)", "codex-cli 0.165.0" and "omp/18.13.2" all say one number: the first dotted version in the text. */

@@ -208,7 +208,8 @@ expression: schema_for!(SessionsImportFinished)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "SessionSkipReason": {

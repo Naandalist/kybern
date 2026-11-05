@@ -127,7 +127,8 @@ expression: schema_for!(RemoteChild)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "DelegationInfo": {

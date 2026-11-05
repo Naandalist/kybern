@@ -261,7 +261,8 @@ expression: schema_for!(ProjectsChangedNotification)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "LeadAutonomy": {

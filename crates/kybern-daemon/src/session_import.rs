@@ -930,6 +930,7 @@ impl JobRunner {
         if existing.contains(&key) {
             return Outcome::Already;
         }
+        // Grok Build lists no saved sessions (`sessions::list` is empty), so none reaches this check.
         let file_based =
             matches!(session.provider, ProviderKind::ClaudeCode | ProviderKind::Pi | ProviderKind::Omp | ProviderKind::Antigravity);
         if file_based && Utc::now().signed_duration_since(session.updated_at).num_seconds() < LIVE_WINDOW_SECS {

@@ -51,11 +51,12 @@ fn inventory_covers_six_harnesses_without_credentials_or_cli() {
     seed(&ctx);
     let inv = inventory::read(&ctx);
     assert_eq!(inv.warnings.len(), 1, "{:?}", inv.warnings);
-    // Kybern reads nobody's Antigravity plugins (it never touches `agy`'s setup).
-    for provider in ProviderKind::ALL.into_iter().filter(|provider| *provider != ProviderKind::Antigravity) {
+    // Kybern reads nobody's Antigravity plugins (it never touches `agy`'s setup) and Grok Build has no plugin support yet.
+    let unread = [ProviderKind::Antigravity, ProviderKind::GrokBuild];
+    for provider in ProviderKind::ALL.into_iter().filter(|provider| !unread.contains(provider)) {
         assert!(inv.plugins.iter().any(|p| p.provider == provider), "{provider:?}");
     }
-    assert!(inv.plugins.iter().all(|p| p.provider != ProviderKind::Antigravity));
+    assert!(inv.plugins.iter().all(|p| !unread.contains(&p.provider)));
     let cc = inv.plugins.iter().find(|p| p.provider == ProviderKind::ClaudeCode && p.kind == PluginKind::Plugin).unwrap();
     assert_eq!(cc.version.as_deref(), Some("1"));
     assert_eq!(cc.enabled, Some(false));

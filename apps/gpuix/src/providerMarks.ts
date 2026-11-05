@@ -8,7 +8,7 @@ import grok from './assets/providers/grok.svg' with { type: 'text' }
 import pi from './assets/providers/pi.svg' with { type: 'text' }
 import droid from './assets/providers/droid.svg' with { type: 'text' }
 
-export const PROVIDER_VECTORS: Record<string, string> = { 'claude-code': claude, claudeAgent: claude, codex, cursor, devin, grok, pi, droid }
+export const PROVIDER_VECTORS: Record<string, string> = { 'claude-code': claude, claudeAgent: claude, codex, cursor, devin, grok, 'grok-build': grok, pi, droid }
 // GPUI's SVG node is a tinted alpha mask. Keep multicolour marks as transparent
 // 128px rasters (4x the largest provider slot), never tint away the source colours.
 export const PROVIDER_IMAGES = {

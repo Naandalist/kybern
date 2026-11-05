@@ -33,6 +33,8 @@ export function spotFor(kind: ProviderKind, o: Orbit): { x: number; y: number } 
   // labels and its own label runs into the headline under the scene.
   const at: Record<ProviderKind, [number, number]> = {
     'claude-code': [-SQUARE * rx, -ry], codex: [-rx, 0], opencode: [-SQUARE * rx, ry], cursor: [SQUARE * rx, -ry], omp: [rx, 0], pi: [SQUARE * rx, ry], antigravity: [0, ry + 8],
+    // Grok Build has no tile here (it is not in `AGENT_ORDER`), so this spot is never laid out; it keeps the lookup total.
+    'grok-build': [0, ry + 8],
   }
   return { x: o.cx + at[kind][0], y: o.cy + at[kind][1] }
 }

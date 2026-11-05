@@ -118,7 +118,8 @@ expression: schema_for!(MachineInfo)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "RepoIdentity": {

@@ -1396,7 +1396,8 @@ expression: schema_for!(ThreadEvent)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "PermissionMode": {

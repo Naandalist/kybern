@@ -161,6 +161,7 @@ fn tool_label(tool: &str) -> String {
         "opencode" => "OpenCode".into(),
         "cursor-agent" | "cursor" => "Cursor".into(),
         "agy" | "antigravity" => "Antigravity".into(),
+        "grok" => "Grok Build".into(),
         "pi" => "Pi".into(),
         "omp" => "Oh My Pi".into(),
         other => other.into(),

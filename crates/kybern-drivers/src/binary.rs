@@ -23,12 +23,22 @@ pub fn resolve(kind: ProviderKind, override_path: Option<&PathBuf>) -> Result<Pa
 /// Where a harness's own installer puts its binary when that folder is not on
 /// the daemon's PATH (a desktop app starts with a short PATH).
 fn installed_location(kind: ProviderKind) -> Option<PathBuf> {
-    if kind != ProviderKind::Antigravity {
-        return None;
-    }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    antigravity_candidates(home.as_deref(), local_app_data.as_deref()).into_iter().find(|path| path.is_file())
+    let candidates = match kind {
+        ProviderKind::Antigravity => antigravity_candidates(home.as_deref(), local_app_data.as_deref()),
+        ProviderKind::GrokBuild => grok_candidates(home.as_deref()),
+        _ => return None,
+    };
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Where Grok Build's installer is expected to put `grok` (`~/.grok/bin`, or the shared `~/.local/bin`).
+/// Only used when `grok` is not on PATH.
+pub(crate) fn grok_candidates(home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = home else { return Vec::new() };
+    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
+    vec![home.join(".grok").join("bin").join(name), home.join(".local").join("bin").join(name)]
 }
 
 pub(crate) fn antigravity_candidates(home: Option<&Path>, local_app_data: Option<&Path>) -> Vec<PathBuf> {
@@ -195,6 +205,14 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "").unwrap();
         path
+    }
+
+    #[test]
+    fn grok_is_looked_for_in_its_own_and_the_shared_bin_folder() {
+        let home = Path::new("/home/me");
+        let name = if cfg!(windows) { "grok.exe" } else { "grok" };
+        assert_eq!(grok_candidates(Some(home)), [home.join(".grok").join("bin").join(name), home.join(".local").join("bin").join(name)]);
+        assert!(grok_candidates(None).is_empty());
     }
 
     #[test]

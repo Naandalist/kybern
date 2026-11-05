@@ -1,7 +1,7 @@
 import type { MachinePlugin, PluginsNetworkView, PluginsMachineView, PluginsCopyParams, PluginCopyJob } from './types.ts';
 
 export const pluginKey = (p: Pick<MachinePlugin, 'provider' | 'id'>) => `${p.provider}:${p.id}`;
-export const providerName = (p: MachinePlugin['provider']) => ({'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'pi', omp: 'Oh My Pi', cursor: 'Cursor', antigravity: 'Antigravity'}[p]);
+export const providerName = (p: MachinePlugin['provider']) => ({'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'pi', omp: 'Oh My Pi', cursor: 'Cursor', antigravity: 'Antigravity', 'grok-build': 'Grok Build'}[p]);
 export type PluginFilter = 'all' | 'different' | 'missing';
 export type PluginCellState = 'same' | 'different' | 'missing' | 'unknown';
 export interface PluginCell { machine: PluginsMachineView; plugin: MachinePlugin | null; state: PluginCellState }

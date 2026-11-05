@@ -3762,7 +3762,7 @@ impl Orchestrator {
         if askpass_allowed && let Some(env) = self.askpass_env(thread.id, session_instance_id) {
             provider_settings.env.extend(env);
         }
-        // Cursor and Antigravity have no system channel: the block rides in the conversation, once.
+        // Cursor, Antigravity and Grok Build have no system channel: the block rides in the conversation, once.
         let resume_lacks_instructions = match &thread.provider_session_id {
             Some(id) if carries_instructions_in_conversation(thread.provider.kind) && rewind.is_none() => {
                 self.inner.store.meta_get(&instructions_key(id))?.is_none()

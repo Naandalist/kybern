@@ -75,6 +75,6 @@ test("copy targets say what each machine has, and Replace sends only the version
 });
 
 test("homes name the harnesses that read them", () => {
-  assert.equal(readersText("agents"), "Codex, Cursor, OpenCode, and Oh My Pi");
+  assert.equal(readersText("agents"), "Codex, Cursor, OpenCode, Oh My Pi, Antigravity, and Grok Build");
   assert.deepEqual(harnessesOf(["claude", "pi"]), ["claude-code", "cursor", "opencode", "pi", "omp"]);
 });

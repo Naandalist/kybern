@@ -422,7 +422,8 @@ expression: schema_for!(TaskItemsFollowupParams)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "DelegationRole": {

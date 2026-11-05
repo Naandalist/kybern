@@ -51,6 +51,7 @@ const TOOL_LABELS: Record<string, string> = {
   "cursor-agent": "Cursor",
   agy: "Antigravity",
   antigravity: "Antigravity",
+  grok: "Grok Build",
   pi: "Pi",
   omp: "Oh My Pi",
 }

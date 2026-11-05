@@ -53,6 +53,7 @@ const CLI_SIGN_IN_COMMAND: Record<ProviderKind, string> = {
   opencode: 'opencode auth login',
   pi: 'pi',
   antigravity: 'agy',
+  'grok-build': 'grok login',
 }
 
 /** Agents whose identity the daemon can read; others keep an unknown status without a loading placeholder. */

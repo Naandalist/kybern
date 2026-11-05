@@ -78,7 +78,8 @@ expression: schema_for!(SessionsImportAllParams)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     }
   }

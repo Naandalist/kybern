@@ -47,7 +47,8 @@ expression: schema_for!(PluginsCopyParams)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "PluginCopyTarget": {

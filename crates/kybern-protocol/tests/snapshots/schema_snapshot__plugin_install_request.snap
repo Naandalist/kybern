@@ -112,7 +112,8 @@ expression: schema_for!(PluginInstallRequest)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "PluginKind": {

@@ -124,7 +124,8 @@ expression: schema_for!(SessionsScanChanged)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "ScanProviderState": {

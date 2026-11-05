@@ -33,7 +33,7 @@ export function limitLabel(limit: NonNullable<ProviderUsage["limits"]>[number], 
 
 type Limit = NonNullable<ProviderUsage["limits"]>[number]
 
-export const PROVIDER_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode", pi: "pi", omp: "Oh My Pi", antigravity: "Antigravity" }
+export const PROVIDER_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode", pi: "pi", omp: "Oh My Pi", antigravity: "Antigravity", "grok-build": "Grok Build" }
 
 /** Status color only near a limit: 25% left warns, 10% left is critical. */
 export function limitTone(percent: number | null): "normal" | "warning" | "critical" {

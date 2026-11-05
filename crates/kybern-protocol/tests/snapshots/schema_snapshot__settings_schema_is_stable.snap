@@ -57,6 +57,9 @@ expression: schema_for!(Settings)
         "cursor": {
           "$ref": "#/$defs/ProviderSettings"
         },
+        "grok-build": {
+          "$ref": "#/$defs/ProviderSettings"
+        },
         "omp": {
           "$ref": "#/$defs/ProviderSettings"
         },
@@ -179,7 +182,8 @@ expression: schema_for!(Settings)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "PermissionMode": {

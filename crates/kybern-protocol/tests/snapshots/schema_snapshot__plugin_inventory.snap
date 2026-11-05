@@ -86,7 +86,8 @@ expression: schema_for!(PluginInventory)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "OutboxState": {

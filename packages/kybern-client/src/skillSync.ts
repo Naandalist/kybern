@@ -28,7 +28,7 @@ export interface SkillHomeDetail {
 }
 
 export const SKILL_HOME_DETAILS: Record<SkillHome, SkillHomeDetail> = {
-  agents: { home: "agents", path: "~/.agents/skills", readers: ["codex", "cursor", "opencode", "omp"], universal: true },
+  agents: { home: "agents", path: "~/.agents/skills", readers: ["codex", "cursor", "opencode", "omp", "antigravity", "grok-build"], universal: true },
   claude: { home: "claude", path: "~/.claude/skills", readers: ["claude-code", "cursor", "opencode"], universal: false },
   codex: { home: "codex", path: "~/.codex/skills", readers: ["codex", "cursor"], universal: false },
   cursor: { home: "cursor", path: "~/.cursor/skills", readers: ["cursor"], universal: false },
@@ -37,7 +37,7 @@ export const SKILL_HOME_DETAILS: Record<SkillHome, SkillHomeDetail> = {
   omp: { home: "omp", path: "~/.omp/agent/skills", readers: ["omp"], universal: false },
 };
 
-const READER_NAME: Record<ProviderKind, string> = { "claude-code": "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "pi", omp: "Oh My Pi", cursor: "Cursor", antigravity: "Antigravity" };
+const READER_NAME: Record<ProviderKind, string> = { "claude-code": "Claude Code", codex: "Codex", opencode: "OpenCode", pi: "pi", omp: "Oh My Pi", cursor: "Cursor", antigravity: "Antigravity", "grok-build": "Grok Build" };
 
 const list = (items: readonly string[]) => new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(items);
 

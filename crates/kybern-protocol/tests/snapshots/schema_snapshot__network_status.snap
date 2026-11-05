@@ -303,7 +303,8 @@ expression: schema_for!(NetworkStatus)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "JoinVia": {

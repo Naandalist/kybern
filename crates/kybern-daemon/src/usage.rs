@@ -39,7 +39,8 @@ use tokio::sync::broadcast;
 
 use crate::settings::SettingsStore;
 
-/// Providers with a turn-free way to read the account's limits.
+/// Providers with a turn-free way to read the account's limits. Grok Build has none: `grok` reports
+/// cost per turn only, so it is not listed and its limits read as unavailable.
 const LIVE: [ProviderKind; 4] = [ProviderKind::ClaudeCode, ProviderKind::Codex, ProviderKind::Cursor, ProviderKind::Antigravity];
 /// Forced reads closer together than this share one result.
 const MIN_SPACING: Duration = Duration::from_secs(10);

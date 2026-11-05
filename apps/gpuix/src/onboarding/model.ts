@@ -48,7 +48,7 @@ export const list = (items: string[]) => new Intl.ListFormat('en-US', { style: '
 
 /** Provider order: it ranks the default agent and lays the tiles out clockwise from the top left. */
 export const AGENT_ORDER: readonly ProviderKind[] = ['claude-code', 'codex', 'opencode', 'cursor', 'omp', 'pi', 'antigravity']
-export const AGENT_NAMES: Record<ProviderKind, string> = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'pi', omp: 'Oh My Pi', cursor: 'Cursor', antigravity: 'Antigravity' }
+export const AGENT_NAMES: Record<ProviderKind, string> = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'pi', omp: 'Oh My Pi', cursor: 'Cursor', antigravity: 'Antigravity', 'grok-build': 'Grok Build' }
 
 export type AgentState = 'checking' | 'ready' | 'signin' | 'unknown' | 'models' | 'missing' | 'waiting' | 'installing' | 'update'
 

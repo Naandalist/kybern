@@ -405,8 +405,8 @@ mod tests {
 
     #[test]
     fn every_provider_links_assets_for_existing_and_new_accounts() {
-        // Antigravity has one account per machine and Kybern links nothing into `agy`'s storage.
-        for kind in ProviderKind::ALL.into_iter().filter(|kind| *kind != ProviderKind::Antigravity) {
+        // Antigravity and Grok Build have one account per machine, and Kybern links nothing into their storage.
+        for kind in ProviderKind::ALL.into_iter().filter(|kind| !matches!(kind, ProviderKind::Antigravity | ProviderKind::GrokBuild)) {
             let scratch = Scratch::new();
             let provider = scratch.provider();
             prepare(&provider, kind).unwrap();

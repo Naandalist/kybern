@@ -258,7 +258,8 @@ expression: schema_for!(TaskItemsChangedNotification)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "TaskRunState": {

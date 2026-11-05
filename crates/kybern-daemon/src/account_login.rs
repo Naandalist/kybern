@@ -170,6 +170,9 @@ impl AccountLogins {
             params.mode != AccountLoginMode::Terminal || kind != ProviderKind::Cursor,
             "Cursor signs in through its browser page. Choose Continue."
         );
+        // Grok Build signs in with `grok login` (or XAI_API_KEY) on the machine itself. Kybern has no
+        // status probe for that login yet, so it cannot tell a finished sign-in from a failed one.
+        ensure!(kind != ProviderKind::GrokBuild, "{}", crate::provider_accounts::GROK_BUILD_ONE_ACCOUNT);
         // Antigravity has one login per machine and no way to isolate a second. This is the one
         // harness where Kybern signs in the machine's own CLI login, in a visible terminal.
         let antigravity = kind == ProviderKind::Antigravity;

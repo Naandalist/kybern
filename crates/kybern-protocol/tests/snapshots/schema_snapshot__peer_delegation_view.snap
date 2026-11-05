@@ -122,7 +122,8 @@ expression: schema_for!(PeerDelegationView)
         "pi",
         "omp",
         "cursor",
-        "antigravity"
+        "antigravity",
+        "grok-build"
       ]
     },
     "DelegationRole": {

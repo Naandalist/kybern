@@ -88,16 +88,14 @@ impl SkillHome {
         match self {
             // Antigravity loads `.agents/skills/<name>/SKILL.md` (its own help text); the
             // per-user location is not documented, so this lists the shared folder only.
-            SkillHome::Agents => {
-                &[
-                    ProviderKind::Codex,
-                    ProviderKind::Cursor,
-                    ProviderKind::Opencode,
-                    ProviderKind::Omp,
-                    ProviderKind::Antigravity,
-                    ProviderKind::GrokBuild,
-                ]
-            }
+            SkillHome::Agents => &[
+                ProviderKind::Codex,
+                ProviderKind::Cursor,
+                ProviderKind::Opencode,
+                ProviderKind::Omp,
+                ProviderKind::Antigravity,
+                ProviderKind::GrokBuild,
+            ],
             SkillHome::Claude => &[ProviderKind::ClaudeCode, ProviderKind::Cursor, ProviderKind::Opencode],
             SkillHome::Codex => &[ProviderKind::Codex, ProviderKind::Cursor],
             SkillHome::Cursor => &[ProviderKind::Cursor],

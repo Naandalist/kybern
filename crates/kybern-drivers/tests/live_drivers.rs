@@ -36,6 +36,24 @@ async fn skip_or_fail_cursor() -> bool {
     true
 }
 
+/// `grok` is installed and signed in (`grok login` or XAI_API_KEY). Otherwise skip, or fail under KYBERN_LIVE_TESTS.
+async fn grok_ready() -> bool {
+    let status = DriverRegistry::with_defaults().get(ProviderKind::GrokBuild).unwrap().probe(None).await;
+    let strict = std::env::var_os("KYBERN_LIVE_TESTS").is_some();
+    if !status.available {
+        assert!(!strict, "Grok Build unavailable: {:?}", status.unavailable_reason);
+        eprintln!("skipping Grok Build: {:?}", status.unavailable_reason);
+        return false;
+    }
+    // `grok models` only answers when signed in.
+    if status.models.is_empty() && std::env::var_os("XAI_API_KEY").is_none() {
+        assert!(!strict, "Grok Build is signed out");
+        eprintln!("skipping Grok Build: signed out (grok models returned no models)");
+        return false;
+    }
+    true
+}
+
 async fn run_turn(kind: ProviderKind, mode: PermissionMode) -> Vec<DriverEvent> {
     let dir = tempfile::tempdir().unwrap();
     std::process::Command::new("git").arg("-C").arg(dir.path()).arg("init").arg("-q").status().unwrap();
@@ -243,6 +261,9 @@ async fn run_native_bridge_turn(kind: ProviderKind) {
     if if kind == ProviderKind::Cursor { skip_or_fail_cursor().await } else { skip_or_fail(kind) } {
         return;
     }
+    if kind == ProviderKind::GrokBuild && !grok_ready().await {
+        return;
+    }
     let (endpoint, mcp_requests, mcp_task) = spawn_probe_mcp().await;
     let dir = tempfile::tempdir().unwrap();
     std::process::Command::new("git").arg("-C").arg(dir.path()).arg("init").arg("-q").status().unwrap();
@@ -419,6 +440,9 @@ async fn run_guide_turn(kind: ProviderKind) {
     if if kind == ProviderKind::Cursor { skip_or_fail_cursor().await } else { skip_or_fail(kind) } {
         return;
     }
+    if kind == ProviderKind::GrokBuild && !grok_ready().await {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     std::process::Command::new("git").arg("-C").arg(dir.path()).arg("init").arg("-q").status().unwrap();
     let (spawned, mcp_task) = spawn_with_guide(kind, None, dir.path()).await;
@@ -512,6 +536,11 @@ async fn pi_receives_the_guide() {
 #[tokio::test]
 async fn cursor_receives_the_guide_on_its_first_prompt() {
     run_guide_turn(ProviderKind::Cursor).await;
+}
+
+#[tokio::test]
+async fn grok_build_receives_the_guide_on_its_first_prompt() {
+    run_guide_turn(ProviderKind::GrokBuild).await;
 }
 
 #[tokio::test]
@@ -630,7 +659,7 @@ async fn until_turn_ends(events: &mut tokio::sync::mpsc::Receiver<DriverEvent>, 
         let event = match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => break,
-            Err(_) => panic!("Antigravity: no turn completion within {seconds}s; events so far: {seen:?}"),
+            Err(_) => panic!("no turn completion within {seconds}s; events so far: {seen:?}"),
         };
         let done = matches!(event, DriverEvent::TurnCompleted { .. } | DriverEvent::TurnFailed { .. } | DriverEvent::Exited { .. });
         seen.push(event);
@@ -701,6 +730,118 @@ async fn antigravity_streams_runs_a_tool_resumes_and_lists_models() {
         })
         .expect("an answer");
     assert!(answer.contains("echo"), "{answer}");
+    assert!(matches!(second.last(), Some(DriverEvent::TurnCompleted { stop_reason: StopReason::Completed, .. })));
+    session.close().await.unwrap();
+}
+
+/// What a resumed session says before anyone prompts it.
+async fn quiet_for(events: &mut tokio::sync::mpsc::Receiver<DriverEvent>, millis: u64) -> Vec<DriverEvent> {
+    let mut seen = Vec::new();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(millis), events.recv()).await {
+        seen.push(event);
+    }
+    seen
+}
+
+fn grok_config(dir: &std::path::Path, resume: Option<String>) -> SessionConfig {
+    SessionConfig {
+        cwd: dir.to_path_buf(),
+        model: None,
+        effort: None,
+        permission_mode: PermissionMode::FullAccess,
+        native_tool_bridge: None,
+        resume_session_id: resume,
+        resume_lacks_instructions: false,
+        fork: false,
+        rewind: None,
+        binary: None,
+        env: HashMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn grok_build_streams_runs_a_tool_and_lists_models() {
+    if !grok_ready().await {
+        return;
+    }
+    let driver = DriverRegistry::with_defaults().get(ProviderKind::GrokBuild).expect("driver registered");
+    let status = driver.probe(None).await;
+    // Only Auto and Full access work: Grok sends no permission requests Kybern could answer.
+    assert_eq!(status.supported_permission_modes, vec![PermissionMode::Auto, PermissionMode::FullAccess]);
+    assert!(!status.supports_model_switch, "the model is chosen at session start");
+    if std::env::var_os("XAI_API_KEY").is_none() {
+        assert!(!status.models.is_empty(), "`grok models` listed no models: {status:?}");
+    }
+    assert!(status.models.iter().all(|model| !model.id.is_empty() && !model.id.contains(' ')), "{:?}", status.models);
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "kybern-sentinel-4417 is the only word in this file.\n").unwrap();
+    let spawned = driver.spawn(grok_config(dir.path(), None)).await.expect("spawn");
+    let (session, mut events) = (spawned.session, spawned.events);
+    session
+        .send_message("m1", &UserMessage::text("Use your file tools to read notes.txt, then tell me its first word in one short sentence."))
+        .await
+        .unwrap();
+    let first = until_turn_ends(&mut events, 240).await;
+    eprintln!("first turn: {first:#?}");
+    let conversation = first
+        .iter()
+        .find_map(|event| match event {
+            DriverEvent::SessionBound { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("a session id");
+    assert!(first.iter().any(|event| matches!(event, DriverEvent::TextDelta { .. })), "text streams");
+    let tool = first
+        .iter()
+        .find_map(|event| match event {
+            DriverEvent::ToolStarted(call) => Some(call.clone()),
+            _ => None,
+        })
+        .expect("one tool call");
+    assert!(tool.name != "other" && !tool.name.is_empty(), "the tool has Grok's own name: {tool:?}");
+    assert!(
+        first
+            .iter()
+            .any(|event| matches!(event, DriverEvent::ToolCompleted { tool_call_id, is_error: false, .. } if *tool_call_id == tool.id)),
+        "the tool completed"
+    );
+    let Some(DriverEvent::TurnCompleted { stop_reason, usage, .. }) = first.last() else { panic!("{:?}", first.last()) };
+    assert_eq!(*stop_reason, StopReason::Completed);
+    assert!(usage.input_tokens > 0 && usage.output_tokens > 0, "the turn reports its tokens: {usage:?}");
+    session.close().await.unwrap();
+
+    // Resume: the conversation loads without replaying its history as new output, and still answers from it.
+    let resumed = driver.spawn(grok_config(dir.path(), Some(conversation.clone()))).await.expect("resume");
+    let (session, mut events) = (resumed.session, resumed.events);
+    let replayed = quiet_for(&mut events, 1500).await;
+    assert!(
+        replayed.iter().all(|event| !matches!(
+            event,
+            DriverEvent::TextDelta { .. }
+                | DriverEvent::ThinkingDelta { .. }
+                | DriverEvent::ToolStarted(_)
+                | DriverEvent::ToolCompleted { .. }
+        )),
+        "loading a session must not replay its history: {replayed:?}"
+    );
+    assert!(
+        replayed.iter().any(|event| matches!(event, DriverEvent::SessionBound { session_id, .. } if *session_id == conversation)),
+        "the resumed session keeps its id: {replayed:?}"
+    );
+    session
+        .send_message("m2", &UserMessage::text("Without using any tool: which file did you just read? Answer with the file name only."))
+        .await
+        .unwrap();
+    let second = until_turn_ends(&mut events, 240).await;
+    let answer: String = second
+        .iter()
+        .filter_map(|event| match event {
+            DriverEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(answer.contains("notes"), "{answer}");
     assert!(matches!(second.last(), Some(DriverEvent::TurnCompleted { stop_reason: StopReason::Completed, .. })));
     session.close().await.unwrap();
 }
