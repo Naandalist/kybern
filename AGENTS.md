@@ -346,6 +346,24 @@ replay events received during hydration; preserve row identity and reading posit
 - `serde_json` has `preserve_order` on for deterministic schemas. Keep it.
 - Copy: sentence case, verb-first buttons, errors say what to do next.
 
+## Design rules (desktop and mobile)
+
+- Follow Apple's Human Interface Guidelines. Agents that have them load the
+  `interfaces:better-ui`, `interfaces:better-typography`,
+  `interfaces:better-layout`, `interfaces:better-writing`, `apple-design` and
+  `animate` skills before UI work.
+- Less is more. Before adding an element, a line of text or an animation, ask
+  whether it makes the result better; leaving it out is the default.
+- Let the layout do the explaining. Grouping, position, icons and the control
+  itself carry the meaning, so don't add secondary labels, helper
+  descriptions, subtitles or captions that repeat them.
+- Don't add gratuitous text or ornament: no eyebrow labels (small uppercase
+  kickers above a heading), taglines, decorative badges or counts that no one
+  needs to act on.
+- Animate only with a purpose, and only as often as people can stand it.
+  Keyboard actions and anything opened many times a day open instantly; skip
+  entrance animation on frequent menus and hover transitions on dense lists.
+
 ## Desktop UI rules
 
 GPUIX (`apps/gpuix`):
@@ -405,6 +423,50 @@ and `apps/gpuix/scripts` drive a real window through `check-harness.ts`, and
 `pnpm screenshot` captures one. Use a scratch daemon, keep one window per
 worktree, and screenshot only the app window. A locked or sleeping Mac screen
 stops frames: wheel scrolls never land and captures fail.
+
+## Pull requests
+
+Every PR body, including release and delegated-agent PRs, uses this template
+(also in `.github/pull_request_template.md`). Skip preambles, keep prose brief,
+and use the project's own terms (`docs/architecture.md`).
+
+```markdown
+## Summary
+
+<diagram, diff-sketch, or tree>
+
+## Evidence
+
+- **Before:** <screenshot/output/failing test run>
+  **After:** <screenshot/output/passing test run>
+
+## Merge Danger
+
+**Door:** <one-way or two-way>
+
+<optional: description>
+
+**Blast Radius:** <one-word description>
+
+<optional: potential ramifications of merge>
+```
+
+- **Summary:** the smallest view that makes the point: pseudocode for logic,
+  a call tree for control flow, a component tree for UI (with the state and
+  module boundaries that matter), a shallow file tree for a broad refactor,
+  Mermaid for interaction or data flow, or a `diff` sketch of that same shape
+  when the point is what changed. Use one or two of these, not all, and keep
+  each one next to the short line it supports. Keep only the calls, files,
+  props and boundaries a reviewer needs.
+- **Evidence:** a before and an after. Screenshots are best for visual
+  changes (app window only, per Verifying UI); next best is execution: the
+  exact test that failed and now passes (as pseudocode), or command output.
+  The repository is public: crop out private data, hostnames, and
+  other people's content.
+- **Merge Danger:** a two-way door can be walked back (a revert is cheap); a
+  one-way door can't (store migrations, protocol breaks, deleted data, pushed
+  tags, published updates). Blast radius names what could break: layout,
+  mobile, other platforms, clients on older daemons, release, and so on.
 
 ## Delegated agents and branches
 
