@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.21.8
+
+<!-- kybern-release-title: npm-installed agents on Windows, OpenCode effort -->
+<!-- kybern-release-summary: Claude Code and other agents installed with npm work on Windows again, and OpenCode 2 conversations can pick and change their reasoning effort. -->
+
+- On Windows, Claude Code installed with npm no longer fails every message with "batch file arguments are invalid". Kybern now runs the program behind npm's and pnpm's `.cmd` launchers directly, so its instructions reach the agent. This covers Codex, OpenCode, Pi and Cursor installed the same way. If a launcher still can't be bypassed, the error says to install the agent's standalone version or put Node.js on PATH.
+- OpenCode 2 models that offer reasoning efforts (such as low, high and xhigh) show them in the effort picker. The chosen effort is used when a conversation starts, and changing it mid-conversation applies to the next message without restarting the session. Thanks to @mayhendrap.
+- Checking OpenCode 2's models no longer starts OpenCode's shared background service, or adds an entry to OpenCode's project list each time.
+
 ## 0.21.7
 
 <!-- kybern-release-title: Faster typing on Windows and Linux, clearer errors -->
