@@ -346,6 +346,24 @@ replay events received during hydration; preserve row identity and reading posit
 - `serde_json` has `preserve_order` on for deterministic schemas. Keep it.
 - Copy: sentence case, verb-first buttons, errors say what to do next.
 
+## Design rules (desktop and mobile)
+
+- Follow Apple's Human Interface Guidelines. Agents that have them load the
+  `interfaces:better-ui`, `interfaces:better-typography`,
+  `interfaces:better-layout`, `interfaces:better-writing`, `apple-design` and
+  `animate` skills before UI work.
+- Less is more. Before adding an element, a line of text or an animation, ask
+  whether it makes the result better; leaving it out is the default.
+- Let the layout do the explaining. Grouping, position, icons and the control
+  itself carry the meaning, so don't add secondary labels, helper
+  descriptions, subtitles or captions that repeat them.
+- Don't add gratuitous text or ornament: no eyebrow labels (small uppercase
+  kickers above a heading), taglines, decorative badges or counts that no one
+  needs to act on.
+- Animate only with a purpose, and only as often as people can stand it.
+  Keyboard actions and anything opened many times a day open instantly; skip
+  entrance animation on frequent menus and hover transitions on dense lists.
+
 ## Desktop UI rules
 
 GPUIX (`apps/gpuix`):
