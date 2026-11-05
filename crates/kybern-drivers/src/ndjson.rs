@@ -26,7 +26,7 @@ impl NdjsonChild {
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
         #[cfg(unix)]
         cmd.process_group(0);
-        let mut child = cmd.spawn()?;
+        let mut child = cmd.spawn().map_err(|error| crate::binary::explain_spawn_error(error, cmd.as_std().get_program()))?;
         let tree = crate::process_tree::ProcessTree::new(child.id().expect("spawned provider"));
         let stdin = child.stdin.take().ok_or_else(|| DriverError::Protocol("no stdin".into()))?;
         let stdout = child.stdout.take().ok_or_else(|| DriverError::Protocol("no stdout".into()))?;

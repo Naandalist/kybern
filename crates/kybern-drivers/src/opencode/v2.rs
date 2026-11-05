@@ -20,7 +20,7 @@ use kybern_protocol::*;
 use reqwest::Method;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc};
 
 use super::{OPENCODE_READ_ONLY_TOOLS, mcp_config, net, split_model};
@@ -52,7 +52,7 @@ impl Server {
         extra: &[(&str, &str)],
     ) -> Result<Self> {
         let password = uuid::Uuid::new_v4().simple().to_string();
-        let mut cmd = Command::new(bin).no_window();
+        let mut cmd = crate::binary::command(bin).no_window();
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }

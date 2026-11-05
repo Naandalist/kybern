@@ -6,7 +6,6 @@ use kybern_protocol::{
 };
 use serde_json::{Value, json};
 use std::time::Duration;
-use tokio::process::Command;
 
 async fn call(child: &NdjsonChild, id: i64, method: &str, params: Value) -> Result<Value> {
     child.write(&json!({"id":id,"method":method,"params":params})).await?;
@@ -46,7 +45,7 @@ async fn call(child: &NdjsonChild, id: i64, method: &str, params: Value) -> Resu
 
 async fn open(context: &ProbeContext) -> Result<NdjsonChild> {
     let bin = crate::binary::resolve(ProviderKind::Codex, context.binary.as_ref())?;
-    let mut command = Command::new(bin).no_window();
+    let mut command = crate::binary::command(bin).no_window();
     command.arg("app-server").envs(&context.env);
     if let Some(cwd) = &context.cwd {
         command.current_dir(cwd);

@@ -232,7 +232,7 @@ fn home(context: &ProbeContext) -> Result<PathBuf> {
 
 fn command(kind: ProviderKind, context: &ProbeContext) -> Result<Command> {
     let bin = crate::binary::resolve(kind, context.binary.as_ref())?;
-    let mut cmd = Command::new(bin).no_window();
+    let mut cmd = crate::binary::command(bin).no_window();
     cmd.envs(&context.env).kill_on_drop(true);
     if let Some(cwd) = &context.cwd {
         cmd.current_dir(cwd);

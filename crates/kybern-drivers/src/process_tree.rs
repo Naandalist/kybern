@@ -286,7 +286,7 @@ pub(crate) async fn output(command: &mut tokio::process::Command) -> std::io::Re
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
     #[cfg(unix)]
     command.process_group(0);
-    let child = command.spawn()?;
+    let child = command.spawn().map_err(|error| crate::binary::explain_spawn_error(error, command.as_std().get_program()))?;
     let tree = ProcessTree::new(child.id().expect("spawned provider command"));
     let result = child.wait_with_output().await;
     drop(tree);

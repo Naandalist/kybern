@@ -22,7 +22,7 @@ use futures::StreamExt;
 use kybern_protocol::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc};
 
 pub(crate) use v2::Server as V2Server;
@@ -43,7 +43,7 @@ const MODEL_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 pub struct OpencodeDriver;
 
 async fn opencode_models(bin: &std::path::Path, context: &ProbeContext) -> Vec<ProviderModel> {
-    let mut command = Command::new(bin).no_window();
+    let mut command = crate::binary::command(bin).no_window();
     command.args(["models"]).stdin(Stdio::null()).kill_on_drop(true);
     if let Some(cwd) = &context.cwd {
         command.current_dir(cwd);
@@ -188,7 +188,7 @@ pub async fn discover_skills(cwd: &Path, binary: Option<&PathBuf>, env: &BTreeMa
         Err(_) => return None,
         Ok(Api::V1) => {}
     }
-    let mut command = Command::new(bin).no_window();
+    let mut command = crate::binary::command(bin).no_window();
     command.current_dir(cwd).args(["debug", "skill"]).stdin(Stdio::null()).stderr(Stdio::null());
     for (key, value) in env {
         command.env(key, value);
@@ -273,7 +273,7 @@ impl AgentDriver for OpencodeDriver {
             .as_ref()
             .map(|bridge| opencode_config_content(config.env.get("OPENCODE_CONFIG_CONTENT"), bridge))
             .transpose()?;
-        let mut cmd = Command::new(&bin).no_window();
+        let mut cmd = crate::binary::command(&bin).no_window();
         cmd.current_dir(&config.cwd)
             .args(["serve", "--port", "0", "--hostname", "127.0.0.1"])
             .stdin(Stdio::null())

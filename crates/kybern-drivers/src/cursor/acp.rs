@@ -25,7 +25,6 @@ use async_trait::async_trait;
 use kybern_protocol::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -64,7 +63,7 @@ fn parse_cursor_models(output: &[u8]) -> Vec<ProviderModel> {
 }
 
 async fn cursor_models(bin: &std::path::Path, context: &ProbeContext) -> Vec<ProviderModel> {
-    let mut command = Command::new(bin).no_window();
+    let mut command = crate::binary::command(bin).no_window();
     command.args(["models"]).stdin(Stdio::null()).kill_on_drop(true).env("NO_COLOR", "1");
     if let Some(cwd) = &context.cwd {
         command.current_dir(cwd);
@@ -343,7 +342,7 @@ async fn run_connection(
     bound: oneshot::Sender<Result<String>>,
 ) -> Result<()> {
     // Spawn ourselves so the process cwd is the project (Cursor reads .cursor/mcp.json from it).
-    let mut cmd = Command::new(&bin).no_window();
+    let mut cmd = crate::binary::command(&bin).no_window();
     cmd.arg("acp")
         .current_dir(&config.cwd)
         .stdin(std::process::Stdio::piped())

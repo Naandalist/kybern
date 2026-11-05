@@ -93,7 +93,7 @@ impl AgentDriver for ClaudeDriver {
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(60),
             crate::process_tree::output(
-                Command::new(&bin)
+                crate::binary::command(&bin)
                     .no_window()
                     .current_dir(cwd)
                     .args([
@@ -157,7 +157,7 @@ impl AgentDriver for ClaudeDriver {
             _ => Uuid::new_v4().to_string(),
         };
 
-        let mut cmd = Command::new(&bin).no_window();
+        let mut cmd = crate::binary::command(&bin).no_window();
         cmd.current_dir(&config.cwd)
             .args(["--output-format", "stream-json", "--input-format", "stream-json", "--verbose", "--include-partial-messages"])
             .args(["--permission-prompt-tool", "stdio"]);
@@ -617,7 +617,7 @@ fn claude_efforts(help: &str) -> Vec<String> {
 }
 
 pub(crate) fn contextual_command(binary: &std::path::Path, context: &ProbeContext) -> Command {
-    let mut command = Command::new(binary).no_window();
+    let mut command = crate::binary::command(binary).no_window();
     if let Some(cwd) = context.cwd.as_deref() {
         command.current_dir(cwd);
     }

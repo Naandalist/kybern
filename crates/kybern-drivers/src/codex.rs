@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use base64::Engine;
 use kybern_protocol::*;
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::binary::{at_least, resolve, version_of};
@@ -93,7 +92,7 @@ fn ensure_requested_codex_model(requested: Option<&str>, effective: Option<&str>
 }
 
 async fn codex_models(bin: &std::path::Path, context: &ProbeContext) -> Vec<ProviderModel> {
-    let mut cmd = Command::new(bin).no_window();
+    let mut cmd = crate::binary::command(bin).no_window();
     cmd.arg("app-server");
     if let Some(cwd) = context.cwd.as_deref() {
         cmd.current_dir(cwd);
@@ -152,7 +151,7 @@ pub async fn read_account_limits(
     env: &std::collections::BTreeMap<String, String>,
 ) -> Option<Vec<kybern_protocol::UsageLimit>> {
     let bin = resolve(ProviderKind::Codex, binary).ok()?;
-    let mut cmd = Command::new(bin).no_window();
+    let mut cmd = crate::binary::command(bin).no_window();
     cmd.current_dir(cwd).arg("app-server").envs(env);
     let child = NdjsonChild::spawn(cmd).ok()?;
     let initialized = catalog_call(
@@ -184,7 +183,7 @@ pub async fn discover_skills(
     env: &std::collections::BTreeMap<String, String>,
 ) -> Option<Vec<SkillInfo>> {
     let bin = resolve(ProviderKind::Codex, binary).ok()?;
-    let mut cmd = Command::new(bin).no_window();
+    let mut cmd = crate::binary::command(bin).no_window();
     cmd.current_dir(cwd).arg("app-server").envs(env);
     let child = NdjsonChild::spawn(cmd).ok()?;
     let initialized = catalog_call(
@@ -415,7 +414,7 @@ impl AgentDriver for CodexDriver {
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(90),
             crate::process_tree::output(
-                Command::new(&bin)
+                crate::binary::command(&bin)
                     .no_window()
                     .current_dir(cwd)
                     .args(["exec", "-s", "read-only", "--skip-git-repo-check", "--output-last-message"])
@@ -458,7 +457,7 @@ impl AgentDriver for CodexDriver {
             validate_codex_bridge(bridge)?;
         }
         let bin = resolve(ProviderKind::Codex, config.binary.as_ref())?;
-        let mut cmd = Command::new(&bin).no_window();
+        let mut cmd = crate::binary::command(&bin).no_window();
         cmd.current_dir(&config.cwd).arg("app-server");
         for (k, v) in config.env.iter().filter(|(k, _)| k.as_str() != crate::login_lend::BORROW_ENV) {
             cmd.env(k, v);

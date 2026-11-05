@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::process::Command;
 
 use crate::ProbeContext;
 
@@ -202,7 +201,7 @@ fn fresher_login(file: Option<Vec<u8>>, keychain: Option<Vec<u8>>) -> Option<Vec
 async fn keychain_login(context: &ProbeContext) -> Option<Vec<u8>> {
     let custom_dir = ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"].iter().any(|key| environment_value(context, key).is_some());
     let account = environment_value(context, "USER").filter(|user| !user.is_empty() && !custom_dir)?;
-    let mut command = Command::new("/usr/bin/security").no_window();
+    let mut command = tokio::process::Command::new("/usr/bin/security").no_window();
     command.args(["find-generic-password", "-a", &account, "-w", "-s", "Claude Code-credentials"]);
     let output = tokio::time::timeout(Duration::from_secs(2), crate::process_tree::output(&mut command)).await.ok()?.ok()?;
     output.status.success().then_some(output.stdout)
@@ -257,7 +256,7 @@ async fn account_default_model(context: &ProbeContext, binary: &Path) -> Option<
     if let Some(oauth) = login_due_for_refresh(context).await {
         return account_default_from_status(&oauth);
     }
-    let mut command = Command::new(binary).no_window();
+    let mut command = crate::binary::command(binary).no_window();
     command.args(["auth", "status", "--json"]).env_remove("NODE_OPTIONS");
     if let Some(cwd) = context.cwd.as_deref() {
         command.current_dir(cwd);

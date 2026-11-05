@@ -7,11 +7,10 @@ use kybern_protocol::{
 use serde_json::Value;
 use std::collections::HashSet;
 use std::time::Duration;
-use tokio::process::Command;
 
 async fn run(context: &ProbeContext, args: &[&str]) -> Result<String> {
     let bin = crate::binary::resolve(ProviderKind::ClaudeCode, context.binary.as_ref())?;
-    let mut command = Command::new(bin).no_window();
+    let mut command = crate::binary::command(bin).no_window();
     command.args(args).env_remove("NODE_OPTIONS").envs(&context.env);
     if let Some(cwd) = &context.cwd {
         command.current_dir(cwd);

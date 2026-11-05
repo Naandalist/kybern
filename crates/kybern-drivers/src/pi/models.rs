@@ -6,7 +6,7 @@ use std::time::Duration;
 use kybern_protocol::ProviderModel;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::process::ChildStdin;
 
 use crate::{DriverError, ProbeContext, Result};
 
@@ -34,7 +34,7 @@ async fn discover_with_timeout(bin: &Path, context: &ProbeContext, timeout: Dura
 }
 
 async fn discover_inner(bin: &Path, context: &ProbeContext) -> Result<Discovery> {
-    let mut command = Command::new(bin).no_window();
+    let mut command = crate::binary::command(bin).no_window();
     // Preserve Pi's saved/default project-trust policy. In RPC mode an
     // undecided project is safely probed without loading its local resources.
     command.args(["--mode", "rpc", "--no-session"]);

@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use base64::Engine;
 use kybern_protocol::*;
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
@@ -150,7 +149,7 @@ impl PiDriver {
 }
 
 async fn model_command_output(bin: &std::path::Path, args: &[&str], context: &ProbeContext) -> Option<Vec<u8>> {
-    let mut command = Command::new(bin).no_window();
+    let mut command = crate::binary::command(bin).no_window();
     command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
     if let Some(cwd) = &context.cwd {
         command.current_dir(cwd);
@@ -282,7 +281,7 @@ impl AgentDriver for PiDriver {
             }
             Flavor::Omp => None,
         };
-        let mut cmd = Command::new(&bin).no_window();
+        let mut cmd = crate::binary::command(&bin).no_window();
         cmd.current_dir(&config.cwd).args(["--mode", "rpc"]);
         let new_session_id = Uuid::new_v4().to_string();
         match self.flavor {

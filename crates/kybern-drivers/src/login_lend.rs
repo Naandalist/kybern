@@ -260,7 +260,7 @@ pub fn decode_json_or_hex(bytes: &[u8]) -> Option<Value> {
 pub async fn refresh_claude(context: &ProbeContext, binary: Option<&Path>) -> std::result::Result<(), String> {
     let binary =
         crate::binary::resolve(ProviderKind::ClaudeCode, binary.map(Path::to_path_buf).as_ref()).map_err(|error| error.to_string())?;
-    let mut command = tokio::process::Command::new(binary).no_window();
+    let mut command = crate::binary::command(binary).no_window();
     command.args(["-p", "ok", "--output-format", "json"]).env_remove("NODE_OPTIONS").envs(&context.env).stdin(std::process::Stdio::null());
     if let Some(cwd) = &context.cwd {
         command.current_dir(cwd);

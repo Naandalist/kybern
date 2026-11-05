@@ -12,7 +12,6 @@ use base64::Engine;
 use kybern_protocol::ProviderKind;
 use kybern_protocol::methods::{AccountIdentity, AccountLoginMode, AccountStatus};
 use serde_json::Value;
-use tokio::process::Command;
 
 use crate::{DriverError, ProbeContext, Result};
 
@@ -31,7 +30,7 @@ fn home_dir(context: &ProbeContext) -> Option<PathBuf> {
 }
 
 async fn run_json(binary: &Path, args: &[&str], context: &ProbeContext) -> Option<(bool, Value)> {
-    let mut command = Command::new(binary).no_window();
+    let mut command = crate::binary::command(binary).no_window();
     command.args(args).env_remove("NODE_OPTIONS").stdin(std::process::Stdio::null());
     if let Some(cwd) = context.cwd.as_deref() {
         command.current_dir(cwd);
@@ -150,7 +149,7 @@ async fn codex_identity(context: &ProbeContext) -> (AccountStatus, Option<Accoun
     let Ok(binary) = crate::binary::resolve(ProviderKind::Codex, context.binary.as_ref()) else {
         return (AccountStatus::SignedIn, Some(identity));
     };
-    let mut command = Command::new(&binary).no_window();
+    let mut command = crate::binary::command(&binary).no_window();
     command.args(["login", "status"]).stdin(std::process::Stdio::null()).envs(&context.env);
     let valid = match tokio::time::timeout(PROBE_TIMEOUT, crate::process_tree::output(&mut command)).await {
         Ok(Ok(output)) => output.status.success(),

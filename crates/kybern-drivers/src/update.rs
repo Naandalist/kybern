@@ -62,7 +62,7 @@ pub async fn plan(kind: ProviderKind, binary: &Path, env: &BTreeMap<String, Stri
         args.push(package);
         return Ok(UpdateCommand { program, args });
     }
-    let mut help = Command::new(binary).no_window();
+    let mut help = crate::binary::command(binary).no_window();
     help.arg("--help").envs(env).current_dir(cwd).stdin(Stdio::null()).kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(10), crate::process_tree::output(&mut help)).await??;
     // Some CLIs (including OpenCode) write successful help to stderr.
