@@ -214,7 +214,7 @@ impl Orchestrator {
                 Some(_) if !status.supported_efforts.is_empty() => status.supported_efforts.as_slice(),
                 Some(_) => {
                     return Err(anyhow!(
-                        "Model {} on {} does not list effort variants. Pick an effort-supported model or clear the effort.",
+                        "Model {} on {} has no effort levels. Clear the effort, or pick a model that lists efforts.",
                         selected_model.unwrap_or_default(),
                         provider.kind
                     ));
@@ -5366,7 +5366,7 @@ mod tests {
         assert!(validate("p/m-with", Some("low")).await.is_ok());
         assert!(validate("p/m-with", Some("xhigh")).await.is_err());
         let error = validate("p/m-without", Some("high")).await.unwrap_err().to_string();
-        assert!(error.contains("does not list effort variants"), "{error}");
+        assert!(error.contains("has no effort levels"), "{error}");
         assert!(validate("p/m-without", None).await.is_ok());
         let legacy = status_models_with_global_list();
         fixture.orchestrator.inner.provider_catalogs.get_or_refresh(cache_key, true, || async { vec![legacy.clone()] }).await;

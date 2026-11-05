@@ -42,9 +42,20 @@ const MODEL_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 #[derive(Default)]
 pub struct OpencodeDriver;
 
-async fn opencode_models(bin: &std::path::Path, context: &ProbeContext) -> Vec<ProviderModel> {
+/// `opencode models` arguments. OpenCode 2 hands CLI commands to a shared
+/// background server (`opencode serve --service`) that it starts on demand
+/// and leaves running with the user's MCP servers loaded; `--standalone`
+/// answers from a private server that exits with the command.
+fn models_args(api: Option<Api>) -> &'static [&'static str] {
+    match api {
+        Some(Api::V2) => &["models", "--standalone"],
+        _ => &["models"],
+    }
+}
+
+async fn opencode_models(bin: &std::path::Path, api: Option<Api>, context: &ProbeContext) -> Vec<ProviderModel> {
     let mut command = crate::binary::command(bin).no_window();
-    command.args(["models"]).stdin(Stdio::null()).kill_on_drop(true);
+    command.args(models_args(api)).stdin(Stdio::null()).kill_on_drop(true);
     if let Some(cwd) = &context.cwd {
         command.current_dir(cwd);
     }
@@ -140,8 +151,23 @@ fn parse_model_catalog(models: &[Value]) -> HashMap<String, Vec<Value>> {
     catalog
 }
 
+/// One fixed, per-user folder for the variant probe. OpenCode 2 records every
+/// folder it serves as a project, so a fresh folder per probe would add a
+/// project to the user's OpenCode on every refresh. The folder is kept: a
+/// server still exiting holds it as its working directory on Windows.
+fn probe_folder(env: &BTreeMap<String, String>) -> PathBuf {
+    let var = |key: &str| env.get(key).cloned().or_else(|| std::env::var(key).ok()).filter(|value| !value.is_empty()).map(PathBuf::from);
+    // The system temp folder is per-user on macOS and Windows, shared on Linux.
+    let base = if cfg!(target_os = "linux") {
+        var("XDG_CACHE_HOME").or_else(|| var("HOME").map(|home| home.join(".cache"))).unwrap_or_else(std::env::temp_dir)
+    } else {
+        std::env::temp_dir()
+    };
+    base.join("kybern").join("opencode-probe")
+}
+
 async fn read_variant_catalog(bin: &Path, env: &BTreeMap<String, String>) -> Option<HashMap<String, Vec<Value>>> {
-    let folder = std::env::temp_dir().join(format!("kybern-opencode-probe-{}", uuid::Uuid::new_v4().simple()));
+    let folder = probe_folder(env);
     tokio::fs::create_dir_all(&folder).await.ok()?;
     let models = tokio::time::timeout(MODEL_DISCOVERY_TIMEOUT, async {
         let env = env.iter().collect::<Vec<_>>();
@@ -151,7 +177,6 @@ async fn read_variant_catalog(bin: &Path, env: &BTreeMap<String, String>) -> Opt
     .await
     .ok()
     .flatten();
-    let _ = tokio::fs::remove_dir_all(&folder).await;
     Some(parse_model_catalog(models.unwrap_or_default().as_slice()))
 }
 
@@ -247,26 +272,27 @@ impl OpencodeDriver {
         match version_of(&bin, &["--version"]).await {
             Some(v) => {
                 let support = match parse_semver(&v) {
-                    Some(version) => api_for(version).map(|_| ()),
-                    None if at_least(&v, MIN_VERSION) => Ok(()),
+                    Some(version) => api_for(version).map(Some),
+                    None if at_least(&v, MIN_VERSION) => Ok(None),
                     None => Err(format!("OpenCode {v} is older than the required {}.{}.{}", MIN_VERSION.0, MIN_VERSION.1, MIN_VERSION.2)),
                 };
-                let ok = support.is_ok();
-                status.available = ok;
-                status.unavailable_reason = support.err();
                 status.version = Some(v);
-                if ok {
-                    status.models = opencode_models(&bin, context).await;
-                    if matches!(api_of(&bin).await, Ok(Api::V2)) {
-                        let catalog = variant_catalog(&bin, context).await;
-                        merge_efforts(&mut status.models, &catalog);
-                        // Per-model efforts only: a global fallback list would
-                        // accept an effort for models without variants, and a
-                        // probe-time union changes order run to run.
-                        if status.models.iter().any(|model| !model.efforts.is_empty()) {
-                            status.supports_effort_switch = true;
+                match support {
+                    Ok(api) => {
+                        status.available = true;
+                        status.models = opencode_models(&bin, api, context).await;
+                        if api == Some(Api::V2) {
+                            let catalog = variant_catalog(&bin, context).await;
+                            merge_efforts(&mut status.models, &catalog);
+                            // Per-model efforts only: a global fallback list would
+                            // accept an effort for models without variants, and a
+                            // probe-time union changes order run to run.
+                            if status.models.iter().any(|model| !model.efforts.is_empty()) {
+                                status.supports_effort_switch = true;
+                            }
                         }
                     }
+                    Err(reason) => status.unavailable_reason = Some(reason),
                 }
             }
             None => status.unavailable_reason = Some("could not run `opencode --version`".into()),
@@ -2126,6 +2152,14 @@ mod tests {
     }
 
     #[test]
+    fn model_discovery_never_starts_opencodes_background_service() {
+        use super::{Api, models_args};
+        assert_eq!(models_args(Some(Api::V2)), ["models", "--standalone"]);
+        assert_eq!(models_args(Some(Api::V1)), ["models"]);
+        assert_eq!(models_args(None), ["models"]);
+    }
+
+    #[test]
     fn model_discovery_budget_covers_a_cold_provider_refresh() {
         assert!(MODEL_DISCOVERY_TIMEOUT >= Duration::from_secs(10));
     }
@@ -2271,6 +2305,16 @@ mod orchestration_part_tests {
         let mut message = orchestration_message();
         message.parts.insert(0, ContentPart::Skill { name: "review".into(), path: "/s/SKILL.md".into() });
         assert_flattened(&skill_command(&message).unwrap().arguments);
+    }
+
+    #[test]
+    fn the_variant_probe_reuses_one_folder() {
+        let env = BTreeMap::from([("XDG_CACHE_HOME".to_string(), "/cache".to_string())]);
+        assert_eq!(probe_folder(&env), probe_folder(&env));
+        assert!(probe_folder(&env).ends_with("kybern/opencode-probe"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(probe_folder(&env), PathBuf::from("/cache/kybern/opencode-probe"));
+        }
     }
 
     #[test]

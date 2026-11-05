@@ -1218,7 +1218,7 @@ impl AgentSession for Handle {
         let s = &self.0;
         let current = s.state.lock().await.model.clone();
         let Some(model) = current else {
-            return Err(DriverError::Unsupported("OpenCode needs a named model before its effort can change".into()));
+            return Err(DriverError::Unsupported("Pick an OpenCode model first, then change its effort.".into()));
         };
         let bare = model.split('#').next().unwrap_or(&model).to_string();
         let reference = model_ref(&bare, Some(effort))
