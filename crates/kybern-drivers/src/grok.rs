@@ -53,7 +53,7 @@ impl GrokDriver {
             Ok(b) => b,
             Err(e) => {
                 status.unavailable_reason = Some(format!(
-                    "{e}. Install with: curl -fsSL https://x.ai/cli/install.sh | bash"
+                    "{e}. Install Grok Build: https://x.ai/cli (or `curl -fsSL https://x.ai/cli/install.sh | bash` on macOS/Linux)"
                 ));
                 return status;
             }
@@ -350,10 +350,14 @@ async fn run_connection(
                     SessionUpdate::ToolCallUpdate(u) => {
                         let status = u.fields.status.map(|s| format!("{s:?}").to_lowercase());
                         if matches!(status.as_deref(), Some("completed") | Some("failed")) {
+                            let mut output = json!({ "status": status });
+                            if let Some(content) = &u.fields.content {
+                                output["content"] = json!(content);
+                            }
                             let _ = ev
                                 .send(DriverEvent::ToolCompleted {
                                     tool_call_id: u.tool_call_id.to_string(),
-                                    output: json!({ "status": status }),
+                                    output,
                                     is_error: status.as_deref() == Some("failed"),
                                 })
                                 .await;
@@ -366,14 +370,21 @@ async fn run_connection(
             on_receive_notification!(),
         )
         .connect_with(agent, async |cx: ConnectionTo<Agent>| {
-            let _init = cx
+            let init = cx
                 .send_request(
                     InitializeRequest::new(ProtocolVersion::V1)
                         .client_capabilities(ClientCapabilities::new())
                         .client_info(Implementation::new("kybern", env!("CARGO_PKG_VERSION"))),
                 )
                 .block_task()
-                .await?;
+                .await;
+            if let Err(e) = init {
+                let msg = format!("Grok Build failed to initialize: {e}. Run `grok login` or set XAI_API_KEY.");
+                if let Some(b) = bound.take() {
+                    let _ = b.send(Err(DriverError::Protocol(msg.clone())));
+                }
+                return Err(agent_client_protocol::Error::from(anyhow::anyhow!(msg)));
+            }
 
             // Assume already authenticated (grok login or XAI_API_KEY). Explicit auth can be added later.
             let session_id = match &config.resume_session_id {
@@ -438,6 +449,7 @@ async fn run_connection(
                                     AcpStop::EndTurn => StopReason::Completed,
                                     AcpStop::MaxTokens => StopReason::MaxTurns,
                                     AcpStop::MaxTurnRequests => StopReason::MaxTurns,
+                                    AcpStop::Cancelled => StopReason::Interrupted,
                                     _ => StopReason::Completed,
                                 };
                                 DriverEvent::TurnCompleted {

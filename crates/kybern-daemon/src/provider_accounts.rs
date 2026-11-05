@@ -21,6 +21,9 @@ pub fn validate_color(color: &str) -> Result<()> {
 pub const ANTIGRAVITY_ONE_ACCOUNT: &str =
     "Antigravity has one account per machine. Sign in from Settings → Agents → Antigravity, or use a Gemini API key.";
 
+pub const GROK_BUILD_ONE_ACCOUNT: &str =
+    "Grok Build has one account per machine. Sign in with `grok login` or set XAI_API_KEY.";
+
 /// The first color no other account of this agent uses, cycling once all are taken.
 pub fn next_color(provider: &ProviderSettings) -> String {
     let used: Vec<&str> = provider.accounts.values().filter_map(|account| account.color.as_deref()).collect();
@@ -122,8 +125,8 @@ fn build_environment(settings: &ProviderSettings, kind: ProviderKind, instance: 
         }
         // `agy` has no supported config-root override, so a second account cannot be isolated.
         ProviderKind::Antigravity => return Err(anyhow!(ANTIGRAVITY_ONE_ACCOUNT)),
-        // Grok Build uses XAI_API_KEY or grok login; named accounts not supported yet.
-        ProviderKind::GrokBuild => return Err(anyhow!("Grok Build does not support named accounts yet")),
+        // Grok Build uses XAI_API_KEY or grok login; one account per machine.
+        ProviderKind::GrokBuild => return Err(anyhow!(GROK_BUILD_ONE_ACCOUNT)),
     }
     Ok(env)
 }
@@ -131,6 +134,7 @@ fn build_environment(settings: &ProviderSettings, kind: ProviderKind, instance: 
 pub fn validate(settings: &Settings) -> Result<()> {
     for (kind, provider) in &settings.providers {
         ensure!(*kind != ProviderKind::Antigravity || provider.accounts.is_empty(), "{ANTIGRAVITY_ONE_ACCOUNT}");
+        ensure!(*kind != ProviderKind::GrokBuild || provider.accounts.is_empty(), "{GROK_BUILD_ONE_ACCOUNT}");
         for (id, account) in &provider.accounts {
             ensure!(
                 id != "default" && !id.is_empty() && id.len() <= 80 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
@@ -151,6 +155,7 @@ pub fn validate(settings: &Settings) -> Result<()> {
 
 pub fn create(state: &AppState, params: AccountsCreateParams) -> Result<ProviderInstance> {
     ensure!(params.kind != ProviderKind::Antigravity, "{ANTIGRAVITY_ONE_ACCOUNT}");
+    ensure!(params.kind != ProviderKind::GrokBuild, "{GROK_BUILD_ONE_ACCOUNT}");
     ensure!(!params.name.trim().is_empty() && params.name.len() <= 120, "Enter an account name up to 120 characters.");
     let id = uuid::Uuid::now_v7().to_string();
     let directory = match params.directory {
@@ -231,7 +236,7 @@ pub fn sign_in(state: &AppState, instance: ProviderInstance) -> Result<TerminalI
             ProviderKind::Omp => &["auth-broker", "login"],
             ProviderKind::Cursor => unreachable!(),
             ProviderKind::Antigravity => return Err(anyhow!(ANTIGRAVITY_ONE_ACCOUNT)),
-            ProviderKind::GrokBuild => return Err(anyhow!("Grok Build does not support named accounts yet")),
+            ProviderKind::GrokBuild => return Err(anyhow!(GROK_BUILD_ONE_ACCOUNT)),
         };
         std::iter::once(binary.to_string_lossy().into_owned()).chain(args.iter().map(|s| s.to_string())).collect()
     };
